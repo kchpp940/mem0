@@ -795,7 +795,7 @@ class Memory(MemoryBase):
                     "created_at": per_msg_meta.get("created_at", now),
                     "updated_at": per_msg_meta.get("updated_at", now),
                 }
-                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
                 additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
                 if additional_metadata:
                     result_item["metadata"] = additional_metadata
@@ -932,13 +932,6 @@ class Memory(MemoryBase):
             resolved_actor_id = resolved.actor_id
             mem_role = resolved.role
 
-            if resolved.source_index is not None:
-                mem_metadata["source_index"] = resolved.source_index
-            if resolved.source_name:
-                mem_metadata["source_name"] = resolved.source_name
-            if resolved.validation_reason:
-                mem_metadata["source_validation"] = resolved.validation_reason
-
             if resolved_actor_id is not None:
                 mem_metadata["actor_id"] = resolved_actor_id
             # If ambiguous, don't set actor_id - keep it None to avoid misattribution
@@ -949,7 +942,14 @@ class Memory(MemoryBase):
             if source_actors:
                 mem_metadata["source_actors"] = source_actors
 
-            records.append((memory_id, text, embed_map[text], mem_metadata, attributed_to, resolved_actor_id, mem_role))
+            # Keep provenance details only for internal history (not vector payload / public API)
+            provenance = {
+                "source_index": resolved.source_index,
+                "source_name": resolved.source_name,
+                "source_validation": resolved.validation_reason,
+            }
+
+            records.append((memory_id, text, embed_map[text], mem_metadata, attributed_to, resolved_actor_id, mem_role, provenance))
 
         if not records:
             self.db.save_messages(messages, session_scope)
@@ -986,6 +986,11 @@ class Memory(MemoryBase):
                 "is_deleted": 0,
                 "actor_id": r[3].get("actor_id"),
                 "role": r[3].get("role"),
+                # Internal provenance only (source_index/source_name/source_validation)
+                # NOT exposed in vector payload or public API return
+                "source_index": r[7].get("source_index"),
+                "source_name": r[7].get("source_name"),
+                "source_validation": r[7].get("source_validation"),
             }
             for r in records
         ]
@@ -1103,10 +1108,10 @@ class Memory(MemoryBase):
         # Phase 8: Save messages + return
         self.db.save_messages(messages, session_scope)
 
-        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
         returned_memories = []
         for r in records:
-            memory_id, text, _, payload, _, _, _ = r
+            memory_id, text, _, payload, _, _, _, _ = r
             result_item = {
                 "id": memory_id,
                 "memory": text,
@@ -2357,7 +2362,7 @@ class AsyncMemory(MemoryBase):
                     "created_at": per_msg_meta.get("created_at", now),
                     "updated_at": per_msg_meta.get("updated_at", now),
                 }
-                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
                 additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
                 if additional_metadata:
                     result_item["metadata"] = additional_metadata
@@ -2493,13 +2498,6 @@ class AsyncMemory(MemoryBase):
             resolved_actor_id = resolved.actor_id
             mem_role = resolved.role
 
-            if resolved.source_index is not None:
-                mem_metadata["source_index"] = resolved.source_index
-            if resolved.source_name:
-                mem_metadata["source_name"] = resolved.source_name
-            if resolved.validation_reason:
-                mem_metadata["source_validation"] = resolved.validation_reason
-
             if resolved_actor_id is not None:
                 mem_metadata["actor_id"] = resolved_actor_id
             # If ambiguous, don't set actor_id - keep it None to avoid misattribution
@@ -2510,7 +2508,14 @@ class AsyncMemory(MemoryBase):
             if source_actors:
                 mem_metadata["source_actors"] = source_actors
 
-            records.append((memory_id, text, embed_map[text], mem_metadata, attributed_to, resolved_actor_id, mem_role))
+            # Keep provenance details only for internal history (not vector payload / public API)
+            provenance = {
+                "source_index": resolved.source_index,
+                "source_name": resolved.source_name,
+                "source_validation": resolved.validation_reason,
+            }
+
+            records.append((memory_id, text, embed_map[text], mem_metadata, attributed_to, resolved_actor_id, mem_role, provenance))
 
         if not records:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
@@ -2547,6 +2552,11 @@ class AsyncMemory(MemoryBase):
                 "is_deleted": 0,
                 "actor_id": r[3].get("actor_id"),
                 "role": r[3].get("role"),
+                # Internal provenance only (source_index/source_name/source_validation)
+                # NOT exposed in vector payload or public API return
+                "source_index": r[7].get("source_index"),
+                "source_name": r[7].get("source_name"),
+                "source_validation": r[7].get("source_validation"),
             }
             for r in records
         ]
@@ -2663,10 +2673,10 @@ class AsyncMemory(MemoryBase):
         # Phase 8: Save messages + return
         await asyncio.to_thread(self.db.save_messages, messages, session_scope)
 
-        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
         returned_memories = []
         for r in records:
-            memory_id, text, _, payload, _, _, _ = r
+            memory_id, text, _, payload, _, _, _, _ = r
             result_item = {
                 "id": memory_id,
                 "memory": text,

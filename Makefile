@@ -29,7 +29,7 @@ lint:
 
 # Verify cross-language hybrid search schema parity
 schema-check:
-	python scripts/check-hybrid-schema-parity.py
+	PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1 python scripts/check-hybrid-schema-parity.py
 
 docs:
 	cd docs && mintlify dev

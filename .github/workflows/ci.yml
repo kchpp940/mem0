@@ -112,6 +112,9 @@ jobs:
         run: make lint
       - name: Check hybrid search schema parity (Python ↔ TypeScript)
         if: needs.check_changes.outputs.mem0_changed == 'true'
+        env:
+          PYTHONNOUSERSITE: 1
+          PYTHONDONTWRITEBYTECODE: 1
         run: make schema-check
       - name: Run tests and generate coverage report
         if: needs.check_changes.outputs.mem0_changed == 'true'

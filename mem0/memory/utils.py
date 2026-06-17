@@ -1,7 +1,8 @@
 import hashlib
 import logging
 import re
-from typing import Any, Dict, List
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
 
 from mem0.configs.prompts import (
     AGENT_MEMORY_EXTRACTION_PROMPT,
@@ -10,6 +11,74 @@ from mem0.configs.prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class NormalizedMessage:
+    """Structured representation of a validated chat message.
+
+    Used as the single source of truth across raw add (infer=False), LLM
+    extraction (infer=True), metadata merging, history persistence, and
+    return-value building so that role / name / actor_id / content stay
+    consistent through every branch.
+    """
+
+    role: Optional[str] = None
+    content: Optional[str] = None
+    name: Optional[str] = None
+    actor_id: Optional[str] = None
+    valid: bool = False
+    skip_reason: Optional[str] = None
+    original: Dict[str, Any] = field(default_factory=dict)
+
+
+def normalize_messages(messages):
+    """Validate and normalize a batch of chat messages into structured records.
+
+    Each input message is independently inspected.  Invalid entries (wrong
+    type, missing role/content, system role, no textual content) are marked
+    with ``valid=False`` and a ``skip_reason`` -- the caller can then log /
+    skip them without affecting siblings.
+
+    Returns a list of ``NormalizedMessage`` objects, one per input message.
+    """
+    normalized = []
+    for msg in messages:
+        record = NormalizedMessage()
+
+        if not isinstance(msg, dict):
+            record.skip_reason = "not a dict at all"
+            normalized.append(record)
+            continue
+
+        record.original = dict(msg)
+        role = msg.get("role")
+        content = msg.get("content")
+        name = msg.get("name")
+
+        if role is None:
+            record.skip_reason = "missing role"
+            normalized.append(record)
+            continue
+
+        if content is None:
+            record.skip_reason = "missing content"
+            normalized.append(record)
+            continue
+
+        if role == "system":
+            record.skip_reason = "system role skipped"
+            normalized.append(record)
+            continue
+
+        record.role = role
+        record.content = content
+        record.name = name
+        record.actor_id = name if name else None
+        record.valid = True
+        normalized.append(record)
+
+    return normalized
 
 
 def get_fact_retrieval_messages(message, is_agent_memory=False):
@@ -59,25 +128,73 @@ def ensure_json_instruction(system_prompt, user_prompt):
 
 
 def parse_messages(messages):
+    """Render a batch of chat messages into a single text block.
+
+    Accepts either raw message dicts or pre-normalized ``NormalizedMessage``
+    objects so both the infer=False and infer=True paths can share this.
+    Messages with a ``name`` are rendered as ``role (name): content`` so the
+    LLM can see the actor identity alongside the role.
+    """
     response = ""
     for msg in messages:
-        role = msg.get("role")
-        content = msg.get("content")
-        name = msg.get("name")
-        # Skip messages without textual content (e.g. assistant tool-call
-        # messages that carry `tool_calls` but no `content` key).
-        if content is None:
+        if isinstance(msg, NormalizedMessage):
+            if not msg.valid:
+                continue
+            role = msg.role
+            content = msg.content
+            name = msg.name
+        elif isinstance(msg, dict):
+            role = msg.get("role")
+            content = msg.get("content")
+            name = msg.get("name")
+            if content is None or role is None or role == "system":
+                continue
+        else:
             continue
-        if role == "system":
-            prefix = f"system ({name})" if name else "system"
-            response += f"{prefix}: {content}\n"
-        elif role == "user":
-            prefix = f"user ({name})" if name else "user"
-            response += f"{prefix}: {content}\n"
-        elif role == "assistant":
-            prefix = f"assistant ({name})" if name else "assistant"
-            response += f"{prefix}: {content}\n"
+
+        if name:
+            prefix = f"{role} ({name})"
+        else:
+            prefix = role
+        response += f"{prefix}: {content}\n"
     return response
+
+
+def build_actor_mapping(normalized_messages):
+    """Build a role -> actor_id map from normalized messages.
+
+    When the LLM only returns ``attributed_to: "user"`` or ``"assistant"`` we
+    can look up the real ``actor_id`` (from the original message's ``name``
+    field) using this mapping.  The first valid message per role wins, which
+    is consistent with how most chat apps treat identity within a turn.
+    """
+    mapping: Dict[str, Optional[str]] = {}
+    for nm in normalized_messages:
+        if not nm.valid:
+            continue
+        if nm.role and nm.role not in mapping:
+            mapping[nm.role] = nm.actor_id
+    return mapping
+
+
+def build_source_actor_records(normalized_messages):
+    """Return unique (role, actor_id, name) tuples from valid messages.
+
+    Stored in history payloads so the original actor attribution is fully
+    traceable even when the LLM extraction only emits a coarse ``attributed_to``
+    value.
+    """
+    seen = set()
+    records = []
+    for nm in normalized_messages:
+        if not nm.valid:
+            continue
+        key = (nm.role, nm.actor_id, nm.name)
+        if key in seen:
+            continue
+        seen.add(key)
+        records.append({"role": nm.role, "actor_id": nm.actor_id, "name": nm.name})
+    return records
 
 
 def format_entities(entities):

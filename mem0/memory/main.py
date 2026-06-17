@@ -51,7 +51,10 @@ from mem0.memory.notices import (
     get_temporal_feature_error_message_async,
 )
 from mem0.memory.utils import (
+    build_actor_mapping,
+    build_source_actor_records,
     extract_json,
+    normalize_messages,
     parse_messages,
     parse_vision_messages,
     process_telemetry_filters,
@@ -759,28 +762,25 @@ class Memory(MemoryBase):
         return {"results": vector_store_result}
 
     def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+        normalized = normalize_messages(messages)
+        for nm in normalized:
+            if not nm.valid and nm.skip_reason:
+                logger.warning(f"Skipping message: {nm.skip_reason}: {nm.original}")
+
+        valid_messages = [nm for nm in normalized if nm.valid]
+        if not valid_messages:
+            return []
+
         if not infer:
             returned_memories = []
-            for message_dict in messages:
-                if (
-                    not isinstance(message_dict, dict)
-                    or message_dict.get("role") is None
-                    or message_dict.get("content") is None
-                ):
-                    logger.warning(f"Skipping invalid message format: {message_dict}")
-                    continue
-
-                if message_dict["role"] == "system":
-                    continue
-
+            for nm in valid_messages:
                 per_msg_meta = deepcopy(metadata)
-                per_msg_meta["role"] = message_dict["role"]
+                per_msg_meta["role"] = nm.role
 
-                actor_name = message_dict.get("name")
-                if actor_name:
-                    per_msg_meta["actor_id"] = actor_name
+                if nm.actor_id:
+                    per_msg_meta["actor_id"] = nm.actor_id
 
-                msg_content = message_dict["content"]
+                msg_content = nm.content
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
                 mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
@@ -789,12 +789,12 @@ class Memory(MemoryBase):
                     "id": mem_id,
                     "memory": msg_content,
                     "event": "ADD",
-                    "actor_id": actor_name if actor_name else None,
-                    "role": message_dict["role"],
+                    "actor_id": nm.actor_id,
+                    "role": nm.role,
                     "created_at": per_msg_meta.get("created_at", now),
                     "updated_at": per_msg_meta.get("updated_at", now),
                 }
-                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
                 additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
                 if additional_metadata:
                     result_item["metadata"] = additional_metadata
@@ -803,10 +803,13 @@ class Memory(MemoryBase):
 
         # === V3 PHASED BATCH PIPELINE ===
 
+        actor_mapping = build_actor_mapping(normalized)
+        source_actors = build_source_actor_records(normalized)
+
         # Phase 0: Context gathering
         session_scope = _build_session_scope(filters)
         last_messages = self.db.get_last_messages(session_scope, limit=10)
-        parsed_messages = parse_messages(messages)
+        parsed_messages = parse_messages(normalized)
 
         # Phase 1: Existing memory retrieval
         search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
@@ -917,13 +920,25 @@ class Memory(MemoryBase):
             if "created_at" not in mem_metadata:
                 mem_metadata["created_at"] = datetime.now(timezone.utc).isoformat()
             mem_metadata["updated_at"] = mem_metadata["created_at"]
-            if mem.get("attributed_to"):
-                mem_metadata["attributed_to"] = mem["attributed_to"]
-                mem_metadata["actor_id"] = mem["attributed_to"]
-            if mem.get("role"):
-                mem_metadata["role"] = mem["role"]
 
-            records.append((memory_id, text, embed_map[text], mem_metadata))
+            attributed_to = mem.get("attributed_to")
+            if attributed_to:
+                mem_metadata["attributed_to"] = attributed_to
+                resolved_actor_id = actor_mapping.get(attributed_to, attributed_to)
+                mem_metadata["actor_id"] = resolved_actor_id
+            else:
+                resolved_actor_id = None
+
+            mem_role = mem.get("role")
+            if mem_role:
+                mem_metadata["role"] = mem_role
+            elif attributed_to and attributed_to in actor_mapping:
+                mem_metadata["role"] = attributed_to
+
+            if source_actors:
+                mem_metadata["source_actors"] = source_actors
+
+            records.append((memory_id, text, embed_map[text], mem_metadata, attributed_to, resolved_actor_id, mem_role))
 
         if not records:
             self.db.save_messages(messages, session_scope)
@@ -989,7 +1004,7 @@ class Memory(MemoryBase):
 
             # 7a: Global dedup — collect unique entities across all memories
             global_entities = {}  # normalized_key -> (entity_type, entity_text, set of memory_ids)
-            for idx, (memory_id, text, embedding, payload) in enumerate(records):
+            for idx, (memory_id, text, embedding, payload, _, _, _) in enumerate(records):
                 entities = all_entities[idx] if idx < len(all_entities) else []
                 for entity_type, entity_text in entities:
                     key = entity_text.strip().lower()
@@ -1077,10 +1092,10 @@ class Memory(MemoryBase):
         # Phase 8: Save messages + return
         self.db.save_messages(messages, session_scope)
 
-        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
         returned_memories = []
         for r in records:
-            memory_id, text, _, payload = r
+            memory_id, text, _, payload, _, _, _ = r
             result_item = {
                 "id": memory_id,
                 "memory": text,
@@ -2299,28 +2314,25 @@ class AsyncMemory(MemoryBase):
         infer: bool,
         prompt: Optional[str] = None,
     ):
+        normalized = normalize_messages(messages)
+        for nm in normalized:
+            if not nm.valid and nm.skip_reason:
+                logger.warning(f"Skipping message (async): {nm.skip_reason}: {nm.original}")
+
+        valid_messages = [nm for nm in normalized if nm.valid]
+        if not valid_messages:
+            return []
+
         if not infer:
             returned_memories = []
-            for message_dict in messages:
-                if (
-                    not isinstance(message_dict, dict)
-                    or message_dict.get("role") is None
-                    or message_dict.get("content") is None
-                ):
-                    logger.warning(f"Skipping invalid message format (async): {message_dict}")
-                    continue
-
-                if message_dict["role"] == "system":
-                    continue
-
+            for nm in valid_messages:
                 per_msg_meta = deepcopy(metadata)
-                per_msg_meta["role"] = message_dict["role"]
+                per_msg_meta["role"] = nm.role
 
-                actor_name = message_dict.get("name")
-                if actor_name:
-                    per_msg_meta["actor_id"] = actor_name
+                if nm.actor_id:
+                    per_msg_meta["actor_id"] = nm.actor_id
 
-                msg_content = message_dict["content"]
+                msg_content = nm.content
                 msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
                 mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
@@ -2329,12 +2341,12 @@ class AsyncMemory(MemoryBase):
                     "id": mem_id,
                     "memory": msg_content,
                     "event": "ADD",
-                    "actor_id": actor_name if actor_name else None,
-                    "role": message_dict["role"],
+                    "actor_id": nm.actor_id,
+                    "role": nm.role,
                     "created_at": per_msg_meta.get("created_at", now),
                     "updated_at": per_msg_meta.get("updated_at", now),
                 }
-                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
                 additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
                 if additional_metadata:
                     result_item["metadata"] = additional_metadata
@@ -2343,10 +2355,13 @@ class AsyncMemory(MemoryBase):
 
         # === V3 PHASED BATCH PIPELINE (async) ===
 
+        actor_mapping = build_actor_mapping(normalized)
+        source_actors = build_source_actor_records(normalized)
+
         # Phase 0: Context gathering
         session_scope = _build_session_scope(effective_filters)
         last_messages = await asyncio.to_thread(self.db.get_last_messages, session_scope, 10)
-        parsed_messages = parse_messages(messages)
+        parsed_messages = parse_messages(normalized)
 
         # Phase 1: Existing memory retrieval
         search_filters = {k: v for k, v in effective_filters.items() if k in ("user_id", "agent_id", "run_id") and v}
@@ -2456,13 +2471,25 @@ class AsyncMemory(MemoryBase):
             if "created_at" not in mem_metadata:
                 mem_metadata["created_at"] = datetime.now(timezone.utc).isoformat()
             mem_metadata["updated_at"] = mem_metadata["created_at"]
-            if mem.get("attributed_to"):
-                mem_metadata["attributed_to"] = mem["attributed_to"]
-                mem_metadata["actor_id"] = mem["attributed_to"]
-            if mem.get("role"):
-                mem_metadata["role"] = mem["role"]
 
-            records.append((memory_id, text, embed_map[text], mem_metadata))
+            attributed_to = mem.get("attributed_to")
+            if attributed_to:
+                mem_metadata["attributed_to"] = attributed_to
+                resolved_actor_id = actor_mapping.get(attributed_to, attributed_to)
+                mem_metadata["actor_id"] = resolved_actor_id
+            else:
+                resolved_actor_id = None
+
+            mem_role = mem.get("role")
+            if mem_role:
+                mem_metadata["role"] = mem_role
+            elif attributed_to and attributed_to in actor_mapping:
+                mem_metadata["role"] = attributed_to
+
+            if source_actors:
+                mem_metadata["source_actors"] = source_actors
+
+            records.append((memory_id, text, embed_map[text], mem_metadata, attributed_to, resolved_actor_id, mem_role))
 
         if not records:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
@@ -2528,7 +2555,7 @@ class AsyncMemory(MemoryBase):
 
             # 7a: Global dedup
             global_entities = {}
-            for idx, (memory_id, text, embedding, payload) in enumerate(records):
+            for idx, (memory_id, text, embedding, payload, _, _, _) in enumerate(records):
                 entities = all_entities[idx] if idx < len(all_entities) else []
                 for entity_type, entity_text in entities:
                     key = entity_text.strip().lower()
@@ -2615,10 +2642,10 @@ class AsyncMemory(MemoryBase):
         # Phase 8: Save messages + return
         await asyncio.to_thread(self.db.save_messages, messages, session_scope)
 
-        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
         returned_memories = []
         for r in records:
-            memory_id, text, _, payload = r
+            memory_id, text, _, payload, _, _, _ = r
             result_item = {
                 "id": memory_id,
                 "memory": text,

@@ -1,6 +1,9 @@
 import { OpenAILLM } from "../llms/openai";
+import type { Candidate, PoolStatus } from "../types";
 import { Message } from "../types";
-import type { PoolStatus } from "../types";
+
+/** Re-export so existing imports from this module keep working. */
+export type { Candidate };
 
 const get_image_description = async (image_url: string) => {
   const llm = new OpenAILLM({
@@ -69,13 +72,6 @@ function _getScore(mem: any): number {
   const s = mem.score;
   if (typeof s === "number") return s;
   return 0.0;
-}
-
-export interface Candidate {
-  id: string;
-  score: number;
-  payload: Record<string, any>;
-  sources: string[];
 }
 
 export function buildCandidatePool(

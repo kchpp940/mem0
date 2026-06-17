@@ -106,6 +106,8 @@ export interface SearchResult {
  * Field names use snake_case for cross-language consistency with the
  * Python SDK.  The authoritative definitions live in
  * mem0/utils/hybrid_search_schema.py; these interfaces MUST stay in sync.
+ *
+ * Run `python scripts/check-hybrid-schema-parity.py` to verify parity.
  */
 
 export interface PoolStatus {
@@ -126,6 +128,13 @@ export interface ScoreDetails {
   threshold: number;
   sources: string[];
   pool_status?: PoolStatus;
+}
+
+export interface Candidate {
+  id: string;
+  score: number;
+  payload: Record<string, any>;
+  sources: string[];
 }
 
 /** Bump when any hybrid search field is added, renamed, or has semantics changed. */

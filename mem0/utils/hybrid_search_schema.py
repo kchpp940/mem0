@@ -28,7 +28,7 @@ from typing import List, Optional, TypedDict
 SCHEMA_VERSION: int = 1
 
 
-class PoolStatusSchema(TypedDict, total=False):
+class PoolStatusSchema(TypedDict):
     """Status of each retrieval lane in the candidate pool.
 
     Fields
@@ -43,7 +43,7 @@ class PoolStatusSchema(TypedDict, total=False):
         True when the semantic lane failed but keyword/entity lanes
         still returned results.  Callers should treat these results
         as degraded — they lack semantic ranking.
-    degradation_reason : str or None
+    degradation_reason : str | None
         Human-readable reason when ``degraded`` is True.
     """
 
@@ -54,7 +54,7 @@ class PoolStatusSchema(TypedDict, total=False):
     degradation_reason: Optional[str]
 
 
-class ScoreDetailsSchema(TypedDict, total=False):
+class ScoreDetailsSchema(TypedDict):
     """Per-result scoring breakdown, attached when ``explain=True``.
 
     Fields
@@ -76,8 +76,10 @@ class ScoreDetailsSchema(TypedDict, total=False):
     sources : list[str]
         Which retrieval lanes contributed to this candidate.
         Possible values: ``"semantic"``, ``"keyword"``, ``"entity"``.
-    pool_status : PoolStatusSchema
+    pool_status : PoolStatusSchema | None
         Full pool status snapshot (same for all results in one search call).
+        None when the caller did not request explain or pool status was
+        not tracked for that call.
     """
 
     semantic_score: float
@@ -88,10 +90,10 @@ class ScoreDetailsSchema(TypedDict, total=False):
     final_score: float
     threshold: float
     sources: List[str]
-    pool_status: PoolStatusSchema
+    pool_status: Optional[PoolStatusSchema]
 
 
-class CandidateSchema(TypedDict, total=False):
+class CandidateSchema(TypedDict):
     """Internal candidate produced by ``build_candidate_pool``.
 
     Fields
@@ -113,7 +115,7 @@ class CandidateSchema(TypedDict, total=False):
     sources: List[str]
 
 
-class SearchResultItemSchema(TypedDict, total=False):
+class SearchResultItemSchema(TypedDict):
     """A single result returned by ``search()``.
 
     This is the **canonical** shape of a search result item.  Both the
@@ -126,27 +128,26 @@ class SearchResultItemSchema(TypedDict, total=False):
         Memory ID.
     memory : str
         The memory text.
-    hash : str or None
+    hash : str | None
         Content hash.
-    created_at : str or None
+    created_at : str | None
         ISO timestamp when the memory was created.
-    updated_at : str or None
+    updated_at : str | None
         ISO timestamp when the memory was last updated.
     score : float
         Final combined score in [0, 1].
-    metadata : dict or None
+    metadata : dict | None
         Additional key-value pairs from the payload.
-    score_details : ScoreDetailsSchema or None
+    score_details : ScoreDetailsSchema | None
         Present when ``explain=True``.
-    degraded_from_hybrid : bool
+    degraded_from_hybrid : bool | None
         Present and True when the search result came from a degraded
-        pool (semantic lane failed).  Allows callers to distinguish
-        between normal hybrid results and fallback results.
-    user_id : str
+        pool (semantic lane failed).  None / absent in normal hybrid results.
+    user_id : str | None
         Propagated from payload when present.
-    agent_id : str
+    agent_id : str | None
         Propagated from payload when present.
-    run_id : str
+    run_id : str | None
         Propagated from payload when present.
     """
 
@@ -155,10 +156,10 @@ class SearchResultItemSchema(TypedDict, total=False):
     hash: Optional[str]
     created_at: Optional[str]
     updated_at: Optional[str]
-    score: float
+    score: Optional[float]
     metadata: Optional[dict]
-    score_details: ScoreDetailsSchema
-    degraded_from_hybrid: bool
-    user_id: str
-    agent_id: str
-    run_id: str
+    score_details: Optional[ScoreDetailsSchema]
+    degraded_from_hybrid: Optional[bool]
+    user_id: Optional[str]
+    agent_id: Optional[str]
+    run_id: Optional[str]

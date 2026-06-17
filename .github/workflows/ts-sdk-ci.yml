@@ -89,6 +89,10 @@ jobs:
         working-directory: mem0-ts
         run: npx prettier --check .
 
+      - name: Check hybrid search schema parity (Python ↔ TypeScript)
+        working-directory: .
+        run: python scripts/check-hybrid-schema-parity.py
+
       - name: Build
         working-directory: mem0-ts
         run: pnpm run build

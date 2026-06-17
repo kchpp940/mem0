@@ -1,11 +1,11 @@
-.PHONY: format sort lint
+.PHONY: format sort lint schema-check
 
 # Variables
 ISORT_OPTIONS = --profile black
 PROJECT_NAME := mem0ai
 
 # Default target
-all: format sort lint
+all: format sort lint schema-check
 
 install:
 	hatch env create
@@ -26,6 +26,10 @@ sort:
 # Lint code with ruff
 lint:
 	hatch run lint
+
+# Verify cross-language hybrid search schema parity
+schema-check:
+	python scripts/check-hybrid-schema-parity.py
 
 docs:
 	cd docs && mintlify dev

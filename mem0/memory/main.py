@@ -784,15 +784,21 @@ class Memory(MemoryBase):
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
                 mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
-                returned_memories.append(
-                    {
-                        "id": mem_id,
-                        "memory": msg_content,
-                        "event": "ADD",
-                        "actor_id": actor_name if actor_name else None,
-                        "role": message_dict["role"],
-                    }
-                )
+                now = datetime.now(timezone.utc).isoformat()
+                result_item = {
+                    "id": mem_id,
+                    "memory": msg_content,
+                    "event": "ADD",
+                    "actor_id": actor_name if actor_name else None,
+                    "role": message_dict["role"],
+                    "created_at": per_msg_meta.get("created_at", now),
+                    "updated_at": per_msg_meta.get("updated_at", now),
+                }
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+                additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
+                if additional_metadata:
+                    result_item["metadata"] = additional_metadata
+                returned_memories.append(result_item)
             return returned_memories
 
         # === V3 PHASED BATCH PIPELINE ===
@@ -913,6 +919,9 @@ class Memory(MemoryBase):
             mem_metadata["updated_at"] = mem_metadata["created_at"]
             if mem.get("attributed_to"):
                 mem_metadata["attributed_to"] = mem["attributed_to"]
+                mem_metadata["actor_id"] = mem["attributed_to"]
+            if mem.get("role"):
+                mem_metadata["role"] = mem["role"]
 
             records.append((memory_id, text, embed_map[text], mem_metadata))
 
@@ -947,7 +956,10 @@ class Memory(MemoryBase):
                 "new_memory": r[1],
                 "event": "ADD",
                 "created_at": r[3].get("created_at"),
+                "updated_at": r[3].get("updated_at"),
                 "is_deleted": 0,
+                "actor_id": r[3].get("actor_id"),
+                "role": r[3].get("role"),
             }
             for r in records
         ]
@@ -957,7 +969,16 @@ class Memory(MemoryBase):
             # Fallback: add one by one
             for hr in history_records:
                 try:
-                    self.db.add_history(hr["memory_id"], None, hr["new_memory"], "ADD", created_at=hr.get("created_at"))
+                    self.db.add_history(
+                        hr["memory_id"],
+                        None,
+                        hr["new_memory"],
+                        "ADD",
+                        created_at=hr.get("created_at"),
+                        updated_at=hr.get("updated_at"),
+                        actor_id=hr.get("actor_id"),
+                        role=hr.get("role"),
+                    )
                 except Exception as e:
                     logger.error(f"Failed to add history for {hr['memory_id']}: {e}")
 
@@ -1056,10 +1077,23 @@ class Memory(MemoryBase):
         # Phase 8: Save messages + return
         self.db.save_messages(messages, session_scope)
 
-        returned_memories = [
-            {"id": r[0], "memory": r[1], "event": "ADD"}
-            for r in records
-        ]
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+        returned_memories = []
+        for r in records:
+            memory_id, text, _, payload = r
+            result_item = {
+                "id": memory_id,
+                "memory": text,
+                "event": "ADD",
+                "actor_id": payload.get("actor_id"),
+                "role": payload.get("role"),
+                "created_at": payload.get("created_at"),
+                "updated_at": payload.get("updated_at"),
+            }
+            additional_metadata = {k: v for k, v in payload.items() if k not in promoted_payload_keys}
+            if additional_metadata:
+                result_item["metadata"] = additional_metadata
+            returned_memories.append(result_item)
 
         keys, encoded_ids = process_telemetry_filters(filters)
         capture_event(
@@ -2290,15 +2324,21 @@ class AsyncMemory(MemoryBase):
                 msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
                 mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
-                returned_memories.append(
-                    {
-                        "id": mem_id,
-                        "memory": msg_content,
-                        "event": "ADD",
-                        "actor_id": actor_name if actor_name else None,
-                        "role": message_dict["role"],
-                    }
-                )
+                now = datetime.now(timezone.utc).isoformat()
+                result_item = {
+                    "id": mem_id,
+                    "memory": msg_content,
+                    "event": "ADD",
+                    "actor_id": actor_name if actor_name else None,
+                    "role": message_dict["role"],
+                    "created_at": per_msg_meta.get("created_at", now),
+                    "updated_at": per_msg_meta.get("updated_at", now),
+                }
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+                additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
+                if additional_metadata:
+                    result_item["metadata"] = additional_metadata
+                returned_memories.append(result_item)
             return returned_memories
 
         # === V3 PHASED BATCH PIPELINE (async) ===
@@ -2418,6 +2458,9 @@ class AsyncMemory(MemoryBase):
             mem_metadata["updated_at"] = mem_metadata["created_at"]
             if mem.get("attributed_to"):
                 mem_metadata["attributed_to"] = mem["attributed_to"]
+                mem_metadata["actor_id"] = mem["attributed_to"]
+            if mem.get("role"):
+                mem_metadata["role"] = mem["role"]
 
             records.append((memory_id, text, embed_map[text], mem_metadata))
 
@@ -2452,7 +2495,10 @@ class AsyncMemory(MemoryBase):
                 "new_memory": r[1],
                 "event": "ADD",
                 "created_at": r[3].get("created_at"),
+                "updated_at": r[3].get("updated_at"),
                 "is_deleted": 0,
+                "actor_id": r[3].get("actor_id"),
+                "role": r[3].get("role"),
             }
             for r in records
         ]
@@ -2462,8 +2508,15 @@ class AsyncMemory(MemoryBase):
             for hr in history_records:
                 try:
                     await asyncio.to_thread(
-                        self.db.add_history, hr["memory_id"], None, hr["new_memory"], "ADD",
-                        created_at=hr.get("created_at")
+                        self.db.add_history,
+                        hr["memory_id"],
+                        None,
+                        hr["new_memory"],
+                        "ADD",
+                        created_at=hr.get("created_at"),
+                        updated_at=hr.get("updated_at"),
+                        actor_id=hr.get("actor_id"),
+                        role=hr.get("role"),
                     )
                 except Exception as e:
                     logger.error(f"Failed to add history for {hr['memory_id']} (async): {e}")
@@ -2562,10 +2615,23 @@ class AsyncMemory(MemoryBase):
         # Phase 8: Save messages + return
         await asyncio.to_thread(self.db.save_messages, messages, session_scope)
 
-        returned_memories = [
-            {"id": r[0], "memory": r[1], "event": "ADD"}
-            for r in records
-        ]
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to"}
+        returned_memories = []
+        for r in records:
+            memory_id, text, _, payload = r
+            result_item = {
+                "id": memory_id,
+                "memory": text,
+                "event": "ADD",
+                "actor_id": payload.get("actor_id"),
+                "role": payload.get("role"),
+                "created_at": payload.get("created_at"),
+                "updated_at": payload.get("updated_at"),
+            }
+            additional_metadata = {k: v for k, v in payload.items() if k not in promoted_payload_keys}
+            if additional_metadata:
+                result_item["metadata"] = additional_metadata
+            returned_memories.append(result_item)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
         capture_event(

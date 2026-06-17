@@ -63,16 +63,20 @@ def parse_messages(messages):
     for msg in messages:
         role = msg.get("role")
         content = msg.get("content")
+        name = msg.get("name")
         # Skip messages without textual content (e.g. assistant tool-call
         # messages that carry `tool_calls` but no `content` key).
         if content is None:
             continue
         if role == "system":
-            response += f"system: {content}\n"
+            prefix = f"system ({name})" if name else "system"
+            response += f"{prefix}: {content}\n"
         elif role == "user":
-            response += f"user: {content}\n"
+            prefix = f"user ({name})" if name else "user"
+            response += f"{prefix}: {content}\n"
         elif role == "assistant":
-            response += f"assistant: {content}\n"
+            prefix = f"assistant ({name})" if name else "assistant"
+            response += f"{prefix}: {content}\n"
     return response
 
 

@@ -5,35 +5,24 @@
  * - BM25 normalization: Sigmoid normalization of raw BM25 scores to [0, 1].
  * - BM25 parameter selection: Query-length-adaptive sigmoid parameters.
  * - Additive scoring: Combined scoring with semantic + BM25 + entity boost.
+ *
+ * Field names use snake_case for cross-language consistency with the
+ * Python SDK.  The authoritative definitions live in
+ * mem0/utils/hybrid_search_schema.py; these interfaces MUST stay in sync.
  */
 
+import type { PoolStatus, ScoreDetails } from "../types";
+
+export { SCHEMA_VERSION } from "../types";
+export type { PoolStatus, ScoreDetails };
+
 export const ENTITY_BOOST_WEIGHT = 0.5;
-
-export interface PoolStatus {
-  semantic_ok: boolean;
-  keyword_ok: boolean;
-  entity_ok: boolean;
-  degraded: boolean;
-  degradation_reason?: string;
-}
-
-export interface ScoreDetails {
-  semanticScore: number;
-  bm25Score: number;
-  entityBoost: number;
-  rawScore: number;
-  maxPossibleScore: number;
-  finalScore: number;
-  threshold: number;
-  sources: string[];
-  pool_status?: PoolStatus;
-}
 
 export interface ScoredResult {
   id: string;
   score: number;
   payload: Record<string, any>;
-  scoreDetails?: ScoreDetails;
+  score_details?: ScoreDetails;
   degraded_from_hybrid?: boolean;
 }
 
@@ -84,60 +73,32 @@ export function normalizeBm25(
   return 1.0 / (1.0 + Math.exp(-steepness * (rawScore - midpoint)));
 }
 
-export interface ScoreDetails {
-  semanticScore: number;
-  bm25Score: number;
-  entityBoost: number;
-  rawScore: number;
-  maxPossibleScore: number;
-  finalScore: number;
-  threshold: number;
-}
-
-export interface ScoredResult {
-  id: string;
-  score: number;
-  payload: Record<string, any>;
-  scoreDetails?: ScoreDetails;
-  degraded_from_hybrid?: boolean;
-}
-
 /**
  * Score candidates additively and return top-k results.
  *
  * The candidate pool is the union of semantic, keyword, and entity-linked
  * memories.  A candidate that was only found via keyword or entity boost
- * (no semantic hit) has semanticScore = 0.
+ * (no semantic hit) has semantic_score = 0.
  *
  * Threshold gating:
  *   - Candidates with a semantic score pass if semantic >= threshold.
  *   - Candidates *without* a meaningful semantic score (pure keyword or
  *     pure entity) pass if they have at least one non-semantic signal
- *     (bm25 > 0 or entityBoost > 0).  This prevents purely semantic
- *     low-quality hits from leaking through while allowing keyword /
- *     entity-only matches to participate in ranking.
+ *     (bm25 > 0 or entity_boost > 0).
  *
  * Combined score:
- *   combined = (semantic + bm25 + entityBoost) / maxPossible
+ *   combined = (semantic + bm25 + entity_boost) / max_possible
  *
- * The divisor adapts based on which signals are active for each candidate:
- *   - Semantic only: maxPossible = 1.0
- *   - Semantic + BM25: maxPossible = 2.0
- *   - Semantic + BM25 + entity: maxPossible = 2.5
- *   - Semantic + entity (no BM25): maxPossible = 1.5
- *   - BM25 only (no semantic): maxPossible = 1.0
- *   - Entity only (no semantic): maxPossible = ENTITY_BOOST_WEIGHT
+ * The divisor adapts based on which signals are active for each candidate.
  *
  * @param candidates - Unified candidate pool (semantic + keyword + entity).
- *   Each must have "id", and may have "score" (semantic), "payload",
- *   and "sources".
  * @param bm25Scores - Map of memory ID to normalized BM25 score.
  * @param entityBoosts - Map of memory ID to entity boost score.
  * @param threshold - Minimum semantic score for semantic-only candidates.
  * @param topK - Maximum number of results to return.
- * @param explain - Include scoreDetails in each result when true.
+ * @param explain - Include score_details in each result when true.
  * @param poolStatus - Optional pool status that, if provided with
- *   explain=true, will be attached to each result's scoreDetails.
+ *   explain=true, will be attached to each result's score_details.
  * @returns Sorted list of scored results, highest score first.
  */
 export function scoreAndRank(
@@ -205,20 +166,20 @@ export function scoreAndRank(
       payload: result.payload,
     };
     if (explain) {
-      const scoreDetails: ScoreDetails = {
-        semanticScore,
-        bm25Score,
-        entityBoost,
-        rawScore: rawCombined,
-        maxPossibleScore: activeMax,
-        finalScore: combined,
+      const details: ScoreDetails = {
+        semantic_score: semanticScore,
+        bm25_score: bm25Score,
+        entity_boost: entityBoost,
+        raw_score: rawCombined,
+        max_possible_score: activeMax,
+        final_score: combined,
         threshold,
         sources,
       };
       if (poolStatus) {
-        scoreDetails.pool_status = poolStatus;
+        details.pool_status = poolStatus;
       }
-      entry.scoreDetails = scoreDetails;
+      entry.score_details = details;
       if (poolStatus?.degraded) {
         entry.degraded_from_hybrid = true;
       }

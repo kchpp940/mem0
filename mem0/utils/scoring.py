@@ -5,38 +5,32 @@ Provides:
 - **BM25 normalization**: Sigmoid normalization of raw BM25 scores to [0, 1].
 - **BM25 parameter selection**: Query-length-adaptive sigmoid parameters.
 - **Additive scoring**: Combined scoring with semantic + BM25 + entity boost.
+
+The field names and types for ``PoolStatus``, ``ScoreDetails``, and
+``CandidateSchema`` are defined in :pymod:`mem0.utils.hybrid_search_schema`
+which is the single source of truth shared with the TypeScript SDK.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Dict, List, Optional
 
+from mem0.utils.hybrid_search_schema import (
+    PoolStatusSchema as PoolStatus,
+    ScoreDetailsSchema as ScoreDetails,
+    SCHEMA_VERSION,
+)
 
-class PoolStatus(TypedDict, total=False):
-    """Status of each retrieval lane in the candidate pool.
-
-    Tracks which lanes succeeded/failed and whether the final result
-    was degraded from the expected full hybrid pipeline.
-    """
-
-    semantic_ok: bool
-    keyword_ok: bool
-    entity_ok: bool
-    degraded: bool
-    degradation_reason: Optional[str]
-
-
-class ScoreDetails(TypedDict, total=False):
-    semantic_score: float
-    bm25_score: float
-    entity_boost: float
-    raw_score: float
-    max_possible_score: float
-    final_score: float
-    threshold: float
-    sources: List[str]
-    pool_status: PoolStatus
+__all__ = [
+    "ENTITY_BOOST_WEIGHT",
+    "SCHEMA_VERSION",
+    "PoolStatus",
+    "ScoreDetails",
+    "get_bm25_params",
+    "normalize_bm25",
+    "score_and_rank",
+]
 
 
 def get_bm25_params(query: str, *, lemmatized: Optional[str] = None) -> tuple:

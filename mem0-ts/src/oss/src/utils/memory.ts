@@ -1,6 +1,6 @@
 import { OpenAILLM } from "../llms/openai";
 import { Message } from "../types";
-import { PoolStatus } from "./scoring";
+import type { PoolStatus } from "../types";
 
 const get_image_description = async (image_url: string) => {
   const llm = new OpenAILLM({

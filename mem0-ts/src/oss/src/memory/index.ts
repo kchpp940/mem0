@@ -1447,11 +1447,11 @@ export class Memory {
       "attributedTo",
     ]);
 
-    const results = scoredResults
+    const results: MemoryItem[] = scoredResults
       .filter((scored) => scored.payload?.data)
       .map((scored) => {
         const payload = scored.payload || {};
-        const result: Record<string, any> = {
+        const item: MemoryItem = {
           id: scored.id,
           memory: payload.data,
           hash: payload.hash,
@@ -1464,16 +1464,18 @@ export class Memory {
           ...(payload.user_id && { user_id: payload.user_id }),
           ...(payload.agent_id && { agent_id: payload.agent_id }),
           ...(payload.run_id && { run_id: payload.run_id }),
-          ...(scored.scoreDetails && { score_details: scored.scoreDetails }),
         };
+        if (scored.score_details) {
+          item.score_details = scored.score_details;
+        }
         if (explain && poolStatus.degraded) {
-          result.metadata = result.metadata || {};
-          result.metadata.degraded_from_hybrid = true;
+          item.metadata = item.metadata || {};
+          item.metadata.degraded_from_hybrid = true;
         }
         if (scored.degraded_from_hybrid) {
-          result.degraded_from_hybrid = true;
+          item.degraded_from_hybrid = true;
         }
-        return result;
+        return item;
       });
 
     const result = {

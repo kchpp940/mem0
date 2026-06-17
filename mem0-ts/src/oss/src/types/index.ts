@@ -82,6 +82,11 @@ export interface MemoryItem {
   updatedAt?: string;
   score?: number;
   metadata?: Record<string, any>;
+  score_details?: ScoreDetails;
+  degraded_from_hybrid?: boolean;
+  user_id?: string;
+  agent_id?: string;
+  run_id?: string;
 }
 
 export interface SearchFilters {
@@ -94,6 +99,37 @@ export interface SearchFilters {
 export interface SearchResult {
   results: MemoryItem[];
 }
+
+/**
+ * Canonical hybrid search schema — authoritative field contract.
+ *
+ * Field names use snake_case for cross-language consistency with the
+ * Python SDK.  The authoritative definitions live in
+ * mem0/utils/hybrid_search_schema.py; these interfaces MUST stay in sync.
+ */
+
+export interface PoolStatus {
+  semantic_ok: boolean;
+  keyword_ok: boolean;
+  entity_ok: boolean;
+  degraded: boolean;
+  degradation_reason?: string;
+}
+
+export interface ScoreDetails {
+  semantic_score: number;
+  bm25_score: number;
+  entity_boost: number;
+  raw_score: number;
+  max_possible_score: number;
+  final_score: number;
+  threshold: number;
+  sources: string[];
+  pool_status?: PoolStatus;
+}
+
+/** Bump when any hybrid search field is added, renamed, or has semantics changed. */
+export const SCHEMA_VERSION = 1;
 
 export interface VectorStoreResult {
   id: string;

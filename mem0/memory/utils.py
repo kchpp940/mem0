@@ -8,7 +8,9 @@ from mem0.configs.prompts import (
     FACT_RETRIEVAL_PROMPT,
     USER_MEMORY_EXTRACTION_PROMPT,
 )
-from mem0.utils.scoring import PoolStatus
+from mem0.utils.hybrid_search_schema import (
+    PoolStatusSchema as PoolStatus,
+)
 
 logger = logging.getLogger(__name__)
 

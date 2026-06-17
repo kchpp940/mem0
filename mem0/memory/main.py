@@ -51,7 +51,7 @@ from mem0.memory.notices import (
     get_temporal_feature_error_message_async,
 )
 from mem0.memory.utils import (
-    build_actor_mapping,
+    build_actor_index,
     build_source_actor_records,
     extract_json,
     normalize_messages,
@@ -59,6 +59,7 @@ from mem0.memory.utils import (
     parse_vision_messages,
     process_telemetry_filters,
     remove_code_blocks,
+    resolve_actor,
 )
 from mem0.utils.entity_extraction import extract_entities, extract_entities_batch
 from mem0.utils.factory import (
@@ -803,7 +804,7 @@ class Memory(MemoryBase):
 
         # === V3 PHASED BATCH PIPELINE ===
 
-        actor_mapping = build_actor_mapping(normalized)
+        actor_index = build_actor_index(normalized)
         source_actors = build_source_actor_records(normalized)
 
         # Phase 0: Context gathering
@@ -924,16 +925,16 @@ class Memory(MemoryBase):
             attributed_to = mem.get("attributed_to")
             if attributed_to:
                 mem_metadata["attributed_to"] = attributed_to
-                resolved_actor_id = actor_mapping.get(attributed_to, attributed_to)
-                mem_metadata["actor_id"] = resolved_actor_id
-            else:
-                resolved_actor_id = None
 
-            mem_role = mem.get("role")
+            # Use multi-actor resolution instead of simple role->actor_id mapping
+            resolved_actor_id, mem_role, match_reason = resolve_actor(mem, actor_index)
+
+            if resolved_actor_id is not None:
+                mem_metadata["actor_id"] = resolved_actor_id
+            # If ambiguous, don't set actor_id - keep it None to avoid misattribution
+
             if mem_role:
                 mem_metadata["role"] = mem_role
-            elif attributed_to and attributed_to in actor_mapping:
-                mem_metadata["role"] = attributed_to
 
             if source_actors:
                 mem_metadata["source_actors"] = source_actors
@@ -2355,7 +2356,7 @@ class AsyncMemory(MemoryBase):
 
         # === V3 PHASED BATCH PIPELINE (async) ===
 
-        actor_mapping = build_actor_mapping(normalized)
+        actor_index = build_actor_index(normalized)
         source_actors = build_source_actor_records(normalized)
 
         # Phase 0: Context gathering
@@ -2475,16 +2476,16 @@ class AsyncMemory(MemoryBase):
             attributed_to = mem.get("attributed_to")
             if attributed_to:
                 mem_metadata["attributed_to"] = attributed_to
-                resolved_actor_id = actor_mapping.get(attributed_to, attributed_to)
-                mem_metadata["actor_id"] = resolved_actor_id
-            else:
-                resolved_actor_id = None
 
-            mem_role = mem.get("role")
+            # Use multi-actor resolution instead of simple role->actor_id mapping
+            resolved_actor_id, mem_role, match_reason = resolve_actor(mem, actor_index)
+
+            if resolved_actor_id is not None:
+                mem_metadata["actor_id"] = resolved_actor_id
+            # If ambiguous, don't set actor_id - keep it None to avoid misattribution
+
             if mem_role:
                 mem_metadata["role"] = mem_role
-            elif attributed_to and attributed_to in actor_mapping:
-                mem_metadata["role"] = attributed_to
 
             if source_actors:
                 mem_metadata["source_actors"] = source_actors

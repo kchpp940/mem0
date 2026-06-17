@@ -2,7 +2,7 @@ import hashlib
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from mem0.configs.prompts import (
     AGENT_MEMORY_EXTRACTION_PROMPT,
@@ -195,6 +195,145 @@ def build_source_actor_records(normalized_messages):
         seen.add(key)
         records.append({"role": nm.role, "actor_id": nm.actor_id, "name": nm.name})
     return records
+
+
+@dataclass
+class ActorIndexEntry:
+    """A single message's actor context, used for resolving extraction attributions."""
+
+    index: int
+    role: str
+    name: Optional[str]
+    actor_id: Optional[str]
+    content: str
+    content_lower: str = field(init=False)
+
+    def __post_init__(self):
+        self.content_lower = (self.content or "").lower()
+
+
+@dataclass
+class ActorIndex:
+    """Index of all valid messages for multi-actor attribution resolution.
+
+    Preserves the full list of messages in original order, with side indexes
+    for fast lookups by role and by name.  Used by :func:`resolve_actor` to
+    map LLM-extracted facts back to specific source messages rather than
+    assuming one actor per role.
+    """
+
+    entries: List[ActorIndexEntry] = field(default_factory=list)
+    by_role: Dict[str, List[ActorIndexEntry]] = field(default_factory=dict)
+    by_name: Dict[str, List[ActorIndexEntry]] = field(default_factory=dict)
+
+    def unique_actors_for_role(self, role: str) -> List[Optional[str]]:
+        """Return distinct actor_ids for a given role (preserves None if present)."""
+        seen = set()
+        result = []
+        for entry in self.by_role.get(role, []):
+            if entry.actor_id not in seen:
+                seen.add(entry.actor_id)
+                result.append(entry.actor_id)
+        return result
+
+
+def build_actor_index(normalized_messages: List[NormalizedMessage]) -> ActorIndex:
+    """Build an ActorIndex from normalized messages for multi-actor resolution.
+
+    Only valid messages are indexed.  The index preserves original message
+    order and builds side lookup tables by role and by name.
+    """
+    index = ActorIndex()
+    for idx, nm in enumerate(normalized_messages):
+        if not nm.valid or not nm.role or not nm.content:
+            continue
+        entry = ActorIndexEntry(
+            index=idx,
+            role=nm.role,
+            name=nm.name,
+            actor_id=nm.actor_id,
+            content=nm.content,
+        )
+        index.entries.append(entry)
+        index.by_role.setdefault(nm.role, []).append(entry)
+        if nm.name:
+            index.by_name.setdefault(nm.name, []).append(entry)
+    return index
+
+
+def resolve_actor(
+    extracted_memory: Dict[str, Any],
+    actor_index: ActorIndex,
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Resolve actor_id and role for an LLM-extracted memory.
+
+    Matches in priority order:
+
+    1. **Exact name match**: if the extraction includes ``name`` and there is
+       exactly one unique actor_id for that name, return it.
+    2. **Content binding**: if the extracted ``text`` is clearly derived from
+       a specific message (the message content is a substring of the memory,
+       or vice versa, ignoring case), use that message's actor.
+    3. **Unique role match**: if the extraction includes ``attributed_to`` and
+       there is exactly one unique actor_id for that role across all messages,
+       return it.
+    4. **Ambiguous**: if none of the above produce a unique match, return
+       ``(None, role, None)`` so the caller can still store the coarse role
+       and source_actors without guessing the wrong actor_id.
+
+    Args:
+        extracted_memory: The LLM-extracted memory dict (keys: text, attributed_to, name, role).
+        actor_index: The ActorIndex built from the original normalized messages.
+
+    Returns:
+        Tuple of ``(actor_id, role, match_reason)`` where ``match_reason`` is
+        a short string describing which rule fired, or ``None`` if ambiguous.
+    """
+    mem_text = (extracted_memory.get("text") or "").lower()
+    mem_name = extracted_memory.get("name")
+    mem_attributed_to = extracted_memory.get("attributed_to")
+    mem_role = extracted_memory.get("role") or mem_attributed_to
+
+    # ---- Priority 1: exact name match ---------------------------------------
+    if mem_name:
+        name_entries = actor_index.by_name.get(mem_name, [])
+        unique_actors = list({e.actor_id for e in name_entries})
+        if len(unique_actors) == 1 and unique_actors[0] is not None:
+            # Resolve role from the entry as well
+            entry_role = name_entries[0].role
+            return unique_actors[0], entry_role, "name_match"
+        if len(unique_actors) > 1:
+            # Same name but different actor_ids - ambiguous, don't guess
+            return None, mem_role, None
+
+    # ---- Priority 2: content binding ----------------------------------------
+    if mem_text:
+        candidates = []
+        for entry in actor_index.entries:
+            if not entry.content_lower:
+                continue
+            # Check if message content is contained in the memory text, or
+            # the memory text is contained in the message (substantial overlap)
+            if entry.content_lower in mem_text or mem_text in entry.content_lower:
+                candidates.append(entry)
+        if len(candidates) == 1:
+            return candidates[0].actor_id, candidates[0].role, "content_match"
+        if len(candidates) > 1:
+            # Multiple messages match - check if they all share the same actor
+            shared_actors = list({e.actor_id for e in candidates})
+            shared_roles = list({e.role for e in candidates})
+            if len(shared_actors) == 1 and shared_actors[0] is not None:
+                return shared_actors[0], shared_roles[0], "content_match_shared_actor"
+
+    # ---- Priority 3: unique role match --------------------------------------
+    if mem_attributed_to:
+        unique_actors = actor_index.unique_actors_for_role(mem_attributed_to)
+        if len(unique_actors) == 1 and unique_actors[0] is not None:
+            return unique_actors[0], mem_attributed_to, "unique_role_match"
+        # If multiple actors for this role, fall through to ambiguous
+
+    # ---- Ambiguous: return raw role without guessing actor_id ---------------
+    return None, mem_role, None
 
 
 def format_entities(entities):

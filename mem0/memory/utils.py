@@ -23,6 +23,7 @@ class NormalizedMessage:
     consistent through every branch.
     """
 
+    index: int = 0
     role: Optional[str] = None
     content: Optional[str] = None
     name: Optional[str] = None
@@ -40,11 +41,15 @@ def normalize_messages(messages):
     with ``valid=False`` and a ``skip_reason`` -- the caller can then log /
     skip them without affecting siblings.
 
+    Each record preserves its original ``index`` in the input list so the
+    LLM's ``source_index`` references can be validated and mapped back.
+
     Returns a list of ``NormalizedMessage`` objects, one per input message.
     """
     normalized = []
-    for msg in messages:
+    for idx, msg in enumerate(messages):
         record = NormalizedMessage()
+        record.index = idx
 
         if not isinstance(msg, dict):
             record.skip_reason = "not a dict at all"
@@ -127,13 +132,18 @@ def ensure_json_instruction(system_prompt, user_prompt):
     return system_prompt, user_prompt
 
 
-def parse_messages(messages):
+def parse_messages(messages, include_indices=False):
     """Render a batch of chat messages into a single text block.
 
     Accepts either raw message dicts or pre-normalized ``NormalizedMessage``
     objects so both the infer=False and infer=True paths can share this.
     Messages with a ``name`` are rendered as ``role (name): content`` so the
     LLM can see the actor identity alongside the role.
+
+    When ``include_indices=True``, each valid message is prefixed with
+    ``mN:`` where N is the message's original list index.  This is used for
+    the extraction prompt so the LLM can return ``source_index`` fields
+    that map deterministically back to specific input messages.
     """
     response = ""
     for msg in messages:
@@ -143,12 +153,14 @@ def parse_messages(messages):
             role = msg.role
             content = msg.content
             name = msg.name
+            msg_index = msg.index
         elif isinstance(msg, dict):
             role = msg.get("role")
             content = msg.get("content")
             name = msg.get("name")
             if content is None or role is None or role == "system":
                 continue
+            msg_index = msg.get("index", 0)
         else:
             continue
 
@@ -156,7 +168,11 @@ def parse_messages(messages):
             prefix = f"{role} ({name})"
         else:
             prefix = role
-        response += f"{prefix}: {content}\n"
+
+        if include_indices:
+            response += f"m{msg_index}: {prefix}: {content}\n"
+        else:
+            response += f"{prefix}: {content}\n"
     return response
 
 
@@ -334,6 +350,170 @@ def resolve_actor(
 
     # ---- Ambiguous: return raw role without guessing actor_id ---------------
     return None, mem_role, None
+
+
+@dataclass
+class ResolvedSource:
+    """Result of validating an LLM extraction's source fields against normalized messages.
+
+    Attributes:
+        actor_id: The validated actor_id from the source message, or None if no valid source.
+        role: The validated role from the source message, or attributed_to fallback.
+        source_index: The original message index if valid, or None.
+        source_name: The validated source name if provided and matches, or None.
+        valid: Whether at least one source field validated successfully.
+        validation_reason: Short string describing which rule fired or why it failed.
+    """
+
+    actor_id: Optional[str] = None
+    role: Optional[str] = None
+    source_index: Optional[int] = None
+    source_name: Optional[str] = None
+    valid: bool = False
+    validation_reason: Optional[str] = None
+
+
+def validate_extraction_sources(
+    extracted_memory: Dict[str, Any],
+    normalized_messages: List[NormalizedMessage],
+    actor_index: ActorIndex,
+) -> ResolvedSource:
+    """Validate LLM-extracted source fields (source_index, source_name, attributed_to).
+
+    Only accepts source references that actually exist in the original normalized
+    messages.  Invalid references (out-of-range index, mismatched name, unknown
+    role) are silently discarded -- the function still returns a best-effort
+    ResolvedSource but with ``valid=False`` so the caller can decide whether to
+    skip the memory or store it without actor attribution.
+
+    Validation priority (matching the prompt contract):
+
+    1. **source_index + source_name**: If both are present, verify the message
+       at that index has a matching name.
+    2. **source_index only**: Verify the index points to a valid, non-skipped
+       message.  The message's name becomes the source_name, its actor_id and
+       role are used.
+    3. **source_name only**: Verify the name exists in the message set.  If
+       exactly one unique actor_id has that name, use it.
+    4. **attributed_to fallback**: If none of the above, fall through to
+       :func:`resolve_actor` for the existing best-effort heuristics.
+
+    Args:
+        extracted_memory: The LLM-returned memory dict (text, attributed_to, source_index, source_name).
+        normalized_messages: Full list of normalized messages with their original indices.
+        actor_index: Pre-built ActorIndex for fast name/role lookups.
+
+    Returns:
+        ResolvedSource with validated actor_id, role, and source references.
+    """
+    raw_source_index = extracted_memory.get("source_index")
+    raw_source_name = extracted_memory.get("source_name")
+    raw_attributed_to = extracted_memory.get("attributed_to")
+
+    # Build a fast lookup by original message index (skipping invalid messages)
+    by_index: Dict[int, NormalizedMessage] = {
+        nm.index: nm for nm in normalized_messages if nm.valid
+    }
+
+    # ---- Priority 1: source_index + source_name -----------------------------
+    if raw_source_index is not None and raw_source_name:
+        try:
+            idx = int(raw_source_index)
+        except (TypeError, ValueError):
+            pass
+        else:
+            nm = by_index.get(idx)
+            if nm is not None and nm.name == raw_source_name:
+                return ResolvedSource(
+                    actor_id=nm.actor_id,
+                    role=nm.role,
+                    source_index=idx,
+                    source_name=nm.name,
+                    valid=True,
+                    validation_reason="source_index_and_name_match",
+                )
+            # If index is valid but name doesn't match, it's a hallucination.
+            # Do NOT fall through to source_index-only or heuristic matches --
+            # the LLM explicitly gave a name that contradicts the source message.
+            if nm is not None:
+                return ResolvedSource(
+                    actor_id=None,
+                    role=raw_attributed_to,
+                    source_index=idx,
+                    source_name=raw_source_name,
+                    valid=False,
+                    validation_reason="source_name_mismatch_at_index",
+                )
+            # Index is invalid (out of range or skipped) - fall through to try name-only
+
+    # ---- Priority 2: source_index only (only if no source_name was provided) -
+    if raw_source_index is not None and raw_source_name is None:
+        try:
+            idx = int(raw_source_index)
+        except (TypeError, ValueError):
+            pass
+        else:
+            nm = by_index.get(idx)
+            if nm is not None:
+                return ResolvedSource(
+                    actor_id=nm.actor_id,
+                    role=nm.role,
+                    source_index=idx,
+                    source_name=nm.name,
+                    valid=True,
+                    validation_reason="source_index_match",
+                )
+
+    # ---- Priority 3: source_name only ---------------------------------------
+    if raw_source_name:
+        name_entries = actor_index.by_name.get(raw_source_name, [])
+        unique_actors = list({e.actor_id for e in name_entries if e.actor_id is not None})
+        if len(unique_actors) == 1:
+            entry_role = name_entries[0].role if name_entries else raw_attributed_to
+            return ResolvedSource(
+                actor_id=unique_actors[0],
+                role=entry_role,
+                source_index=None,
+                source_name=raw_source_name,
+                valid=True,
+                validation_reason="source_name_match",
+            )
+        if len(unique_actors) > 1:
+            # Same name but multiple actor_ids - ambiguous, don't guess
+            return ResolvedSource(
+                actor_id=None,
+                role=raw_attributed_to,
+                source_index=None,
+                source_name=raw_source_name,
+                valid=False,
+                validation_reason="source_name_ambiguous_multiple_actors",
+            )
+
+    # ---- Priority 4: attributed_to + heuristics fallback --------------------
+    # Only fall back to content/role heuristics when the LLM did NOT provide
+    # explicit source_index or source_name fields. If it did provide them but
+    # they didn't validate, we already returned a failed ResolvedSource above.
+    if raw_source_index is None and raw_source_name is None:
+        resolved_actor_id, resolved_role, heuristic_reason = resolve_actor(extracted_memory, actor_index)
+        if resolved_actor_id is not None:
+            return ResolvedSource(
+                actor_id=resolved_actor_id,
+                role=resolved_role or raw_attributed_to,
+                source_index=None,
+                source_name=None,
+                valid=True,
+                validation_reason=f"heuristic_fallback:{heuristic_reason}",
+            )
+
+    # ---- No valid source found ----------------------------------------------
+    return ResolvedSource(
+        actor_id=None,
+        role=raw_attributed_to,
+        source_index=None if not isinstance(raw_source_index, int) else raw_source_index,
+        source_name=raw_source_name,
+        valid=False,
+        validation_reason="no_valid_source",
+    )
 
 
 def format_entities(entities):

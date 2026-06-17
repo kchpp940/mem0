@@ -479,13 +479,15 @@ Accuracy and completeness are critical. Every piece of memorable information mus
 
 ## New Messages
 
-The current conversation turn(s) with "role" (user/assistant) and "content".
+The current conversation turn(s). Each message is prefixed with "mN:" where N is a 0-based message index for source_index reference. Each message has "role" (user/assistant), optional "name", and "content".
 
 Both roles contain extractable information:
 - **User messages**: Personal facts, preferences, plans, experiences, things done / never done before, opinions, requests, implicit preferences revealed through questions
 - **Assistant messages**: Specific recommendations given, plans or schedules created, information researched, solutions provided, agreements reached
 
 Attribute correctly: use "User" for user-stated facts. For assistant-generated content, frame in terms of the user's context (e.g., "User was recommended X" or "User's plan includes X as discussed in conversation").
+
+In multi-speaker conversations, the "name" field on each message identifies the actual speaker. Use source_index + source_name to track which specific message a memory came from.
 
 Do NOT extract:
 - Vague assistant characterizations ("you seem passionate", "that sounds stressful") unless the user explicitly confirms them
@@ -923,8 +925,8 @@ Return ONLY valid JSON parsable by json.loads(). No text, reasoning, explanation
 
 {
   "memory": [
-    {"id": "0", "text": "First extracted memory", "attributed_to": "user", "linked_memory_ids": ["uuid-of-related-existing-memory"]},
-    {"id": "1", "text": "Second extracted memory", "attributed_to": "assistant"}
+    {"id": "0", "text": "First extracted memory", "attributed_to": "user", "source_index": 0, "source_name": "Alice", "linked_memory_ids": ["uuid-of-related-existing-memory"]},
+    {"id": "1", "text": "Second extracted memory", "attributed_to": "assistant", "source_index": 1}
   ]
 }
 
@@ -933,11 +935,15 @@ Return ONLY valid JSON parsable by json.loads(). No text, reasoning, explanation
 - **id** (string, required): Sequential integers as strings starting at "0".
 - **text** (string, required): A contextually rich, self-contained factual statement (15-80 words).
 - **attributed_to** (string, required): Who this memory is about. Use "user" for facts stated by or about the user (preferences, plans, personal facts). Use "assistant" for information provided by the assistant (recommendations, confirmations, plans created, information researched).
+- **source_index** (integer, required): The 0-based index of the New Message from which this memory was extracted. Each New Message is prefixed with "mN:" where N is the index — use that N as source_index. If a memory spans multiple messages, pick the PRIMARY message index.
+- **source_name** (string, optional): If the source message has a "name" field (e.g. "Alice", "BotAssistant"), include it here. This helps disambiguate multi-speaker conversations. Omit if the message has no name.
 - **linked_memory_ids** (array of strings, optional): IDs of Existing Memories that this new memory relates to. Use the exact IDs from the Existing Memories list. Omit or pass [] if no existing memories are related.
 
 ## Rules
 
 - Extract every piece of memorable information as a separate memory object.
+- source_index MUST refer to a valid message index that actually exists in New Messages.
+- source_name (if provided) MUST match the actual "name" field of the source message at source_index.
 - If nothing is worth extracting, return: {"memory": []}
 - No duplicate IDs. Use double quotes. No trailing commas.
 

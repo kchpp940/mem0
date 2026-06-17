@@ -59,7 +59,7 @@ from mem0.memory.utils import (
     parse_vision_messages,
     process_telemetry_filters,
     remove_code_blocks,
-    resolve_actor,
+    validate_extraction_sources,
 )
 from mem0.utils.entity_extraction import extract_entities, extract_entities_batch
 from mem0.utils.factory import (
@@ -795,7 +795,7 @@ class Memory(MemoryBase):
                     "created_at": per_msg_meta.get("created_at", now),
                     "updated_at": per_msg_meta.get("updated_at", now),
                 }
-                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
                 additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
                 if additional_metadata:
                     result_item["metadata"] = additional_metadata
@@ -810,7 +810,8 @@ class Memory(MemoryBase):
         # Phase 0: Context gathering
         session_scope = _build_session_scope(filters)
         last_messages = self.db.get_last_messages(session_scope, limit=10)
-        parsed_messages = parse_messages(normalized)
+        # Include mN: indices for extraction prompt so LLM returns deterministic source_index
+        parsed_messages = parse_messages(normalized, include_indices=True)
 
         # Phase 1: Existing memory retrieval
         search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
@@ -926,8 +927,17 @@ class Memory(MemoryBase):
             if attributed_to:
                 mem_metadata["attributed_to"] = attributed_to
 
-            # Use multi-actor resolution instead of simple role->actor_id mapping
-            resolved_actor_id, mem_role, match_reason = resolve_actor(mem, actor_index)
+            # Validate LLM-supplied source fields against original messages
+            resolved = validate_extraction_sources(mem, normalized, actor_index)
+            resolved_actor_id = resolved.actor_id
+            mem_role = resolved.role
+
+            if resolved.source_index is not None:
+                mem_metadata["source_index"] = resolved.source_index
+            if resolved.source_name:
+                mem_metadata["source_name"] = resolved.source_name
+            if resolved.validation_reason:
+                mem_metadata["source_validation"] = resolved.validation_reason
 
             if resolved_actor_id is not None:
                 mem_metadata["actor_id"] = resolved_actor_id
@@ -1093,7 +1103,7 @@ class Memory(MemoryBase):
         # Phase 8: Save messages + return
         self.db.save_messages(messages, session_scope)
 
-        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
         returned_memories = []
         for r in records:
             memory_id, text, _, payload, _, _, _ = r
@@ -2347,7 +2357,7 @@ class AsyncMemory(MemoryBase):
                     "created_at": per_msg_meta.get("created_at", now),
                     "updated_at": per_msg_meta.get("updated_at", now),
                 }
-                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
+                promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
                 additional_metadata = {k: v for k, v in per_msg_meta.items() if k not in promoted_payload_keys}
                 if additional_metadata:
                     result_item["metadata"] = additional_metadata
@@ -2362,7 +2372,8 @@ class AsyncMemory(MemoryBase):
         # Phase 0: Context gathering
         session_scope = _build_session_scope(effective_filters)
         last_messages = await asyncio.to_thread(self.db.get_last_messages, session_scope, 10)
-        parsed_messages = parse_messages(normalized)
+        # Include mN: indices for extraction prompt so LLM returns deterministic source_index
+        parsed_messages = parse_messages(normalized, include_indices=True)
 
         # Phase 1: Existing memory retrieval
         search_filters = {k: v for k, v in effective_filters.items() if k in ("user_id", "agent_id", "run_id") and v}
@@ -2477,8 +2488,17 @@ class AsyncMemory(MemoryBase):
             if attributed_to:
                 mem_metadata["attributed_to"] = attributed_to
 
-            # Use multi-actor resolution instead of simple role->actor_id mapping
-            resolved_actor_id, mem_role, match_reason = resolve_actor(mem, actor_index)
+            # Validate LLM-supplied source fields against original messages
+            resolved = validate_extraction_sources(mem, normalized, actor_index)
+            resolved_actor_id = resolved.actor_id
+            mem_role = resolved.role
+
+            if resolved.source_index is not None:
+                mem_metadata["source_index"] = resolved.source_index
+            if resolved.source_name:
+                mem_metadata["source_name"] = resolved.source_name
+            if resolved.validation_reason:
+                mem_metadata["source_validation"] = resolved.validation_reason
 
             if resolved_actor_id is not None:
                 mem_metadata["actor_id"] = resolved_actor_id
@@ -2643,7 +2663,7 @@ class AsyncMemory(MemoryBase):
         # Phase 8: Save messages + return
         await asyncio.to_thread(self.db.save_messages, messages, session_scope)
 
-        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors"}
+        promoted_payload_keys = {"user_id", "agent_id", "run_id", "actor_id", "role", "data", "hash", "created_at", "updated_at", "text_lemmatized", "attributed_to", "source_actors", "source_index", "source_name", "source_validation"}
         returned_memories = []
         for r in records:
             memory_id, text, _, payload, _, _, _ = r

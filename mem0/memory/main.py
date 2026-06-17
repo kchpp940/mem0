@@ -51,6 +51,7 @@ from mem0.memory.notices import (
     get_temporal_feature_error_message_async,
 )
 from mem0.memory.utils import (
+    build_candidate_pool,
     extract_json,
     parse_messages,
     parse_vision_messages,
@@ -1490,7 +1491,7 @@ class Memory(MemoryBase):
 
         internal_limit = max(limit * 4, 60)
 
-        semantic_results = []
+        semantic_results = None
         try:
             semantic_results = self.vector_store.search(
                 query=query, vectors=embeddings, top_k=internal_limit, filters=filters
@@ -1525,42 +1526,12 @@ class Memory(MemoryBase):
         except Exception as e:
             logger.warning("Entity boost computation failed: %s", e)
 
-        seen_ids = {}
-        for mem in semantic_results:
-            mem_id = str(mem.id)
-            payload = mem.payload if hasattr(mem, "payload") else {}
-            seen_ids[mem_id] = {
-                "id": mem_id,
-                "score": mem.score,
-                "payload": payload,
-            }
-
-        for mem_id, payload in keyword_candidates.items():
-            if mem_id not in seen_ids:
-                seen_ids[mem_id] = {
-                    "id": mem_id,
-                    "score": 0.0,
-                    "payload": payload,
-                }
-
-        entity_only_ids = set(entity_boosts.keys()) - set(seen_ids.keys())
-        if entity_only_ids:
-            try:
-                for mem_id in entity_only_ids:
-                    result = self.vector_store.get(mem_id)
-                    if result is not None:
-                        payload = result.payload if hasattr(result, "payload") else result.get("payload", {})
-                        if not payload and isinstance(result, dict):
-                            payload = result
-                        seen_ids[mem_id] = {
-                            "id": mem_id,
-                            "score": 0.0,
-                            "payload": payload,
-                        }
-            except Exception as e:
-                logger.warning("Failed to fetch payloads for entity-only candidates: %s", e)
-
-        candidates = list(seen_ids.values())
+        candidates, pool_status = build_candidate_pool(
+            semantic_results=semantic_results,
+            keyword_candidates=keyword_candidates,
+            entity_boosts=entity_boosts,
+            vector_store_get=self.vector_store.get,
+        )
 
         scored_results = score_and_rank(
             candidates=candidates,
@@ -1569,6 +1540,7 @@ class Memory(MemoryBase):
             threshold=threshold,
             top_k=limit,
             explain=explain,
+            pool_status=pool_status,
         )
 
         promoted_payload_keys = [
@@ -1614,8 +1586,15 @@ class Memory(MemoryBase):
                 if not memory_item_dict.get("metadata"):
                     memory_item_dict["metadata"] = {}
                 memory_item_dict["metadata"].update(additional_metadata)
-            if explain and "score_details" in scored:
-                memory_item_dict["score_details"] = scored["score_details"]
+            if explain:
+                if "score_details" in scored:
+                    memory_item_dict["score_details"] = scored["score_details"]
+                if pool_status.get("degraded"):
+                    if "metadata" not in memory_item_dict:
+                        memory_item_dict["metadata"] = {}
+                    memory_item_dict["metadata"]["degraded_from_hybrid"] = True
+            if scored.get("degraded_from_hybrid"):
+                memory_item_dict["degraded_from_hybrid"] = True
 
             original_memories.append(memory_item_dict)
 
@@ -3053,7 +3032,7 @@ class AsyncMemory(MemoryBase):
 
         internal_limit = max(limit * 4, 60)
 
-        semantic_results = []
+        semantic_results = None
         try:
             semantic_results = await asyncio.to_thread(
                 self.vector_store.search, query=query, vectors=embeddings, top_k=internal_limit, filters=filters
@@ -3088,25 +3067,17 @@ class AsyncMemory(MemoryBase):
         except Exception as e:
             logger.warning("Entity boost computation failed: %s", e)
 
-        seen_ids = {}
-        for mem in semantic_results:
-            mem_id = str(mem.id)
-            payload = mem.payload if hasattr(mem, "payload") else {}
-            seen_ids[mem_id] = {
-                "id": mem_id,
-                "score": mem.score,
-                "payload": payload,
-            }
+        precomputed_payloads: Dict[str, Dict[str, Any]] = {}
+        entity_only_ids = [mid for mid in entity_boosts]
+        seen_before_pool = set()
+        if semantic_results is not None:
+            for mem in semantic_results:
+                mem_id = str(mem.id) if hasattr(mem, "id") else str(mem.get("id", ""))
+                seen_before_pool.add(mem_id)
+        for mid in keyword_candidates:
+            seen_before_pool.add(mid)
+        entity_only_ids = [mid for mid in entity_boosts if mid not in seen_before_pool]
 
-        for mem_id, payload in keyword_candidates.items():
-            if mem_id not in seen_ids:
-                seen_ids[mem_id] = {
-                    "id": mem_id,
-                    "score": 0.0,
-                    "payload": payload,
-                }
-
-        entity_only_ids = set(entity_boosts.keys()) - set(seen_ids.keys())
         if entity_only_ids:
             try:
                 for mem_id in entity_only_ids:
@@ -3115,15 +3086,18 @@ class AsyncMemory(MemoryBase):
                         payload = result.payload if hasattr(result, "payload") else result.get("payload", {})
                         if not payload and isinstance(result, dict):
                             payload = result
-                        seen_ids[mem_id] = {
-                            "id": mem_id,
-                            "score": 0.0,
-                            "payload": payload,
-                        }
+                        precomputed_payloads[mem_id] = payload
             except Exception as e:
                 logger.warning("Failed to fetch payloads for entity-only candidates: %s", e)
 
-        candidates = list(seen_ids.values())
+        candidates, pool_status = await asyncio.to_thread(
+            build_candidate_pool,
+            semantic_results,
+            keyword_candidates,
+            entity_boosts,
+            None,
+            precomputed_payloads,
+        )
 
         scored_results = score_and_rank(
             candidates=candidates,
@@ -3132,6 +3106,7 @@ class AsyncMemory(MemoryBase):
             threshold=threshold,
             top_k=limit,
             explain=explain,
+            pool_status=pool_status,
         )
 
         promoted_payload_keys = [
@@ -3176,8 +3151,15 @@ class AsyncMemory(MemoryBase):
                 if not memory_item_dict.get("metadata"):
                     memory_item_dict["metadata"] = {}
                 memory_item_dict["metadata"].update(additional_metadata)
-            if explain and "score_details" in scored:
-                memory_item_dict["score_details"] = scored["score_details"]
+            if explain:
+                if "score_details" in scored:
+                    memory_item_dict["score_details"] = scored["score_details"]
+                if pool_status.get("degraded"):
+                    if "metadata" not in memory_item_dict:
+                        memory_item_dict["metadata"] = {}
+                    memory_item_dict["metadata"]["degraded_from_hybrid"] = True
+            if scored.get("degraded_from_hybrid"):
+                memory_item_dict["degraded_from_hybrid"] = True
 
             original_memories.append(memory_item_dict)
 

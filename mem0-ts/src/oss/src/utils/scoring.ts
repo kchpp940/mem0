@@ -9,6 +9,34 @@
 
 export const ENTITY_BOOST_WEIGHT = 0.5;
 
+export interface PoolStatus {
+  semantic_ok: boolean;
+  keyword_ok: boolean;
+  entity_ok: boolean;
+  degraded: boolean;
+  degradation_reason?: string;
+}
+
+export interface ScoreDetails {
+  semanticScore: number;
+  bm25Score: number;
+  entityBoost: number;
+  rawScore: number;
+  maxPossibleScore: number;
+  finalScore: number;
+  threshold: number;
+  sources: string[];
+  pool_status?: PoolStatus;
+}
+
+export interface ScoredResult {
+  id: string;
+  score: number;
+  payload: Record<string, any>;
+  scoreDetails?: ScoreDetails;
+  degraded_from_hybrid?: boolean;
+}
+
 /**
  * Get BM25 sigmoid parameters based on query length.
  *
@@ -71,6 +99,7 @@ export interface ScoredResult {
   score: number;
   payload: Record<string, any>;
   scoreDetails?: ScoreDetails;
+  degraded_from_hybrid?: boolean;
 }
 
 /**
@@ -100,12 +129,15 @@ export interface ScoredResult {
  *   - Entity only (no semantic): maxPossible = ENTITY_BOOST_WEIGHT
  *
  * @param candidates - Unified candidate pool (semantic + keyword + entity).
- *   Each must have "id", and may have "score" (semantic), "payload".
+ *   Each must have "id", and may have "score" (semantic), "payload",
+ *   and "sources".
  * @param bm25Scores - Map of memory ID to normalized BM25 score.
  * @param entityBoosts - Map of memory ID to entity boost score.
  * @param threshold - Minimum semantic score for semantic-only candidates.
  * @param topK - Maximum number of results to return.
  * @param explain - Include scoreDetails in each result when true.
+ * @param poolStatus - Optional pool status that, if provided with
+ *   explain=true, will be attached to each result's scoreDetails.
  * @returns Sorted list of scored results, highest score first.
  */
 export function scoreAndRank(
@@ -113,12 +145,14 @@ export function scoreAndRank(
     id: string;
     score: number;
     payload: Record<string, any>;
+    sources?: string[];
   }>,
   bm25Scores: Record<string, number>,
   entityBoosts: Record<string, number>,
   threshold: number,
   topK: number,
   explain: boolean = false,
+  poolStatus?: PoolStatus,
 ): ScoredResult[] {
   const hasBm25 = Object.keys(bm25Scores).length > 0;
   const hasEntity = Object.keys(entityBoosts).length > 0;
@@ -134,6 +168,7 @@ export function scoreAndRank(
     const semanticScore = result.score ?? 0.0;
     const bm25Score = bm25Scores[memId] ?? 0.0;
     const entityBoost = entityBoosts[memId] ?? 0.0;
+    const sources = result.sources ?? [];
 
     const hasSemantic = semanticScore > 0.0;
     const hasNonSemantic = bm25Score > 0.0 || entityBoost > 0.0;
@@ -170,7 +205,7 @@ export function scoreAndRank(
       payload: result.payload,
     };
     if (explain) {
-      entry.scoreDetails = {
+      const scoreDetails: ScoreDetails = {
         semanticScore,
         bm25Score,
         entityBoost,
@@ -178,7 +213,15 @@ export function scoreAndRank(
         maxPossibleScore: activeMax,
         finalScore: combined,
         threshold,
+        sources,
       };
+      if (poolStatus) {
+        scoreDetails.pool_status = poolStatus;
+      }
+      entry.scoreDetails = scoreDetails;
+      if (poolStatus?.degraded) {
+        entry.degraded_from_hybrid = true;
+      }
     }
     scored.push(entry);
   }

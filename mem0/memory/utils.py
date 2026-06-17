@@ -1,24 +1,182 @@
 import hashlib
 import logging
 import re
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from mem0.configs.prompts import (
     AGENT_MEMORY_EXTRACTION_PROMPT,
     FACT_RETRIEVAL_PROMPT,
     USER_MEMORY_EXTRACTION_PROMPT,
 )
+from mem0.utils.scoring import PoolStatus
 
 logger = logging.getLogger(__name__)
 
 
+def _get_payload(mem: Any) -> Dict[str, Any]:
+    """Extract payload from a vector store result object."""
+    if hasattr(mem, "payload"):
+        return mem.payload or {}
+    if isinstance(mem, dict):
+        return mem.get("payload", {})
+    return {}
+
+
+def _get_id(mem: Any) -> Optional[str]:
+    """Extract id from a vector store result object."""
+    if hasattr(mem, "id"):
+        return str(mem.id)
+    if isinstance(mem, dict):
+        mem_id = mem.get("id")
+        return str(mem_id) if mem_id is not None else None
+    return None
+
+
+def _get_score(mem: Any) -> float:
+    """Extract score from a vector store result object."""
+    if hasattr(mem, "score"):
+        return mem.score or 0.0
+    if isinstance(mem, dict):
+        return mem.get("score") or 0.0
+    return 0.0
+
+
+def build_candidate_pool(
+    semantic_results: Optional[List[Any]],
+    keyword_candidates: Dict[str, Dict[str, Any]],
+    entity_boosts: Dict[str, float],
+    vector_store_get: Optional[Callable[[str], Any]],
+    precomputed_entity_payloads: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[List[Dict[str, Any]], PoolStatus]:
+    """Build a unified candidate pool from semantic, keyword, and entity lanes.
+
+    This helper merges results from up to three retrieval lanes, de-duplicates
+    by memory id, tracks which lanes contributed to each candidate, and fills
+    in missing payloads for entity-only hits via ``vector_store_get`` or
+    ``precomputed_entity_payloads``.
+
+    Each candidate in the returned list has:
+    - ``id``: memory id (str)
+    - ``score``: semantic score, or 0.0 for keyword-only / entity-only hits
+    - ``payload``: memory payload dict
+    - ``sources``: list of lane names that produced this candidate
+      (``"semantic"``, ``"keyword"``, ``"entity"``)
+
+    The ``pool_status`` dict records:
+    - ``semantic_ok``: whether the semantic lane returned results
+    - ``keyword_ok``: whether the keyword lane returned results
+    - ``entity_ok``: whether the entity boost lane returned any hits
+    - ``degraded``: true if semantic lane failed but other lanes produced hits
+    - ``degradation_reason``: human-readable reason when degraded
+
+    If the semantic lane failed (``semantic_results is None``) but other
+    lanes have candidates, ``pool_status.degraded`` is ``True`` so that
+    downstream code can surface this information to the caller (e.g. via
+    ``explain`` fields) rather than silently pretending it was a normal
+    hybrid search.
+
+    Args:
+        semantic_results: Results from semantic search, or None if the
+            semantic lane failed entirely.
+        keyword_candidates: Mapping from memory id to payload for results
+            from keyword search.
+        entity_boosts: Mapping from memory id to entity boost score.
+        vector_store_get: Callable that fetches a memory record by id.
+            Used to fill payloads for candidates that only appear in the
+            entity boost lane.  Ignored if ``precomputed_entity_payloads``
+            is provided.
+        precomputed_entity_payloads: Optional pre-fetched payloads for
+            entity-only candidates, keyed by memory id.  When provided,
+            ``vector_store_get`` is not called for entity-only hits.
+            This is useful for async callers that want to fetch payloads
+            asynchronously before calling this sync helper.
+
+    Returns:
+        Tuple of (candidates list, pool_status dict).
+    """
+    pool_status: PoolStatus = {
+        "semantic_ok": semantic_results is not None,
+        "keyword_ok": bool(keyword_candidates),
+        "entity_ok": bool(entity_boosts),
+        "degraded": False,
+    }
+
+    seen: Dict[str, Dict[str, Any]] = {}
+
+    if semantic_results is not None:
+        for mem in semantic_results:
+            mem_id = _get_id(mem)
+            if mem_id is None:
+                continue
+            seen[mem_id] = {
+                "id": mem_id,
+                "score": _get_score(mem),
+                "payload": _get_payload(mem),
+                "sources": ["semantic"],
+            }
+
+    for mem_id, payload in keyword_candidates.items():
+        if mem_id in seen:
+            seen[mem_id]["sources"].append("keyword")
+        else:
+            seen[mem_id] = {
+                "id": mem_id,
+                "score": 0.0,
+                "payload": payload,
+                "sources": ["keyword"],
+            }
+
+    entity_only_ids = [mem_id for mem_id in entity_boosts if mem_id not in seen]
+    for mem_id in entity_boosts:
+        if mem_id in seen:
+            if "entity" not in seen[mem_id]["sources"]:
+                seen[mem_id]["sources"].append("entity")
+
+    if entity_only_ids:
+        if precomputed_entity_payloads is not None:
+            for mem_id in entity_only_ids:
+                payload = precomputed_entity_payloads.get(mem_id)
+                if payload:
+                    seen[mem_id] = {
+                        "id": mem_id,
+                        "score": 0.0,
+                        "payload": payload,
+                        "sources": ["entity"],
+                    }
+        elif vector_store_get is not None:
+            try:
+                for mem_id in entity_only_ids:
+                    result = vector_store_get(mem_id)
+                    if result is not None:
+                        payload = _get_payload(result)
+                        if not payload and isinstance(result, dict):
+                            payload = result
+                        seen[mem_id] = {
+                            "id": mem_id,
+                            "score": 0.0,
+                            "payload": payload,
+                            "sources": ["entity"],
+                        }
+            except Exception as e:
+                logger.warning(
+                    "Failed to fetch payloads for entity-only candidates: %s",
+                    e,
+                )
+
+    if not pool_status["semantic_ok"] and (pool_status["keyword_ok"] or pool_status["entity_ok"]):
+        pool_status["degraded"] = True
+        pool_status["degradation_reason"] = "Semantic search failed; results from keyword/entity lanes only"
+
+    return list(seen.values()), pool_status
+
+
 def get_fact_retrieval_messages(message, is_agent_memory=False):
     """Get fact retrieval messages based on the memory type.
-    
+
     Args:
         message: The message content to extract facts from
         is_agent_memory: If True, use agent memory extraction prompt, else use user memory extraction prompt
-        
+
     Returns:
         tuple: (system_prompt, user_prompt)
     """
@@ -52,8 +210,7 @@ def ensure_json_instruction(system_prompt, user_prompt):
     combined = (system_prompt + user_prompt).lower()
     if "json" not in combined:
         system_prompt += (
-            "\n\nYou must return your response in valid JSON format "
-            "with a 'facts' key containing an array of strings."
+            "\n\nYou must return your response in valid JSON format with a 'facts' key containing an array of strings."
         )
     return system_prompt, user_prompt
 
@@ -86,6 +243,7 @@ def format_entities(entities):
         formatted_lines.append(simplified)
 
     return "\n".join(formatted_lines)
+
 
 def normalize_facts(raw_facts):
     """Normalize LLM-extracted facts to a list of strings.
@@ -123,9 +281,8 @@ def remove_code_blocks(content: str) -> str:
     """
     pattern = r"^```[a-zA-Z0-9]*\n([\s\S]*?)\n```$"
     match = re.match(pattern, content.strip())
-    match_res=match.group(1).strip() if match else content.strip()
+    match_res = match.group(1).strip() if match else content.strip()
     return re.sub(r"<think>.*?</think>", "", match_res, flags=re.DOTALL).strip()
-
 
 
 def extract_json(text):
@@ -194,8 +351,7 @@ def parse_vision_messages(messages, llm=None, vision_details="auto"):
         if isinstance(content, list):
             if llm is None:
                 text_parts = [
-                    part["text"] for part in msg["content"]
-                    if isinstance(part, dict) and part.get("type") == "text"
+                    part["text"] for part in msg["content"] if isinstance(part, dict) and part.get("type") == "text"
                 ]
                 if not text_parts:
                     continue
@@ -314,4 +470,3 @@ def remove_spaces_from_entities(
         item["destination"] = item["destination"].lower().replace(" ", "_")
         cleaned.append(item)
     return cleaned
-

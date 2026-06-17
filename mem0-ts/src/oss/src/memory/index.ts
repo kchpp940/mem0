@@ -38,7 +38,7 @@ import {
   GetAllMemoryOptions,
   UpdateProjectOptions,
 } from "./memory.types";
-import { parse_vision_messages } from "../utils/memory";
+import { parse_vision_messages, buildCandidatePool } from "../utils/memory";
 import { HistoryManager } from "../storage/base";
 import { captureClientEvent } from "../utils/telemetry";
 import {
@@ -1268,7 +1268,7 @@ export class Memory {
       id: string;
       score?: number;
       payload: Record<string, any>;
-    }> = [];
+    }> | null = null;
     try {
       semanticResults = await this.vectorStore.search(
         queryEmbedding,
@@ -1389,39 +1389,26 @@ export class Memory {
       }
     }
 
-    const seenIds = new Map<string, { id: string; score: number; payload: Record<string, any> }>();
-    for (const mem of semanticResults) {
-      const memId = String(mem.id);
-      seenIds.set(memId, {
-        id: memId,
-        score: mem.score ?? 0,
-        payload: mem.payload || {},
-      });
-    }
-
-    for (const [memId, payload] of Object.entries(keywordCandidates)) {
-      if (!seenIds.has(memId)) {
-        seenIds.set(memId, {
-          id: memId,
-          score: 0.0,
-          payload,
-        });
+    const precomputedPayloads: Record<string, Record<string, any>> = {};
+    const seenBeforePool = new Set<string>();
+    if (semanticResults !== null) {
+      for (const mem of semanticResults) {
+        seenBeforePool.add(String(mem.id));
       }
     }
-
+    for (const mid of Object.keys(keywordCandidates)) {
+      seenBeforePool.add(mid);
+    }
     const entityOnlyIds = Object.keys(entityBoosts).filter(
-      (id) => !seenIds.has(id),
+      (id) => !seenBeforePool.has(id),
     );
+
     if (entityOnlyIds.length > 0) {
       try {
         for (const memId of entityOnlyIds) {
           const result = await this.vectorStore.get(memId);
           if (result) {
-            seenIds.set(memId, {
-              id: memId,
-              score: 0.0,
-              payload: result.payload || {},
-            });
+            precomputedPayloads[memId] = result.payload || {};
           }
         }
       } catch (e) {
@@ -1429,7 +1416,13 @@ export class Memory {
       }
     }
 
-    const candidates = Array.from(seenIds.values());
+    const [candidates, poolStatus] = buildCandidatePool(
+      semanticResults,
+      keywordCandidates,
+      entityBoosts,
+      null,
+      precomputedPayloads,
+    );
 
     const scoredResults = scoreAndRank(
       candidates,
@@ -1438,6 +1431,7 @@ export class Memory {
       threshold ?? 0.1,
       topK,
       explain,
+      poolStatus,
     );
 
     // Step 9: Format results
@@ -1457,7 +1451,7 @@ export class Memory {
       .filter((scored) => scored.payload?.data)
       .map((scored) => {
         const payload = scored.payload || {};
-        return {
+        const result: Record<string, any> = {
           id: scored.id,
           memory: payload.data,
           hash: payload.hash,
@@ -1472,6 +1466,14 @@ export class Memory {
           ...(payload.run_id && { run_id: payload.run_id }),
           ...(scored.scoreDetails && { score_details: scored.scoreDetails }),
         };
+        if (explain && poolStatus.degraded) {
+          result.metadata = result.metadata || {};
+          result.metadata.degraded_from_hybrid = true;
+        }
+        if (scored.degraded_from_hybrid) {
+          result.degraded_from_hybrid = true;
+        }
+        return result;
       });
 
     const result = {

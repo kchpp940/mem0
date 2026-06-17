@@ -10,7 +10,33 @@ Provides:
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, TypedDict
+
+
+class PoolStatus(TypedDict, total=False):
+    """Status of each retrieval lane in the candidate pool.
+
+    Tracks which lanes succeeded/failed and whether the final result
+    was degraded from the expected full hybrid pipeline.
+    """
+
+    semantic_ok: bool
+    keyword_ok: bool
+    entity_ok: bool
+    degraded: bool
+    degradation_reason: Optional[str]
+
+
+class ScoreDetails(TypedDict, total=False):
+    semantic_score: float
+    bm25_score: float
+    entity_boost: float
+    raw_score: float
+    max_possible_score: float
+    final_score: float
+    threshold: float
+    sources: List[str]
+    pool_status: PoolStatus
 
 
 def get_bm25_params(query: str, *, lemmatized: Optional[str] = None) -> tuple:
@@ -64,6 +90,7 @@ def score_and_rank(
     threshold: float,
     top_k: int,
     explain: bool = False,
+    pool_status: Optional[PoolStatus] = None,
 ) -> List[Dict[str, Any]]:
     """Score candidates additively and return top-k results.
 
@@ -93,12 +120,15 @@ def score_and_rank(
     Args:
         candidates: Unified candidate pool (semantic + keyword + entity).
             Each dict must have "id", and may have "score" (semantic),
-            "payload", "bm25_score", and "entity_boost".
+            "payload", "bm25_score", "entity_boost", and "sources" (list).
         bm25_scores: Normalized keyword scores keyed by memory ID.
         entity_boosts: Entity-link boosts keyed by memory ID.
         threshold: Minimum semantic score required for semantic-only candidates.
         top_k: Maximum number of results to return.
         explain: Include score_details in each result when true.
+        pool_status: Optional pool status dict that, if provided with
+            explain=True, will be attached to each result's score_details
+            for downstream inspection.
 
     Returns:
         List of scored result dicts sorted by combined score descending.
@@ -117,6 +147,7 @@ def score_and_rank(
         semantic_score = result.get("score") or 0.0
         bm25_score = bm25_scores.get(mem_id_str, result.get("bm25_score", 0.0))
         entity_boost = entity_boosts.get(mem_id_str, result.get("entity_boost", 0.0))
+        sources = result.get("sources") or []
 
         has_semantic = semantic_score > 0.0
         has_non_semantic = bm25_score > 0.0 or entity_boost > 0.0
@@ -141,13 +172,13 @@ def score_and_rank(
         raw_combined = semantic_score + bm25_score + entity_boost
         combined = min(raw_combined / active_max, 1.0)
 
-        scored_result = {
+        scored_result: Dict[str, Any] = {
             "id": mem_id_str,
             "score": combined,
             "payload": result.get("payload"),
         }
         if explain:
-            scored_result["score_details"] = {
+            score_details: ScoreDetails = {
                 "semantic_score": semantic_score,
                 "bm25_score": bm25_score,
                 "entity_boost": entity_boost,
@@ -155,7 +186,13 @@ def score_and_rank(
                 "max_possible_score": active_max,
                 "final_score": combined,
                 "threshold": threshold,
+                "sources": sources,
             }
+            if pool_status is not None:
+                score_details["pool_status"] = pool_status
+            scored_result["score_details"] = score_details
+            if pool_status and pool_status.get("degraded"):
+                scored_result["degraded_from_hybrid"] = True
         scored.append(scored_result)
 
     scored.sort(key=lambda x: x["score"], reverse=True)

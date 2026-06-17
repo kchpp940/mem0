@@ -1257,42 +1257,49 @@ export class Memory {
 
     const searchStartMs = Date.now();
 
-    // Step 1: Preprocess query
     const queryLemmatized = lemmatizeForBm25(query);
     const queryEntities = extractEntities(query);
 
-    // Step 2: Embed query
     const queryEmbedding = await this.embedder.embed(query);
 
-    // Step 3: Semantic search (over-fetch for scoring pool)
     const internalLimit = Math.max(topK * 4, 60);
-    const semanticResults = await this.vectorStore.search(
-      queryEmbedding,
-      internalLimit,
-      effectiveFilters,
-    );
 
-    // Step 4: Keyword search (if store supports it)
+    let semanticResults: Array<{
+      id: string;
+      score?: number;
+      payload: Record<string, any>;
+    }> = [];
+    try {
+      semanticResults = await this.vectorStore.search(
+        queryEmbedding,
+        internalLimit,
+        effectiveFilters,
+      );
+    } catch (e) {
+      console.warn("Semantic search failed:", e);
+    }
+
     let keywordResults: Array<{
       id: string;
       score?: number;
       payload: Record<string, any>;
     }> | null = null;
-    if (typeof this.vectorStore.keywordSearch === "function") {
-      try {
+    try {
+      if (typeof this.vectorStore.keywordSearch === "function") {
         keywordResults =
           (await this.vectorStore.keywordSearch(
             queryLemmatized,
             internalLimit,
             effectiveFilters,
           )) ?? null;
-      } catch {
-        keywordResults = null;
       }
+    } catch (e) {
+      console.warn("Keyword search failed, degrading to semantic-only:", e);
+      keywordResults = null;
     }
 
-    // Step 5: Compute BM25 scores from keyword results
     const bm25Scores: Record<string, number> = {};
+    const keywordCandidates: Record<string, Record<string, any>> = {};
     if (keywordResults) {
       const [midpoint, steepness] = getBm25Params(query, queryLemmatized);
       for (const mem of keywordResults) {
@@ -1301,6 +1308,7 @@ export class Memory {
         if (rawScore > 0) {
           bm25Scores[memId] = normalizeBm25(rawScore, midpoint, steepness);
         }
+        keywordCandidates[memId] = mem.payload || {};
       }
     }
 
@@ -1381,14 +1389,48 @@ export class Memory {
       }
     }
 
-    // Step 7: Build candidate set from semantic results
-    const candidates = semanticResults.map((mem) => ({
-      id: String(mem.id),
-      score: mem.score ?? 0,
-      payload: mem.payload || {},
-    }));
+    const seenIds = new Map<string, { id: string; score: number; payload: Record<string, any> }>();
+    for (const mem of semanticResults) {
+      const memId = String(mem.id);
+      seenIds.set(memId, {
+        id: memId,
+        score: mem.score ?? 0,
+        payload: mem.payload || {},
+      });
+    }
 
-    // Step 8: Score and rank
+    for (const [memId, payload] of Object.entries(keywordCandidates)) {
+      if (!seenIds.has(memId)) {
+        seenIds.set(memId, {
+          id: memId,
+          score: 0.0,
+          payload,
+        });
+      }
+    }
+
+    const entityOnlyIds = Object.keys(entityBoosts).filter(
+      (id) => !seenIds.has(id),
+    );
+    if (entityOnlyIds.length > 0) {
+      try {
+        for (const memId of entityOnlyIds) {
+          const result = await this.vectorStore.get(memId);
+          if (result) {
+            seenIds.set(memId, {
+              id: memId,
+              score: 0.0,
+              payload: result.payload || {},
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("Failed to fetch payloads for entity-only candidates:", e);
+      }
+    }
+
+    const candidates = Array.from(seenIds.values());
+
     const scoredResults = scoreAndRank(
       candidates,
       bm25Scores,

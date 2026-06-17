@@ -58,7 +58,7 @@ ENTITY_BOOST_WEIGHT = 0.5
 
 
 def score_and_rank(
-    semantic_results: List[Dict[str, Any]],
+    candidates: List[Dict[str, Any]],
     bm25_scores: Dict[str, float],
     entity_boosts: Dict[str, float],
     threshold: float,
@@ -67,24 +67,36 @@ def score_and_rank(
 ) -> List[Dict[str, Any]]:
     """Score candidates additively and return top-k results.
 
-    For each candidate:
-        semantic_score is taken from the result's score field.
-        combined = (semantic + bm25 + entity_boost) / max_possible
+    The candidate pool is the union of semantic, keyword, and entity-linked
+    memories.  A candidate that was only found via keyword or entity boost
+    (no semantic hit) has semantic_score = 0.0.
 
-    Threshold gates the semantic score BEFORE combining -- candidates
-    below the threshold are excluded even if BM25/entity would boost them.
+    Threshold gating:
+        - Candidates with a semantic score pass if semantic >= threshold.
+        - Candidates *without* a meaningful semantic score (pure keyword or
+          pure entity) pass if they have at least one non-semantic signal
+          (bm25 > 0 or entity_boost > 0).  This prevents purely semantic
+          low-quality hits from leaking through while allowing keyword /
+          entity-only matches to participate in ranking.
+
+    Combined score:
+        combined = (semantic + bm25 + entity_boost) / max_possible
 
     The divisor adapts based on which signals are active:
         - Semantic only: max_possible = 1.0
         - Semantic + BM25: max_possible = 2.0
         - Semantic + BM25 + entity: max_possible = 2.5
         - Semantic + entity (no BM25): max_possible = 1.5
+        - BM25 only (no semantic): max_possible = 1.0
+        - Entity only (no semantic): max_possible = ENTITY_BOOST_WEIGHT
 
     Args:
-        semantic_results: Candidate memories from vector search.
+        candidates: Unified candidate pool (semantic + keyword + entity).
+            Each dict must have "id", and may have "score" (semantic),
+            "payload", "bm25_score", and "entity_boost".
         bm25_scores: Normalized keyword scores keyed by memory ID.
         entity_boosts: Entity-link boosts keyed by memory ID.
-        threshold: Minimum semantic score required before hybrid scoring.
+        threshold: Minimum semantic score required for semantic-only candidates.
         top_k: Maximum number of results to return.
         explain: Include score_details in each result when true.
 
@@ -94,29 +106,40 @@ def score_and_rank(
     has_bm25 = bool(bm25_scores)
     has_entity = bool(entity_boosts)
 
-    max_possible = 1.0
-    if has_bm25:
-        max_possible += 1.0
-    if has_entity:
-        max_possible += ENTITY_BOOST_WEIGHT
-
     scored: List[Dict[str, Any]] = []
 
-    for result in semantic_results:
+    for result in candidates:
         mem_id = result.get("id")
         if mem_id is None:
             continue
 
+        mem_id_str = str(mem_id)
         semantic_score = result.get("score") or 0.0
-        if semantic_score < threshold:
+        bm25_score = bm25_scores.get(mem_id_str, result.get("bm25_score", 0.0))
+        entity_boost = entity_boosts.get(mem_id_str, result.get("entity_boost", 0.0))
+
+        has_semantic = semantic_score > 0.0
+        has_non_semantic = bm25_score > 0.0 or entity_boost > 0.0
+
+        if has_semantic and semantic_score < threshold and not has_non_semantic:
             continue
 
-        mem_id_str = str(mem_id)
-        bm25_score = bm25_scores.get(mem_id_str, 0.0)
-        entity_boost = entity_boosts.get(mem_id_str, 0.0)
+        if not has_semantic and not has_non_semantic:
+            continue
+
+        active_max = 0.0
+        if has_semantic:
+            active_max += 1.0
+        if has_bm25 and bm25_score > 0.0:
+            active_max += 1.0
+        if has_entity and entity_boost > 0.0:
+            active_max += ENTITY_BOOST_WEIGHT
+
+        if active_max == 0.0:
+            continue
 
         raw_combined = semantic_score + bm25_score + entity_boost
-        combined = min(raw_combined / max_possible, 1.0)
+        combined = min(raw_combined / active_max, 1.0)
 
         scored_result = {
             "id": mem_id_str,
@@ -129,7 +152,7 @@ def score_and_rank(
                 "bm25_score": bm25_score,
                 "entity_boost": entity_boost,
                 "raw_score": raw_combined,
-                "max_possible_score": max_possible,
+                "max_possible_score": active_max,
                 "final_score": combined,
                 "threshold": threshold,
             }

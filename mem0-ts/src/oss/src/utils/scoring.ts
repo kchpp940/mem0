@@ -76,28 +76,40 @@ export interface ScoredResult {
 /**
  * Score candidates additively and return top-k results.
  *
- * For each candidate:
- *   combined = (semantic + bm25 + entity_boost) / max_possible
+ * The candidate pool is the union of semantic, keyword, and entity-linked
+ * memories.  A candidate that was only found via keyword or entity boost
+ * (no semantic hit) has semanticScore = 0.
  *
- * Threshold gates the semantic score BEFORE combining -- candidates
- * below the threshold are excluded even if BM25/entity would boost them.
+ * Threshold gating:
+ *   - Candidates with a semantic score pass if semantic >= threshold.
+ *   - Candidates *without* a meaningful semantic score (pure keyword or
+ *     pure entity) pass if they have at least one non-semantic signal
+ *     (bm25 > 0 or entityBoost > 0).  This prevents purely semantic
+ *     low-quality hits from leaking through while allowing keyword /
+ *     entity-only matches to participate in ranking.
  *
- * The divisor adapts based on which signals are active:
- *   - Semantic only: max_possible = 1.0
- *   - Semantic + BM25: max_possible = 2.0
- *   - Semantic + BM25 + entity: max_possible = 2.5
- *   - Semantic + entity (no BM25): max_possible = 1.5
+ * Combined score:
+ *   combined = (semantic + bm25 + entityBoost) / maxPossible
  *
- * @param semanticResults - Candidate results with id, score, and payload.
+ * The divisor adapts based on which signals are active for each candidate:
+ *   - Semantic only: maxPossible = 1.0
+ *   - Semantic + BM25: maxPossible = 2.0
+ *   - Semantic + BM25 + entity: maxPossible = 2.5
+ *   - Semantic + entity (no BM25): maxPossible = 1.5
+ *   - BM25 only (no semantic): maxPossible = 1.0
+ *   - Entity only (no semantic): maxPossible = ENTITY_BOOST_WEIGHT
+ *
+ * @param candidates - Unified candidate pool (semantic + keyword + entity).
+ *   Each must have "id", and may have "score" (semantic), "payload".
  * @param bm25Scores - Map of memory ID to normalized BM25 score.
  * @param entityBoosts - Map of memory ID to entity boost score.
- * @param threshold - Minimum semantic score to include a candidate.
+ * @param threshold - Minimum semantic score for semantic-only candidates.
  * @param topK - Maximum number of results to return.
  * @param explain - Include scoreDetails in each result when true.
  * @returns Sorted list of scored results, highest score first.
  */
 export function scoreAndRank(
-  semanticResults: Array<{
+  candidates: Array<{
     id: string;
     score: number;
     payload: Record<string, any>;
@@ -111,36 +123,49 @@ export function scoreAndRank(
   const hasBm25 = Object.keys(bm25Scores).length > 0;
   const hasEntity = Object.keys(entityBoosts).length > 0;
 
-  let maxPossible = 1.0;
-  if (hasBm25) {
-    maxPossible += 1.0;
-  }
-  if (hasEntity) {
-    maxPossible += ENTITY_BOOST_WEIGHT;
-  }
-
   const scored: ScoredResult[] = [];
 
-  for (const result of semanticResults) {
+  for (const result of candidates) {
     const memId = result.id;
     if (memId == null) {
       continue;
     }
 
     const semanticScore = result.score ?? 0.0;
-    if (semanticScore < threshold) {
+    const bm25Score = bm25Scores[memId] ?? 0.0;
+    const entityBoost = entityBoosts[memId] ?? 0.0;
+
+    const hasSemantic = semanticScore > 0.0;
+    const hasNonSemantic = bm25Score > 0.0 || entityBoost > 0.0;
+
+    if (hasSemantic && semanticScore < threshold && !hasNonSemantic) {
       continue;
     }
 
-    const memIdStr = String(memId);
-    const bm25Score = bm25Scores[memIdStr] ?? 0.0;
-    const entityBoost = entityBoosts[memIdStr] ?? 0.0;
+    if (!hasSemantic && !hasNonSemantic) {
+      continue;
+    }
+
+    let activeMax = 0.0;
+    if (hasSemantic) {
+      activeMax += 1.0;
+    }
+    if (hasBm25 && bm25Score > 0.0) {
+      activeMax += 1.0;
+    }
+    if (hasEntity && entityBoost > 0.0) {
+      activeMax += ENTITY_BOOST_WEIGHT;
+    }
+
+    if (activeMax === 0.0) {
+      continue;
+    }
 
     const rawCombined = semanticScore + bm25Score + entityBoost;
-    const combined = Math.min(rawCombined / maxPossible, 1.0);
+    const combined = Math.min(rawCombined / activeMax, 1.0);
 
     const entry: ScoredResult = {
-      id: memIdStr,
+      id: memId,
       score: combined,
       payload: result.payload,
     };
@@ -150,7 +175,7 @@ export function scoreAndRank(
         bm25Score,
         entityBoost,
         rawScore: rawCombined,
-        maxPossibleScore: maxPossible,
+        maxPossibleScore: activeMax,
         finalScore: combined,
         threshold,
       };

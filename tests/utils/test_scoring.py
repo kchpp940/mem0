@@ -86,13 +86,23 @@ class TestScoreAndRank:
         expected = (0.8 + 0.6 + 0.3) / 2.5
         assert scored[0]["score"] == pytest.approx(expected)
 
-    def test_threshold_gates_on_semantic(self):
+    def test_threshold_gates_semantic_only_candidates(self):
         results = [
-            {"id": "a", "score": 0.05, "payload": {"data": "mem a"}},  # Below threshold
+            {"id": "a", "score": 0.05, "payload": {"data": "mem a"}},
             {"id": "b", "score": 0.5, "payload": {"data": "mem b"}},
         ]
-        bm25 = {"a": 0.99}  # High BM25 shouldn't save it
+        bm25 = {"a": 0.99}
         scored = score_and_rank(results, bm25, {}, threshold=0.1, top_k=10)
+        assert len(scored) == 2
+        assert scored[0]["id"] == "a"
+        assert scored[1]["id"] == "b"
+
+    def test_semantic_below_threshold_no_other_signal_excluded(self):
+        results = [
+            {"id": "a", "score": 0.05, "payload": {"data": "mem a"}},
+            {"id": "b", "score": 0.5, "payload": {"data": "mem b"}},
+        ]
+        scored = score_and_rank(results, {}, {}, threshold=0.1, top_k=10)
         assert len(scored) == 1
         assert scored[0]["id"] == "b"
 
@@ -154,6 +164,52 @@ class TestScoreAndRank:
         results = [{"id": "a", "score": 0.8, "payload": {"data": "mem a"}}]
         scored = score_and_rank(results, {}, {}, threshold=0.1, top_k=10)
         assert "score_details" not in scored[0]
+
+    def test_keyword_only_candidate_included(self):
+        results = [
+            {"id": "a", "score": 0.0, "payload": {"data": "keyword memory"}},
+            {"id": "b", "score": 0.8, "payload": {"data": "semantic memory"}},
+        ]
+        bm25 = {"a": 0.9}
+        scored = score_and_rank(results, bm25, {}, threshold=0.1, top_k=10)
+        ids = [s["id"] for s in scored]
+        assert "a" in ids
+        assert "b" in ids
+
+    def test_entity_only_candidate_included(self):
+        results = [
+            {"id": "a", "score": 0.0, "payload": {"data": "entity memory"}},
+            {"id": "b", "score": 0.8, "payload": {"data": "semantic memory"}},
+        ]
+        entity = {"a": 0.4}
+        scored = score_and_rank(results, {}, entity, threshold=0.1, top_k=10)
+        ids = [s["id"] for s in scored]
+        assert "a" in ids
+        assert "b" in ids
+
+    def test_no_signal_candidate_excluded(self):
+        results = [
+            {"id": "a", "score": 0.0, "payload": {"data": "no signal"}},
+            {"id": "b", "score": 0.8, "payload": {"data": "semantic memory"}},
+        ]
+        scored = score_and_rank(results, {}, {}, threshold=0.1, top_k=10)
+        ids = [s["id"] for s in scored]
+        assert "a" not in ids
+        assert "b" in ids
+
+    def test_entity_only_score_divisor(self):
+        results = [{"id": "a", "score": 0.0, "payload": {"data": "entity only"}}]
+        entity = {"a": 0.4}
+        scored = score_and_rank(results, {}, entity, threshold=0.1, top_k=10)
+        expected = 0.4 / ENTITY_BOOST_WEIGHT
+        assert scored[0]["score"] == pytest.approx(expected)
+
+    def test_bm25_only_score_divisor(self):
+        results = [{"id": "a", "score": 0.0, "payload": {"data": "bm25 only"}}]
+        bm25 = {"a": 0.7}
+        scored = score_and_rank(results, bm25, {}, threshold=0.1, top_k=10)
+        expected = 0.7 / 1.0
+        assert scored[0]["score"] == pytest.approx(expected)
 
 
 class TestEntityBoostWeight:

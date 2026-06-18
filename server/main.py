@@ -26,7 +26,6 @@ from routers import api_keys as api_keys_router
 from routers import auth as auth_router
 from routers import entities as entities_router
 from routers import requests as requests_router
-from memory_utils import list_vector_store_memories, normalize_response
 from schemas import MessageResponse
 from server_state import (
     get_current_config,
@@ -361,21 +360,36 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     try:
         response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
-        normalized = normalize_response(response)
-        results = normalized.get("results", []) if isinstance(normalized, dict) else normalized
-        if results:
+        if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
-        return JSONResponse(content=normalized)
+        return JSONResponse(content=response)
     except Exception:
         raise upstream_error()
 
 
 ALL_MEMORIES_LIMIT = 1000
+_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at"}
+
+
+def _serialize_memory(row: Any) -> Dict[str, Any]:
+    payload = getattr(row, "payload", None) or {}
+    return {
+        "id": getattr(row, "id", None),
+        "memory": payload.get("data"),
+        "user_id": payload.get("user_id"),
+        "agent_id": payload.get("agent_id"),
+        "run_id": payload.get("run_id"),
+        "hash": payload.get("hash"),
+        "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
+        "created_at": payload.get("created_at"),
+        "updated_at": payload.get("updated_at"),
+    }
 
 
 def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:
-    memories = list_vector_store_memories(get_memory_instance().vector_store, limit=limit)
-    return {"results": memories}
+    results = get_memory_instance().vector_store.list(top_k=limit)
+    rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
+    return {"results": [_serialize_memory(row) for row in rows]}
 
 
 @app.get("/memories", summary="Get memories")
@@ -396,8 +410,7 @@ def get_all_memories(
         filters = {
             k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
         }
-        sdk_result = get_memory_instance().get_all(filters=filters)
-        return normalize_response(sdk_result)
+        return get_memory_instance().get_all(filters=filters)
     except HTTPException:
         raise
     except Exception:
@@ -408,12 +421,7 @@ def get_all_memories(
 def get_memory(memory_id: str, _auth=Depends(verify_auth)):
     """Retrieve a specific memory by ID."""
     try:
-        result = get_memory_instance().get(memory_id)
-        if result is None:
-            raise HTTPException(status_code=404, detail="Memory not found")
-        return normalize_response(result)
-    except HTTPException:
-        raise
+        return get_memory_instance().get(memory_id)
     except Exception:
         raise upstream_error()
 
@@ -442,9 +450,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["threshold"] = search_req.threshold
         if search_req.explain is not None:
             params["explain"] = search_req.explain
-        return normalize_response(
-            get_memory_instance().search(query=search_req.query, filters=filters, **params)
-        )
+        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -457,10 +463,9 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
 def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(verify_auth)):
     """Update an existing memory."""
     try:
-        result = get_memory_instance().update(
+        return get_memory_instance().update(
             memory_id=memory_id, data=updated_memory.text, metadata=updated_memory.metadata
         )
-        return normalize_response(result)
     except Exception:
         raise upstream_error()
 

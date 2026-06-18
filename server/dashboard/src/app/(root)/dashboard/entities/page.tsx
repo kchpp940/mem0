@@ -79,7 +79,7 @@ export default function EntitiesPage() {
       key: "updated_at" as keyof Entity,
       label: "Last Active",
       width: 140,
-      render: (value: string | null | undefined) =>
+      render: (value: string | null) =>
         value ? format(new Date(value), "MMM d, yyyy") : "--",
     },
     {

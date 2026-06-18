@@ -25,6 +25,13 @@ export class MemoryVectorStore implements VectorStore {
     runId: "run_id",
   };
 
+  private static readonly KEY_MAP: Record<string, string> = {
+    $and: "AND",
+    $or: "OR",
+    $not: "NOT",
+    ...MemoryVectorStore.CAMEL_TO_SNAKE,
+  };
+
   private normalizePayload(payload: Record<string, any>): Record<string, any> {
     for (const [camel, snake] of Object.entries(
       MemoryVectorStore.CAMEL_TO_SNAKE,
@@ -94,6 +101,10 @@ export class MemoryVectorStore implements VectorStore {
     key: string,
     value: any,
   ): boolean {
+    if (value === undefined || value === null) {
+      return true;
+    }
+
     const payloadValue = payload[key];
 
     // Handle non-dict values
@@ -160,15 +171,9 @@ export class MemoryVectorStore implements VectorStore {
   private filterVector(vector: MemoryVector, filters?: SearchFilters): boolean {
     if (!filters || Object.keys(filters).length === 0) return true;
 
-    // Normalize $or/$not/$and → OR/NOT/AND
-    const keyMap: Record<string, string> = {
-      $and: "AND",
-      $or: "OR",
-      $not: "NOT",
-    };
     const normalized: Record<string, any> = {};
     for (const [key, value] of Object.entries(filters)) {
-      const normKey = keyMap[key] || key;
+      const normKey = MemoryVectorStore.KEY_MAP[key] || key;
       if (!(normKey in normalized)) {
         normalized[normKey] = value;
       }

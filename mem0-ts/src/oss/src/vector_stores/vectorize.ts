@@ -3,6 +3,25 @@ import type { Vectorize, VectorizeVector } from "@cloudflare/workers-types";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
 
+const CAMEL_ENTITY_KEYS: Record<string, string> = {
+  userId: "user_id",
+  agentId: "agent_id",
+  runId: "run_id",
+};
+
+function normalizeFilterKeys(
+  filters?: SearchFilters,
+): Record<string, any> | undefined {
+  if (!filters) return undefined;
+  const result: Record<string, any> = {};
+  for (const [key, value] of Object.entries(filters)) {
+    if (value === undefined || value === null) continue;
+    const normalizedKey = CAMEL_ENTITY_KEYS[key] || key;
+    result[normalizedKey] = value;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
 interface VectorizeConfig extends VectorStoreConfig {
   apiKey?: string;
   indexName: string;
@@ -89,7 +108,7 @@ export class VectorizeDB implements VectorStore {
         {
           account_id: this.accountId,
           vector: query,
-          filter: filters,
+          filter: normalizeFilterKeys(filters),
           returnMetadata: "all",
           topK: topK,
         },
@@ -208,8 +227,8 @@ export class VectorizeDB implements VectorStore {
         this.indexName,
         {
           account_id: this.accountId,
-          vector: Array(this.dimensions).fill(0), // Dummy vector for listing
-          filter: filters,
+          vector: Array(this.dimensions).fill(0),
+          filter: normalizeFilterKeys(filters),
           topK: topK,
           returnMetadata: "all",
         },

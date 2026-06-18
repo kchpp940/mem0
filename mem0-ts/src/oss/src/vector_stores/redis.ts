@@ -122,12 +122,19 @@ const EXCLUDED_KEYS = new Set([
 ]);
 
 // Utility function to convert object keys to snake_case
+const CAMEL_ENTITY_KEYS: Record<string, string> = {
+  userId: "user_id",
+  agentId: "agent_id",
+  runId: "run_id",
+};
+
 function toSnakeCase(obj: Record<string, any>): Record<string, any> {
   if (typeof obj !== "object" || obj === null) return obj;
 
   return Object.fromEntries(
     Object.entries(obj).map(([key, value]) => [
-      key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
+      CAMEL_ENTITY_KEYS[key] ||
+        key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`),
       value,
     ]),
   );
@@ -428,7 +435,7 @@ export class RedisDB implements VectorStore {
       )) as unknown as RedisSearchResult;
 
       return results.documents.map((doc) => {
-        const resultPayload = {
+        const camelPayload = toCamelCase({
           hash: doc.value.hash,
           data: doc.value.memory,
           created_at: new Date(parseInt(doc.value.created_at)).toISOString(),
@@ -439,11 +446,15 @@ export class RedisDB implements VectorStore {
           ...(doc.value.run_id && { run_id: doc.value.run_id }),
           ...(doc.value.user_id && { user_id: doc.value.user_id }),
           ...JSON.parse(doc.value.metadata || "{}"),
-        };
+        });
+        const resultPayload = { ...camelPayload };
+        if (doc.value.user_id) resultPayload.user_id = doc.value.user_id;
+        if (doc.value.agent_id) resultPayload.agent_id = doc.value.agent_id;
+        if (doc.value.run_id) resultPayload.run_id = doc.value.run_id;
 
         return {
           id: doc.value.memory_id,
-          payload: toCamelCase(resultPayload),
+          payload: resultPayload,
           score: Math.max(0, 1 - (Number(doc.value.__vector_score) ?? 0)),
         };
       });
@@ -534,7 +545,7 @@ export class RedisDB implements VectorStore {
         updated_at = undefined;
       }
 
-      const payload = {
+      const camelPayload = toCamelCase({
         hash: doc.hash,
         data: doc.memory,
         created_at: created_at.toISOString(),
@@ -543,11 +554,15 @@ export class RedisDB implements VectorStore {
         ...(doc.run_id && { run_id: doc.run_id }),
         ...(doc.user_id && { user_id: doc.user_id }),
         ...JSON.parse(doc.metadata || "{}"),
-      };
+      });
+      const resultPayload = { ...camelPayload };
+      if (doc.user_id) resultPayload.user_id = doc.user_id;
+      if (doc.agent_id) resultPayload.agent_id = doc.agent_id;
+      if (doc.run_id) resultPayload.run_id = doc.run_id;
 
       return {
         id: vectorId,
-        payload: toCamelCase(payload),
+        payload: resultPayload,
       };
     } catch (error) {
       console.error("Error getting vector:", error);
@@ -648,9 +663,8 @@ export class RedisDB implements VectorStore {
       searchOptions,
     )) as unknown as RedisSearchResult;
 
-    const items = results.documents.map((doc) => ({
-      id: doc.value.memory_id,
-      payload: toCamelCase({
+    const items = results.documents.map((doc) => {
+      const camelPayload = toCamelCase({
         hash: doc.value.hash,
         data: doc.value.memory,
         created_at: new Date(parseInt(doc.value.created_at)).toISOString(),
@@ -661,8 +675,17 @@ export class RedisDB implements VectorStore {
         ...(doc.value.run_id && { run_id: doc.value.run_id }),
         ...(doc.value.user_id && { user_id: doc.value.user_id }),
         ...JSON.parse(doc.value.metadata || "{}"),
-      }),
-    }));
+      });
+      const resultPayload = { ...camelPayload };
+      if (doc.value.user_id) resultPayload.user_id = doc.value.user_id;
+      if (doc.value.agent_id) resultPayload.agent_id = doc.value.agent_id;
+      if (doc.value.run_id) resultPayload.run_id = doc.value.run_id;
+
+      return {
+        id: doc.value.memory_id,
+        payload: resultPayload,
+      };
+    });
 
     return [items, results.total];
   }

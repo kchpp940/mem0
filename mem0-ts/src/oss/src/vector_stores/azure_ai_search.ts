@@ -296,14 +296,24 @@ export class AzureAISearch implements VectorStore {
     const filterConditions: string[] = [];
 
     for (const [key, value] of Object.entries(filters)) {
-      const safeKey = this.sanitizeKey(key);
+      if (value === undefined || value === null) {
+        continue;
+      }
+
+      const normalizedKey =
+        key === "userId"
+          ? "user_id"
+          : key === "agentId"
+            ? "agent_id"
+            : key === "runId"
+              ? "run_id"
+              : this.sanitizeKey(key);
 
       if (typeof value === "string") {
-        // Escape single quotes in string values
         const safeValue = value.replace(/'/g, "''");
-        filterConditions.push(`${safeKey} eq '${safeValue}'`);
+        filterConditions.push(`${normalizedKey} eq '${safeValue}'`);
       } else {
-        filterConditions.push(`${safeKey} eq ${value}`);
+        filterConditions.push(`${normalizedKey} eq ${value}`);
       }
     }
 

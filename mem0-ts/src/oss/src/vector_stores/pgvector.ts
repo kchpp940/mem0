@@ -57,6 +57,27 @@ const OPERATOR_SQL_MAP: Record<string, { template: string; numeric: boolean }> =
     },
   };
 
+const CAMEL_ENTITY_KEYS: Record<string, string> = {
+  userId: "user_id",
+  agentId: "agent_id",
+  runId: "run_id",
+};
+
+const LOGICAL_KEY_MAP: Record<string, string> = {
+  $or: "$or",
+  $not: "$not",
+  $and: "$and",
+  OR: "$or",
+  NOT: "$not",
+  AND: "$and",
+};
+
+function normalizeFilterKey(key: string): string {
+  if (key in CAMEL_ENTITY_KEYS) return CAMEL_ENTITY_KEYS[key];
+  if (key in LOGICAL_KEY_MAP) return LOGICAL_KEY_MAP[key];
+  return key;
+}
+
 export function buildFilterConditions(
   filters: Record<string, any> | undefined,
   startIndex: number,
@@ -69,7 +90,13 @@ export function buildFilterConditions(
     return { conditions, values, paramIndex };
   }
 
-  for (const [key, value] of Object.entries(filters)) {
+  for (const [rawKey, value] of Object.entries(filters)) {
+    const key = normalizeFilterKey(rawKey);
+
+    if (value === undefined || value === null) {
+      continue;
+    }
+
     if (key === "$or") {
       const orGroups: string[] = [];
       for (const orFilter of value as Record<string, any>[]) {

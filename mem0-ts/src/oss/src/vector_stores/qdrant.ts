@@ -47,11 +47,13 @@ interface QdrantCondition {
   };
 }
 
-// Normalize $and/$or/$not to AND/OR/NOT
 const KEY_MAP: Record<string, string> = {
   $and: "AND",
   $or: "OR",
   $not: "NOT",
+  userId: "user_id",
+  agentId: "agent_id",
+  runId: "run_id",
 };
 
 export class Qdrant implements VectorStore {
@@ -107,13 +109,14 @@ export class Qdrant implements VectorStore {
    * Supports enhanced filter syntax with comparison operators.
    */
   private buildFieldCondition(key: string, value: any): QdrantCondition | null {
-    // Handle non-dict values
+    if (value === undefined || value === null) {
+      return null;
+    }
+
     if (typeof value !== "object" || value === null) {
-      // Wildcard: match any value - skip this filter
       if (value === "*") {
         return null;
       }
-      // Simple equality
       return { key, match: { value } };
     }
 

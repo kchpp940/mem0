@@ -3,14 +3,6 @@ export interface Memory {
   memory: string;
   user_id?: string;
   agent_id?: string;
-  run_id?: string;
-  actor_id?: string;
-  role?: string;
-  hash?: string;
-  metadata?: Record<string, unknown>;
-  score?: number;
-  score_details?: Record<string, unknown>;
-  event?: string;
   created_at?: string;
   updated_at?: string;
 }
@@ -47,6 +39,6 @@ export interface Entity {
   id: string;
   type: EntityType;
   total_memories: number;
-  created_at?: string;
-  updated_at?: string;
+  created_at: string | null;
+  updated_at: string | null;
 }

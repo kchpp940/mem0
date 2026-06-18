@@ -234,40 +234,6 @@ export default function MemoriesPage() {
                     <p className="text-sm">{selectedMemory.agent_id}</p>
                   </div>
                 )}
-                {selectedMemory.run_id && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Run
-                    </Label>
-                    <p className="text-sm font-mono break-all">
-                      {selectedMemory.run_id}
-                    </p>
-                  </div>
-                )}
-                {selectedMemory.actor_id && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Actor
-                    </Label>
-                    <p className="text-sm">{selectedMemory.actor_id}</p>
-                  </div>
-                )}
-                {selectedMemory.role && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Role
-                    </Label>
-                    <p className="text-sm capitalize">{selectedMemory.role}</p>
-                  </div>
-                )}
-                {selectedMemory.score != null && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Score
-                    </Label>
-                    <p className="text-sm">{selectedMemory.score.toFixed(4)}</p>
-                  </div>
-                )}
                 {selectedMemory.created_at && (
                   <div className="space-y-1">
                     <Label className="text-xs text-onSurface-default-tertiary">

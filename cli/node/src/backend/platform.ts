@@ -16,6 +16,12 @@ import {
 	NotFoundError,
 	type SearchOptions,
 } from "./base.js";
+import {
+	buildAddPayload,
+	buildFilters,
+	buildListPayload,
+	buildSearchPayload,
+} from "./payloadBuilder.js";
 
 export class PlatformBackend implements Backend {
 	private baseUrl: string;
@@ -130,25 +136,19 @@ export class PlatformBackend implements Backend {
 		messages?: Record<string, unknown>[],
 		opts: AddOptions = {},
 	): Promise<Record<string, unknown>> {
-		const payload: Record<string, unknown> = {};
-
-		if (messages) {
-			payload.messages = messages;
-		} else if (content) {
-			payload.messages = [{ role: "user", content }];
-		}
-
-		if (opts.userId) payload.user_id = opts.userId;
-		if (opts.agentId) payload.agent_id = opts.agentId;
-		if (opts.appId) payload.app_id = opts.appId;
-		if (opts.runId) payload.run_id = opts.runId;
-		if (opts.metadata) payload.metadata = opts.metadata;
-		if (opts.immutable) payload.immutable = true;
-		if (opts.infer === false) payload.infer = false;
-		if (opts.expires) payload.expiration_date = opts.expires;
-		if (opts.categories) payload.categories = opts.categories;
-		payload.source = "CLI";
-
+		const payload = buildAddPayload({
+			content,
+			messages,
+			userId: opts.userId,
+			agentId: opts.agentId,
+			appId: opts.appId,
+			runId: opts.runId,
+			metadata: opts.metadata,
+			immutable: opts.immutable,
+			infer: opts.infer,
+			expires: opts.expires,
+			categories: opts.categories,
+		});
 		return (await this._request("POST", "/v3/memories/add/", {
 			json: payload,
 		})) as Record<string, unknown>;
@@ -161,53 +161,31 @@ export class PlatformBackend implements Backend {
 		runId?: string;
 		extraFilters?: Record<string, unknown>;
 	}): Record<string, unknown> | undefined {
-		// If caller passed a pre-built filter structure, use it directly
-		if (
-			opts.extraFilters &&
-			("AND" in opts.extraFilters || "OR" in opts.extraFilters)
-		) {
-			return opts.extraFilters;
-		}
-
-		const andConditions: Record<string, unknown>[] = [];
-		if (opts.userId) andConditions.push({ user_id: opts.userId });
-		if (opts.agentId) andConditions.push({ agent_id: opts.agentId });
-		if (opts.appId) andConditions.push({ app_id: opts.appId });
-		if (opts.runId) andConditions.push({ run_id: opts.runId });
-
-		if (opts.extraFilters) {
-			for (const [k, v] of Object.entries(opts.extraFilters)) {
-				andConditions.push({ [k]: v });
-			}
-		}
-
-		if (andConditions.length === 1) return andConditions[0];
-		if (andConditions.length > 1) return { AND: andConditions };
-		return undefined;
+		/**
+		 * Build a filters dict for v3 Platform API endpoints.
+		 *
+		 * Delegates to the shared payload builder to ensure consistency between
+		 * Python and Node CLIs.
+		 */
+		return buildFilters(opts);
 	}
 
 	async search(
 		query: string,
 		opts: SearchOptions = {},
 	): Promise<Record<string, unknown>[]> {
-		const payload: Record<string, unknown> = {
-			query,
-			top_k: opts.topK ?? 10,
-			threshold: opts.threshold ?? 0.3,
-		};
-
-		const apiFilters = this._buildFilters({
+		const payload = buildSearchPayload(query, {
 			userId: opts.userId,
 			agentId: opts.agentId,
 			appId: opts.appId,
 			runId: opts.runId,
-			extraFilters: opts.filters,
+			topK: opts.topK,
+			threshold: opts.threshold,
+			rerank: opts.rerank,
+			keyword: opts.keyword,
+			filters: opts.filters,
+			fields: opts.fields,
 		});
-		if (apiFilters) payload.filters = apiFilters;
-		if (opts.rerank) payload.rerank = true;
-		if (opts.keyword) payload.keyword_search = true;
-		if (opts.fields) payload.fields = opts.fields;
-		payload.source = "CLI";
 
 		const result = (await this._request("POST", "/v3/memories/search/", {
 			json: payload,
@@ -226,38 +204,17 @@ export class PlatformBackend implements Backend {
 	async listMemories(
 		opts: ListOptions = {},
 	): Promise<Record<string, unknown>[]> {
-		const payload: Record<string, unknown> = {};
-		const params: Record<string, string> = {
-			page: String(opts.page ?? 1),
-			page_size: String(opts.pageSize ?? 100),
-		};
-
-		const extra: Record<string, unknown> = {};
-		if (opts.category) {
-			extra.categories = { contains: opts.category };
-		}
-		if (opts.after) {
-			extra.created_at = {
-				...(extra.created_at as Record<string, unknown> | undefined),
-				gte: opts.after,
-			};
-		}
-		if (opts.before) {
-			extra.created_at = {
-				...(extra.created_at as Record<string, unknown> | undefined),
-				lte: opts.before,
-			};
-		}
-
-		const apiFilters = this._buildFilters({
+		const { payload, params } = buildListPayload({
 			userId: opts.userId,
 			agentId: opts.agentId,
 			appId: opts.appId,
 			runId: opts.runId,
-			extraFilters: Object.keys(extra).length > 0 ? extra : undefined,
+			category: opts.category,
+			after: opts.after,
+			before: opts.before,
 		});
-		if (apiFilters) payload.filters = apiFilters;
-		payload.source = "CLI";
+		params.page = String(opts.page ?? 1);
+		params.page_size = String(opts.pageSize ?? 100);
 
 		const result = (await this._request("POST", "/v3/memories/", {
 			json: payload,

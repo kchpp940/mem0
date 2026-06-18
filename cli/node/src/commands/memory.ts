@@ -5,6 +5,13 @@
 import fs from "node:fs";
 import type { Backend } from "../backend/base.js";
 import {
+	ValidationError,
+	handleValidationError,
+	normalizeCategories,
+	parseFilterJson,
+	validateExpires,
+} from "../backend/payloadBuilder.js";
+import {
 	printError,
 	printInfo,
 	printScope,
@@ -94,18 +101,14 @@ export async function cmdAdd(
 		process.exit(1);
 	}
 
-	// Validate --expires
-	if (opts.expires) {
-		if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.expires)) {
-			printError(
-				"Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
-			);
-			process.exit(1);
-		}
-		if (new Date(opts.expires) <= new Date()) {
-			printError("--expires date must be in the future.");
-			process.exit(1);
-		}
+	let cats: string[] | undefined;
+	let expires: string | undefined;
+	try {
+		cats = normalizeCategories(opts.categories);
+		expires = validateExpires(opts.expires);
+	} catch (e) {
+		if (e instanceof ValidationError) handleValidationError(e);
+		throw e;
 	}
 
 	let meta: Record<string, unknown> | undefined;
@@ -115,15 +118,6 @@ export async function cmdAdd(
 		} catch {
 			printError("Invalid JSON in --metadata.");
 			process.exit(1);
-		}
-	}
-
-	let cats: string[] | undefined;
-	if (opts.categories) {
-		try {
-			cats = JSON.parse(opts.categories);
-		} catch {
-			cats = opts.categories.split(",").map((c) => c.trim());
 		}
 	}
 
@@ -138,7 +132,7 @@ export async function cmdAdd(
 				metadata: meta,
 				immutable: opts.immutable,
 				infer: opts.infer !== false,
-				expires: opts.expires,
+				expires: expires,
 				categories: cats,
 			});
 		});
@@ -228,13 +222,11 @@ export async function cmdSearch(
 	}
 
 	let filters: Record<string, unknown> | undefined;
-	if (opts.filterJson) {
-		try {
-			filters = JSON.parse(opts.filterJson);
-		} catch {
-			printError("Invalid JSON in --filter.");
-			process.exit(1);
-		}
+	try {
+		filters = parseFilterJson(opts.filterJson);
+	} catch (e) {
+		if (e instanceof ValidationError) handleValidationError(e);
+		throw e;
 	}
 
 	const fieldList = opts.fields

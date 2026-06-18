@@ -8,6 +8,11 @@ import httpx
 
 from mem0_cli import __version__
 from mem0_cli.backend.base import Backend
+from mem0_cli.backend.payload_builder import (
+    build_add_payload,
+    build_list_payload,
+    build_search_payload,
+)
 from mem0_cli.config import PlatformConfig
 
 
@@ -84,33 +89,19 @@ class PlatformBackend(Backend):
         expires: str | None = None,
         categories: list[str] | None = None,
     ) -> dict:
-        payload: dict[str, Any] = {}
-
-        if messages:
-            payload["messages"] = messages
-        elif content:
-            payload["messages"] = [{"role": "user", "content": content}]
-
-        if user_id:
-            payload["user_id"] = user_id
-        if agent_id:
-            payload["agent_id"] = agent_id
-        if app_id:
-            payload["app_id"] = app_id
-        if run_id:
-            payload["run_id"] = run_id
-        if metadata:
-            payload["metadata"] = metadata
-        if immutable:
-            payload["immutable"] = True
-        if not infer:
-            payload["infer"] = False
-        if expires:
-            payload["expiration_date"] = expires
-        if categories:
-            payload["categories"] = categories
-        payload["source"] = "CLI"
-
+        payload = build_add_payload(
+            content=content,
+            messages=messages,
+            user_id=user_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            run_id=run_id,
+            metadata=metadata,
+            immutable=immutable,
+            infer=infer,
+            expires=expires,
+            categories=categories,
+        )
         return self._request("POST", "/v3/memories/add/", json=payload)
 
     def _build_filters(
@@ -124,35 +115,18 @@ class PlatformBackend(Backend):
     ) -> dict | None:
         """Build a filters dict for v3 API endpoints.
 
-        Entity IDs are ANDed (all provided IDs must match).
-        Extra filters (date ranges, categories) are also ANDed.
+        Delegates to the shared payload builder to ensure consistency between
+        Python and Node CLIs.
         """
-        # If caller passed a pre-built filter structure (e.g. --filter from CLI), use it directly
-        if extra_filters and ("AND" in extra_filters or "OR" in extra_filters):
-            return extra_filters
+        from mem0_cli.backend.payload_builder import build_filters
 
-        # Build AND conditions for entity IDs
-        and_conditions: list[dict[str, Any]] = []
-        if user_id:
-            and_conditions.append({"user_id": user_id})
-        if agent_id:
-            and_conditions.append({"agent_id": agent_id})
-        if app_id:
-            and_conditions.append({"app_id": app_id})
-        if run_id:
-            and_conditions.append({"run_id": run_id})
-
-        # Append any extra filters (dates, categories)
-        if extra_filters:
-            for k, v in extra_filters.items():
-                and_conditions.append({k: v})
-
-        if len(and_conditions) == 1:
-            return and_conditions[0]
-        elif and_conditions:
-            return {"AND": and_conditions}
-        else:
-            return None
+        return build_filters(
+            user_id=user_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            run_id=run_id,
+            extra_filters=extra_filters,
+        )
 
     def search(
         self,
@@ -169,25 +143,19 @@ class PlatformBackend(Backend):
         filters: dict | None = None,
         fields: list[str] | None = None,
     ) -> list[dict]:
-        payload: dict[str, Any] = {"query": query, "top_k": top_k, "threshold": threshold}
-
-        api_filters = self._build_filters(
+        payload = build_search_payload(
+            query,
             user_id=user_id,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
-            extra_filters=filters,
+            top_k=top_k,
+            threshold=threshold,
+            rerank=rerank,
+            keyword=keyword,
+            filters=filters,
+            fields=fields,
         )
-        if api_filters:
-            payload["filters"] = api_filters
-        if rerank:
-            payload["rerank"] = True
-        if keyword:
-            payload["keyword_search"] = True
-        if fields:
-            payload["fields"] = fields
-        payload["source"] = "CLI"
-
         result = self._request("POST", "/v3/memories/search/", json=payload)
         return (
             result
@@ -211,28 +179,17 @@ class PlatformBackend(Backend):
         after: str | None = None,
         before: str | None = None,
     ) -> list[dict]:
-        payload: dict[str, Any] = {}
-        params = {"page": str(page), "page_size": str(page_size)}
-
-        # Build filters — entity IDs and date filters go inside "filters"
-        extra: dict[str, Any] = {}
-        if category:
-            extra["categories"] = {"contains": category}
-        if after:
-            extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
-        if before:
-            extra["created_at"] = {**(extra.get("created_at", {})), "lte": before}
-
-        api_filters = self._build_filters(
+        payload, params = build_list_payload(
             user_id=user_id,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
-            extra_filters=extra if extra else None,
+            category=category,
+            after=after,
+            before=before,
         )
-        if api_filters:
-            payload["filters"] = api_filters
-        payload["source"] = "CLI"
+        params["page"] = str(page)
+        params["page_size"] = str(page_size)
 
         result = self._request("POST", "/v3/memories/", json=payload, params=params)
         return (

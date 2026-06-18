@@ -13,6 +13,13 @@ import typer
 from rich.console import Console
 
 from mem0_cli.backend.base import Backend
+from mem0_cli.backend.payload_builder import (
+    ValidationError,
+    handle_validation_error,
+    normalize_categories,
+    parse_filter_json,
+    validate_expires,
+)
 from mem0_cli.branding import (
     print_error,
     print_info,
@@ -109,27 +116,11 @@ def cmd_add(
             print_error(err_console, "Invalid JSON in --metadata.")
             raise typer.Exit(1) from None
 
-    cats = None
-    if categories:
-        try:
-            cats = json.loads(categories)
-        except json.JSONDecodeError:
-            cats = [c.strip() for c in categories.split(",")]
-
-    # Validate --expires
-    if expires:
-        import re
-
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expires):
-            print_error(
-                err_console, "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31)."
-            )
-            raise typer.Exit(1)
-        from datetime import date
-
-        if date.fromisoformat(expires) <= date.today():
-            print_error(err_console, "--expires date must be in the future.")
-            raise typer.Exit(1)
+    try:
+        cats = normalize_categories(categories)
+        expires = validate_expires(expires)
+    except ValidationError as e:
+        handle_validation_error(e, err_console)
 
     with timed_status(err_console, "Adding memory...") as ts:
         try:
@@ -224,13 +215,10 @@ def cmd_search(
     set_current_command("search")
     if is_agent_mode():
         output = "agent"
-    filters = None
-    if filter_json:
-        try:
-            filters = json.loads(filter_json)
-        except json.JSONDecodeError:
-            print_error(err_console, "Invalid JSON in --filter.")
-            raise typer.Exit(1) from None
+    try:
+        filters = parse_filter_json(filter_json)
+    except ValidationError as e:
+        handle_validation_error(e, err_console)
 
     field_list = None
     if fields:

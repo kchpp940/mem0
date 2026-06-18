@@ -3,7 +3,11 @@ import pkg from "pg";
 const { Client, escapeIdentifier } = pkg;
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { buildPGVectorFilter, FilterResult } from "../utils/filter_utils";
+import {
+  buildPGVectorFilter,
+  FilterCapability,
+  FilterResult,
+} from "../utils/filter_utils";
 
 export const buildFilterConditions = buildPGVectorFilter;
 
@@ -34,6 +38,7 @@ interface PGVectorConfig extends VectorStoreConfig {
 }
 
 export class PGVector implements VectorStore {
+  readonly filterCapability: FilterCapability = "advanced";
   private client: ClientType;
   private collectionName: string;
   private useDiskann: boolean;

@@ -8,7 +8,7 @@ import type {
 } from "redis";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { buildRedisFilterExpr } from "../utils/filter_utils";
+import { buildRedisFilterExpr, FilterCapability } from "../utils/filter_utils";
 
 /**
  * Escape RediSearch TAG filter special characters. Any punctuation in the
@@ -153,6 +153,7 @@ function toCamelCase(obj: Record<string, any>): Record<string, any> {
 }
 
 export class RedisDB implements VectorStore {
+  readonly filterCapability: FilterCapability = "equality-only";
   private client: RedisClientType<
     RedisDefaultModules & RedisModules & RedisFunctions & RedisScripts
   >;
@@ -394,7 +395,11 @@ export class RedisDB implements VectorStore {
     topK: number = 5,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
-    const filterExpr = buildRedisFilterExpr(filters, escapeRedisTagValue);
+    const filterExpr = buildRedisFilterExpr(
+      filters,
+      escapeRedisTagValue,
+      this.filterCapability,
+    );
 
     const queryVector = new Float32Array(query).buffer;
 
@@ -634,7 +639,11 @@ export class RedisDB implements VectorStore {
     filters?: SearchFilters,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
-    const filterExpr = buildRedisFilterExpr(filters, escapeRedisTagValue);
+    const filterExpr = buildRedisFilterExpr(
+      filters,
+      escapeRedisTagValue,
+      this.filterCapability,
+    );
 
     const searchOptions = {
       SORTBY: "created_at",

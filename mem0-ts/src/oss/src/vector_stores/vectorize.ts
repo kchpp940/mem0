@@ -2,7 +2,10 @@ import Cloudflare from "cloudflare";
 import type { Vectorize, VectorizeVector } from "@cloudflare/workers-types";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { buildSimpleEqualityFilter } from "../utils/filter_utils";
+import {
+  buildSimpleEqualityFilter,
+  FilterCapability,
+} from "../utils/filter_utils";
 
 interface VectorizeConfig extends VectorStoreConfig {
   apiKey?: string;
@@ -17,6 +20,7 @@ interface CloudflareVector {
 }
 
 export class VectorizeDB implements VectorStore {
+  readonly filterCapability: FilterCapability = "equality-only";
   private client: Cloudflare | null = null;
   private dimensions: number;
   private indexName: string;
@@ -90,7 +94,7 @@ export class VectorizeDB implements VectorStore {
         {
           account_id: this.accountId,
           vector: query,
-          filter: buildSimpleEqualityFilter(filters),
+          filter: buildSimpleEqualityFilter(filters, this.filterCapability),
           returnMetadata: "all",
           topK: topK,
         },
@@ -210,7 +214,7 @@ export class VectorizeDB implements VectorStore {
         {
           account_id: this.accountId,
           vector: Array(this.dimensions).fill(0),
-          filter: buildSimpleEqualityFilter(filters),
+          filter: buildSimpleEqualityFilter(filters, this.filterCapability),
           topK: topK,
           returnMetadata: "all",
         },

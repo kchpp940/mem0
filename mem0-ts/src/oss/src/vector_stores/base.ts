@@ -1,6 +1,9 @@
 import { SearchFilters, VectorStoreResult } from "../types";
+import { FilterCapability } from "../utils/filter_utils";
 
 export interface VectorStore {
+  readonly filterCapability: FilterCapability;
+
   insert(
     vectors: number[][],
     ids: string[],

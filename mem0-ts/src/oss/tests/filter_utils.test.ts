@@ -9,6 +9,8 @@ import {
   buildQdrantFilter,
   buildPGVectorFilter,
   matchMemoryStoreFilter,
+  FilterCapability,
+  FilterCapabilityError,
 } from "../src/utils/filter_utils";
 
 describe("parseFilters - Python SDK compatibility", () => {
@@ -251,95 +253,130 @@ describe("parseFilters - Python SDK compatibility", () => {
   });
 });
 
-describe("simple filter builders - strict mode", () => {
-  test("buildSimpleEqualityFilter throws on non-eq operators by default", () => {
-    expect(() => {
-      buildSimpleEqualityFilter({ price: { gt: 100 } });
-    }).toThrow(/This vector store only supports simple equality filters/);
-    expect(() => {
-      buildSimpleEqualityFilter({ price: { gt: 100 } });
-    }).toThrow(/price\.gt/);
-  });
-
-  test("buildSimpleEqualityFilter throws on $or by default", () => {
-    expect(() => {
-      buildSimpleEqualityFilter({
-        $or: [{ category: "books" }, { category: "movies" }],
-      });
-    }).toThrow(/\$or/);
-  });
-
-  test("buildSimpleEqualityFilter throws on $not by default", () => {
-    expect(() => {
-      buildSimpleEqualityFilter({ $not: [{ status: "deleted" }] });
-    }).toThrow(/\$not/);
-  });
-
-  test("buildSimpleEqualityFilter does not throw on eq conditions", () => {
-    const result = buildSimpleEqualityFilter({
-      user_id: "alice",
-      status: { eq: "active" },
+describe("filter capability model", () => {
+  describe("reject capability (langchain — no filter support at all)", () => {
+    test("buildSimpleEqualityFilter throws FilterCapabilityError on eq with reject", () => {
+      expect(() => {
+        buildSimpleEqualityFilter({ user_id: "alice" }, "reject");
+      }).toThrow(FilterCapabilityError);
     });
-    expect(result).toEqual({ user_id: "alice", status: "active" });
+
+    test("buildSimpleEqualityFilter throws FilterCapabilityError on non-eq with reject", () => {
+      try {
+        buildSimpleEqualityFilter({ price: { gt: 100 } }, "reject");
+        fail("Expected FilterCapabilityError");
+      } catch (e) {
+        expect(e).toBeInstanceOf(FilterCapabilityError);
+        const err = e as FilterCapabilityError;
+        expect(err.capability).toBe("reject");
+        expect(err.message).toContain("does not support any filter conditions");
+      }
+    });
+
+    test("buildSimpleEqualityFilter throws FilterCapabilityError on $or with reject", () => {
+      expect(() => {
+        buildSimpleEqualityFilter(
+          { $or: [{ category: "books" }, { category: "movies" }] },
+          "reject",
+        );
+      }).toThrow(FilterCapabilityError);
+    });
+
+    test("buildSimpleEqualityFilter with reject returns empty for no filters", () => {
+      const result = buildSimpleEqualityFilter({}, "reject");
+      expect(result).toEqual({});
+    });
   });
 
-  test("buildSimpleEqualityFilter lenient mode extracts eq from mixed conditions", () => {
-    const result = buildSimpleEqualityFilter(
-      {
-        user_id: "alice",
-        price: { gt: 100 },
-        $or: [{ category: "books" }],
-      },
-      "lenient",
-    );
-    expect(result).toEqual({ user_id: "alice", category: "books" });
+  describe("equality-only capability (redis, supabase, azure, vectorize)", () => {
+    test("extracts eq from mixed conditions silently", () => {
+      const result = buildSimpleEqualityFilter(
+        { user_id: "alice", price: { gt: 100 } },
+        "equality-only",
+      );
+      expect(result).toEqual({ user_id: "alice" });
+    });
+
+    test("extracts eq from $or with eq children", () => {
+      const result = buildSimpleEqualityFilter(
+        {
+          user_id: "alice",
+          $or: [{ category: "books" }],
+        },
+        "equality-only",
+      );
+      expect(result).toEqual({ user_id: "alice", category: "books" });
+    });
+
+    test("buildSupabaseEqualityFilter with equality-only works for eq-only", () => {
+      const result = buildSupabaseEqualityFilter(
+        { user_id: "alice", price: { gt: 100 } },
+        "equality-only",
+      );
+      expect(result).toEqual({ user_id: "alice" });
+    });
+
+    test("buildAzureODataFilter with equality-only extracts eq conditions", () => {
+      const result = buildAzureODataFilter(
+        { user_id: "alice", price: { gt: 100 } },
+        "equality-only",
+      );
+      expect(result).toContain("user_id eq 'alice'");
+      expect(result).not.toContain("gt");
+    });
+
+    test("buildRedisFilterExpr with equality-only extracts eq conditions", () => {
+      const escapeValue = (v: unknown) => String(v);
+      const result = buildRedisFilterExpr(
+        { user_id: "alice", price: { gt: 100 } },
+        escapeValue,
+        "equality-only",
+      );
+      expect(result).toContain("@user_id:{alice}");
+      expect(result).not.toContain("gt");
+    });
   });
 
-  test("buildSupabaseEqualityFilter throws on non-eq by default", () => {
-    expect(() => {
-      buildSupabaseEqualityFilter({ price: { gt: 100 } });
-    }).toThrow(/only supports simple equality filters/);
+  describe("advanced capability (qdrant, pgvector, memory)", () => {
+    test("buildSimpleEqualityFilter with advanced returns all eq fields", () => {
+      const result = buildSimpleEqualityFilter(
+        { user_id: "alice", price: { gt: 100 } },
+        "advanced",
+      );
+      expect(result).toEqual({ user_id: "alice" });
+    });
+
+    test("buildSimpleEqualityFilter with advanced does not throw on $or", () => {
+      const result = buildSimpleEqualityFilter(
+        {
+          user_id: "alice",
+          $or: [{ category: "books" }],
+        },
+        "advanced",
+      );
+      expect(result).toEqual({ user_id: "alice", category: "books" });
+    });
   });
 
-  test("buildSupabaseEqualityFilter lenient mode works", () => {
-    const result = buildSupabaseEqualityFilter(
-      { user_id: "alice", price: { gt: 100 } },
-      "lenient",
-    );
-    expect(result).toEqual({ user_id: "alice" });
-  });
+  describe("FilterCapabilityError properties", () => {
+    test("reject error has correct name and properties", () => {
+      try {
+        buildSimpleEqualityFilter({ user_id: "alice" }, "reject");
+        fail("Expected FilterCapabilityError");
+      } catch (e) {
+        expect(e).toBeInstanceOf(FilterCapabilityError);
+        const err = e as FilterCapabilityError;
+        expect(err.name).toBe("FilterCapabilityError");
+        expect(err.capability).toBe("reject");
+        expect(err.unsupportedConditions).toContain("user_id.eq");
+      }
+    });
 
-  test("buildAzureODataFilter throws on non-eq by default", () => {
-    expect(() => {
-      buildAzureODataFilter({ price: { gt: 100 } });
-    }).toThrow(/only supports simple equality filters/);
-  });
-
-  test("buildAzureODataFilter lenient mode extracts eq conditions", () => {
-    const result = buildAzureODataFilter(
-      { user_id: "alice", price: { gt: 100 } },
-      "lenient",
-    );
-    expect(result).toContain("user_id eq 'alice'");
-    expect(result).not.toContain("gt");
-  });
-
-  test("buildRedisFilterExpr throws on non-eq by default", () => {
-    const escapeValue = (v: unknown) => String(v);
-    expect(() => {
-      buildRedisFilterExpr({ price: { gt: 100 } }, escapeValue);
-    }).toThrow(/only supports simple equality filters/);
-  });
-
-  test("buildRedisFilterExpr lenient mode extracts eq conditions", () => {
-    const escapeValue = (v: unknown) => String(v);
-    const result = buildRedisFilterExpr(
-      { user_id: "alice", price: { gt: 100 } },
-      escapeValue,
-      "lenient",
-    );
-    expect(result).toContain("@user_id:{alice}");
-    expect(result).not.toContain("gt");
+    test("default parameter uses reject capability", () => {
+      expect(() => {
+        buildSimpleEqualityFilter({ user_id: "alice" });
+      }).toThrow(FilterCapabilityError);
+    });
   });
 });
 

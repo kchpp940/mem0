@@ -611,7 +611,28 @@ export function matchMemoryStoreFilter(
   return true;
 }
 
-export type FilterDegradeMode = "strict" | "lenient";
+export type FilterCapability = "advanced" | "equality-only" | "reject";
+
+export class FilterCapabilityError extends Error {
+  readonly capability: FilterCapability;
+  readonly unsupportedConditions: string[];
+
+  constructor(capability: FilterCapability, unsupportedConditions: string[]) {
+    const capabilityLabel =
+      capability === "reject"
+        ? "does not support any filter conditions"
+        : `only supports simple equality filters`;
+    super(
+      `Filter capability '${capability}' ${capabilityLabel}. ` +
+        `Unsupported conditions: ${unsupportedConditions.join(", ")}. ` +
+        `Use a vector store with 'advanced' capability (pgvector, qdrant, memory) ` +
+        `for full filter support.`,
+    );
+    this.name = "FilterCapabilityError";
+    this.capability = capability;
+    this.unsupportedConditions = unsupportedConditions;
+  }
+}
 
 function collectEqFields(nodes: FilterNode[]): {
   eqFields: Array<{ key: string; value: any }>;
@@ -646,23 +667,35 @@ function collectEqFields(nodes: FilterNode[]): {
   return { eqFields, nonEqOps };
 }
 
+function enforceCapability(
+  nodes: FilterNode[],
+  capability: FilterCapability,
+): { eqFields: Array<{ key: string; value: any }>; nonEqOps: string[] } {
+  const { eqFields, nonEqOps } = collectEqFields(nodes);
+
+  if (capability === "advanced") {
+    return { eqFields, nonEqOps };
+  }
+
+  if (capability === "reject") {
+    const allConditions = [...eqFields.map((f) => `${f.key}.eq`), ...nonEqOps];
+    if (allConditions.length > 0) {
+      throw new FilterCapabilityError(capability, allConditions);
+    }
+    return { eqFields, nonEqOps };
+  }
+
+  return { eqFields, nonEqOps };
+}
+
 export function buildSimpleEqualityFilter(
   filters: Record<string, any> | undefined,
-  mode: FilterDegradeMode = "strict",
+  capability: FilterCapability = "reject",
 ): Record<string, any> {
   const result: Record<string, any> = {};
   const nodes = parseFilters(filters);
 
-  const { eqFields, nonEqOps } = collectEqFields(nodes);
-
-  if (mode === "strict" && nonEqOps.length > 0) {
-    throw new Error(
-      `This vector store only supports simple equality filters. ` +
-        `Unsupported filter conditions: ${nonEqOps.join(", ")}. ` +
-        `Use mode "lenient" to extract only equality conditions, or use a vector store ` +
-        `that supports advanced filters (pgvector, qdrant, memory).`,
-    );
-  }
+  const { eqFields } = enforceCapability(nodes, capability);
 
   for (const { key, value } of eqFields) {
     result[key] = value;
@@ -672,21 +705,12 @@ export function buildSimpleEqualityFilter(
 
 export function buildAzureODataFilter(
   filters: Record<string, any> | undefined,
-  mode: FilterDegradeMode = "strict",
+  capability: FilterCapability = "reject",
 ): string {
   const nodes = parseFilters(filters);
   const parts: string[] = [];
 
-  const { eqFields, nonEqOps } = collectEqFields(nodes);
-
-  if (mode === "strict" && nonEqOps.length > 0) {
-    throw new Error(
-      `Azure AI Search filter adapter currently only supports simple equality filters. ` +
-        `Unsupported filter conditions: ${nonEqOps.join(", ")}. ` +
-        `Use mode "lenient" to extract only equality conditions, or use a vector store ` +
-        `that supports advanced filters (pgvector, qdrant, memory).`,
-    );
-  }
+  const { eqFields } = enforceCapability(nodes, capability);
 
   for (const { key, value } of eqFields) {
     const sanitizedKey = key.replace(/[^\w]/g, "");
@@ -703,21 +727,12 @@ export function buildAzureODataFilter(
 export function buildRedisFilterExpr(
   filters: Record<string, any> | undefined,
   escapeValue: (v: unknown) => string,
-  mode: FilterDegradeMode = "strict",
+  capability: FilterCapability = "reject",
 ): string {
   const nodes = parseFilters(filters);
   const parts: string[] = [];
 
-  const { eqFields, nonEqOps } = collectEqFields(nodes);
-
-  if (mode === "strict" && nonEqOps.length > 0) {
-    throw new Error(
-      `Redis vector store only supports simple equality filters via TAG fields. ` +
-        `Unsupported filter conditions: ${nonEqOps.join(", ")}. ` +
-        `Use mode "lenient" to extract only equality conditions, or use a vector store ` +
-        `that supports advanced filters (pgvector, qdrant, memory).`,
-    );
-  }
+  const { eqFields } = enforceCapability(nodes, capability);
 
   for (const { key, value } of eqFields) {
     parts.push(`@${key}:{${escapeValue(value)}}`);
@@ -727,8 +742,8 @@ export function buildRedisFilterExpr(
 
 export function buildSupabaseEqualityFilter(
   filters: Record<string, any> | undefined,
-  mode: FilterDegradeMode = "strict",
+  capability: FilterCapability = "reject",
 ): Record<string, any> | undefined {
-  const result = buildSimpleEqualityFilter(filters, mode);
+  const result = buildSimpleEqualityFilter(filters, capability);
   return Object.keys(result).length > 0 ? result : undefined;
 }

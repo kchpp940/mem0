@@ -7,7 +7,11 @@ import {
   ensureSQLiteDirectory,
   getDefaultVectorStoreDbPath,
 } from "../utils/sqlite";
-import { matchMemoryStoreFilter, parseFilters } from "../utils/filter_utils";
+import {
+  FilterCapability,
+  matchMemoryStoreFilter,
+  parseFilters,
+} from "../utils/filter_utils";
 
 interface MemoryVector {
   id: string;
@@ -16,6 +20,7 @@ interface MemoryVector {
 }
 
 export class MemoryVectorStore implements VectorStore {
+  readonly filterCapability: FilterCapability = "advanced";
   private db: Database.Database;
   private dimension: number;
   private dbPath: string;

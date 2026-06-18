@@ -3,6 +3,7 @@ import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
 import {
   buildQdrantFilter,
+  FilterCapability,
   parseFilters,
   QdrantFilter,
 } from "../utils/filter_utils";
@@ -36,6 +37,7 @@ interface QdrantConfig extends VectorStoreConfig {
 }
 
 export class Qdrant implements VectorStore {
+  readonly filterCapability: FilterCapability = "advanced";
   private client: QdrantClient;
   private readonly collectionName: string;
   private dimension: number;

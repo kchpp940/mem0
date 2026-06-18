@@ -26,6 +26,16 @@ PASSTHROUGH_KEYS = frozenset({
 })
 
 
+def extract_payload(row: Any) -> Dict[str, Any]:
+    return getattr(row, "payload", None) or {}
+
+
+def is_memory_item(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    return "memory" in item or "id" in item
+
+
 def format_memory_response(
     memory_item: Dict[str, Any],
     score: Optional[float] = None,
@@ -69,7 +79,7 @@ def format_memory_response(
 
 
 def format_vector_store_row(row: Any) -> Dict[str, Any]:
-    payload = getattr(row, "payload", None) or {}
+    payload = extract_payload(row)
     row_id = getattr(row, "id", None)
 
     promoted = {}
@@ -102,19 +112,40 @@ def format_vector_store_row(row: Any) -> Dict[str, Any]:
     return result
 
 
-def normalize_sdk_result(result: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(result, dict):
-        return result
+def normalize_memory_item(item: Any) -> Any:
+    if not is_memory_item(item):
+        return item
 
-    if "memory" not in result and "id" not in result:
-        return result
-
-    return format_memory_response(
-        result,
-        score=result.get("score"),
-        score_details=result.get("score_details"),
-    )
+    score = item.get("score") if isinstance(item, dict) else None
+    score_details = item.get("score_details") if isinstance(item, dict) else None
+    return format_memory_response(item, score=score, score_details=score_details)
 
 
-def format_memory_list(items: List[Dict[str, Any]]) -> Dict[str, Any]:
-    return {"results": [normalize_sdk_result(item) for item in items]}
+def normalize_memory_list(items: List[Any]) -> List[Any]:
+    return [normalize_memory_item(it) for it in items]
+
+
+def normalize_response(response: Any) -> Any:
+    if isinstance(response, dict) and "results" in response and isinstance(response["results"], list):
+        return {**response, "results": normalize_memory_list(response["results"])}
+
+    if isinstance(response, list):
+        return normalize_memory_list(response)
+
+    if is_memory_item(response):
+        return normalize_memory_item(response)
+
+    return response
+
+
+def iter_formatted_rows(rows: List[Any]) -> List[Dict[str, Any]]:
+    return [format_vector_store_row(row) for row in rows]
+
+
+def list_vector_store_memories(
+    vector_store: Any,
+    limit: int = 10_000,
+) -> List[Dict[str, Any]]:
+    results = vector_store.list(top_k=limit)
+    rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
+    return iter_formatted_rows(rows)

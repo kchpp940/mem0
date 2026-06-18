@@ -25,9 +25,9 @@ def _mock_memory():
     """Patch Memory.from_config so the server imports without a real backend."""
     mock_instance = MagicMock()
     mock_instance.add.return_value = {"results": [{"id": "mem-1", "event": "ADD", "memory": "test"}]}
-    mock_instance.search.return_value = {"results": [{"id": "mem-1", "memory": "test", "score": 0.9}]}
+    mock_instance.search.return_value = [{"id": "mem-1", "memory": "test", "score": 0.9}]
     mock_instance.get.return_value = {"id": "mem-1", "memory": "test memory"}
-    mock_instance.get_all.return_value = {"results": [{"id": "mem-1", "memory": "test memory"}]}
+    mock_instance.get_all.return_value = [{"id": "mem-1", "memory": "test memory"}]
     mock_instance.update.return_value = {"message": "Memory updated"}
     mock_instance.history.return_value = [{"id": "mem-1", "old_memory": "a", "new_memory": "b"}]
     mock_instance.delete.return_value = None
@@ -611,8 +611,7 @@ class TestGetMemories:
         
         # 2. Verify the response is structured correctly
         data = response.json()
-        assert "results" in data
-        assert isinstance(data["results"], list)
+        assert isinstance(data, list)
         
         # 3. Verify the core logic: the param was mapped to the filters dict!
         _, kwargs = mock_memory.get_all.call_args

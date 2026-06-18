@@ -20,7 +20,40 @@ const COMPARISON_OPS = new Set([
   "nin",
   "contains",
   "icontains",
+  "$eq",
+  "$ne",
+  "$gt",
+  "$gte",
+  "$lt",
+  "$lte",
+  "$in",
+  "$nin",
+  "$contains",
+  "$icontains",
 ]);
+
+const OPERATOR_NORMALIZE: Record<string, FilterOp> = {
+  eq: "eq",
+  $eq: "eq",
+  ne: "ne",
+  $ne: "ne",
+  gt: "gt",
+  $gt: "gt",
+  gte: "gte",
+  $gte: "gte",
+  lt: "lt",
+  $lt: "lt",
+  lte: "lte",
+  $lte: "lte",
+  in: "in",
+  $in: "in",
+  nin: "nin",
+  $nin: "nin",
+  contains: "contains",
+  $contains: "contains",
+  icontains: "icontains",
+  $icontains: "icontains",
+};
 
 function isDefinedValue(value: unknown): boolean {
   return value !== undefined && value !== null;
@@ -137,9 +170,21 @@ function parseFilterObject(obj: Record<string, any>): FilterNode[] {
       const objKeys = Object.keys(rawValue);
       for (const opKey of objKeys) {
         if (!COMPARISON_OPS.has(opKey)) {
+          const supportedOps = [
+            "eq",
+            "ne",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "in",
+            "nin",
+            "contains",
+            "icontains",
+          ];
           throw new Error(
             `Unsupported filter operator(s) for field '${key}': ${opKey}. ` +
-              `Supported operators: ${Array.from(COMPARISON_OPS).join(", ")}`,
+              `Supported operators: ${supportedOps.join(", ")} (with or without $ prefix)`,
           );
         }
       }
@@ -149,7 +194,7 @@ function parseFilterObject(obj: Record<string, any>): FilterNode[] {
         nodes.push({
           type: "field",
           key,
-          op: opKey as FilterOp,
+          op: OPERATOR_NORMALIZE[opKey],
           value: opValue,
         });
       }
@@ -566,36 +611,90 @@ export function matchMemoryStoreFilter(
   return true;
 }
 
+export type FilterDegradeMode = "strict" | "lenient";
+
+function collectEqFields(nodes: FilterNode[]): {
+  eqFields: Array<{ key: string; value: any }>;
+  nonEqOps: string[];
+} {
+  const eqFields: Array<{ key: string; value: any }> = [];
+  const nonEqOps: string[] = [];
+
+  for (const node of nodes) {
+    if (node.type === "field") {
+      if (node.op === "eq") {
+        eqFields.push({ key: node.key, value: node.value });
+      } else {
+        nonEqOps.push(`${node.key}.${node.op}`);
+      }
+    } else if (
+      node.type === "and" ||
+      node.type === "or" ||
+      node.type === "not"
+    ) {
+      const childEq = collectEqFields(node.children);
+      eqFields.push(...childEq.eqFields);
+      nonEqOps.push(...childEq.nonEqOps);
+      if (node.type !== "and") {
+        nonEqOps.push(`$${node.type}`);
+      }
+    } else if (node.type === "exists") {
+      nonEqOps.push(`${node.key}.exists`);
+    }
+  }
+
+  return { eqFields, nonEqOps };
+}
+
 export function buildSimpleEqualityFilter(
   filters: Record<string, any> | undefined,
+  mode: FilterDegradeMode = "strict",
 ): Record<string, any> {
   const result: Record<string, any> = {};
   const nodes = parseFilters(filters);
 
-  for (const node of nodes) {
-    if (node.type === "field" && node.op === "eq") {
-      result[node.key] = node.value;
-    }
+  const { eqFields, nonEqOps } = collectEqFields(nodes);
+
+  if (mode === "strict" && nonEqOps.length > 0) {
+    throw new Error(
+      `This vector store only supports simple equality filters. ` +
+        `Unsupported filter conditions: ${nonEqOps.join(", ")}. ` +
+        `Use mode "lenient" to extract only equality conditions, or use a vector store ` +
+        `that supports advanced filters (pgvector, qdrant, memory).`,
+    );
+  }
+
+  for (const { key, value } of eqFields) {
+    result[key] = value;
   }
   return result;
 }
 
 export function buildAzureODataFilter(
   filters: Record<string, any> | undefined,
+  mode: FilterDegradeMode = "strict",
 ): string {
   const nodes = parseFilters(filters);
   const parts: string[] = [];
 
-  for (const node of nodes) {
-    if (node.type !== "field") continue;
-    const sanitizedKey = node.key.replace(/[^\w]/g, "");
-    if (node.op === "eq") {
-      if (typeof node.value === "string") {
-        const safeValue = node.value.replace(/'/g, "''");
-        parts.push(`${sanitizedKey} eq '${safeValue}'`);
-      } else {
-        parts.push(`${sanitizedKey} eq ${node.value}`);
-      }
+  const { eqFields, nonEqOps } = collectEqFields(nodes);
+
+  if (mode === "strict" && nonEqOps.length > 0) {
+    throw new Error(
+      `Azure AI Search filter adapter currently only supports simple equality filters. ` +
+        `Unsupported filter conditions: ${nonEqOps.join(", ")}. ` +
+        `Use mode "lenient" to extract only equality conditions, or use a vector store ` +
+        `that supports advanced filters (pgvector, qdrant, memory).`,
+    );
+  }
+
+  for (const { key, value } of eqFields) {
+    const sanitizedKey = key.replace(/[^\w]/g, "");
+    if (typeof value === "string") {
+      const safeValue = value.replace(/'/g, "''");
+      parts.push(`${sanitizedKey} eq '${safeValue}'`);
+    } else {
+      parts.push(`${sanitizedKey} eq ${value}`);
     }
   }
   return parts.join(" and ");
@@ -604,22 +703,32 @@ export function buildAzureODataFilter(
 export function buildRedisFilterExpr(
   filters: Record<string, any> | undefined,
   escapeValue: (v: unknown) => string,
+  mode: FilterDegradeMode = "strict",
 ): string {
   const nodes = parseFilters(filters);
   const parts: string[] = [];
 
-  for (const node of nodes) {
-    if (node.type !== "field") continue;
-    if (node.op === "eq") {
-      parts.push(`@${node.key}:{${escapeValue(node.value)}}`);
-    }
+  const { eqFields, nonEqOps } = collectEqFields(nodes);
+
+  if (mode === "strict" && nonEqOps.length > 0) {
+    throw new Error(
+      `Redis vector store only supports simple equality filters via TAG fields. ` +
+        `Unsupported filter conditions: ${nonEqOps.join(", ")}. ` +
+        `Use mode "lenient" to extract only equality conditions, or use a vector store ` +
+        `that supports advanced filters (pgvector, qdrant, memory).`,
+    );
+  }
+
+  for (const { key, value } of eqFields) {
+    parts.push(`@${key}:{${escapeValue(value)}}`);
   }
   return parts.length > 0 ? parts.join(" ") : "*";
 }
 
 export function buildSupabaseEqualityFilter(
   filters: Record<string, any> | undefined,
+  mode: FilterDegradeMode = "strict",
 ): Record<string, any> | undefined {
-  const result = buildSimpleEqualityFilter(filters);
+  const result = buildSimpleEqualityFilter(filters, mode);
   return Object.keys(result).length > 0 ? result : undefined;
 }

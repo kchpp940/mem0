@@ -1,12 +1,57 @@
 /**
- * Shared payload builder for Platform API requests.
+ * Contract-driven payload builder for Platform API requests.
  *
- * Centralizes parameter normalization, validation, filter building, and payload
- * construction for add/search/list operations so Python and Node CLIs produce
- * identical request payloads with consistent error messages.
+ * All field names, defaults, error messages, filter merge order, and PENDING
+ * dedup rules are derived from the shared payload_contract.json so Python and
+ * Node CLIs produce identical request payloads with consistent behaviour.
  */
 
 import { printError } from "../branding.js";
+import contractData from "../contract/payload_contract.json" with {
+	type: "json",
+};
+
+const C = contractData as Record<string, unknown>;
+
+function _validation(): Record<string, unknown> {
+	return C.validation as Record<string, unknown>;
+}
+
+function _fieldMapping(): Record<string, string> {
+	return C.fieldMapping as Record<string, string>;
+}
+
+function _filterBuilding(): Record<string, unknown> {
+	return C.filterBuilding as Record<string, unknown>;
+}
+
+export function _pendingDedup(): Record<string, unknown> {
+	return C.pendingDedup as Record<string, unknown>;
+}
+
+export function _agentPickFields(): Record<string, unknown> {
+	return C.agentPickFields as Record<string, unknown>;
+}
+
+function _resolveApiName(fieldDef: Record<string, unknown>): string {
+	const fromName = (fieldDef.from as string) ?? (fieldDef.api as string);
+	if (fieldDef.mapped && fromName in _fieldMapping()) {
+		return _fieldMapping()[fromName];
+	}
+	return fieldDef.api as string;
+}
+
+interface FieldDef {
+	api: string;
+	from?: string;
+	type?: string;
+	rule?: string;
+	mapped?: boolean;
+	literal?: unknown;
+	hasDefault?: boolean;
+	built?: boolean;
+	required?: boolean;
+}
 
 export class ValidationError extends Error {
 	constructor(message: string) {
@@ -18,23 +63,18 @@ export class ValidationError extends Error {
 export function normalizeCategories(
 	raw: string | undefined,
 ): string[] | undefined {
-	/**
-	 * Parse categories from CLI input (JSON array or comma-separated string).
-	 *
-	 * @param raw - Raw categories string from CLI (e.g. '["work","personal"]' or 'work,personal')
-	 * @returns List of category strings, or undefined if raw is undefined/empty.
-	 * @throws ValidationError If JSON is provided but invalid.
-	 */
 	if (!raw) return undefined;
+	const v = _validation().categories as Record<string, string>;
 	try {
 		const parsed = JSON.parse(raw);
 		if (!Array.isArray(parsed)) {
-			throw new ValidationError("--categories JSON must be an array.");
+			throw new ValidationError(v.arrayError);
 		}
 		return parsed
 			.map((c: unknown) => String(c).trim())
 			.filter((c: string) => c);
-	} catch {
+	} catch (e) {
+		if (e instanceof ValidationError) throw e;
 		return raw
 			.split(",")
 			.map((c) => c.trim())
@@ -43,21 +83,13 @@ export function normalizeCategories(
 }
 
 export function validateExpires(raw: string | undefined): string | undefined {
-	/**
-	 * Validate expires date format and ensure it's in the future.
-	 *
-	 * @param raw - Raw expires string from CLI (expected: YYYY-MM-DD)
-	 * @returns Validated date string if provided.
-	 * @throws ValidationError If format is invalid or date is not in the future.
-	 */
 	if (!raw) return undefined;
-	if (!/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
-		throw new ValidationError(
-			"Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
-		);
+	const v = _validation().expires as Record<string, string>;
+	if (!new RegExp(v.pattern).test(raw)) {
+		throw new ValidationError(v.formatError);
 	}
 	if (new Date(raw) <= new Date()) {
-		throw new ValidationError("--expires date must be in the future.");
+		throw new ValidationError(v.futureError);
 	}
 	return raw;
 }
@@ -65,14 +97,8 @@ export function validateExpires(raw: string | undefined): string | undefined {
 export function parseFilterJson(
 	raw: string | undefined,
 ): Record<string, unknown> | undefined {
-	/**
-	 * Parse JSON filter string from CLI.
-	 *
-	 * @param raw - Raw JSON filter string from --filter flag.
-	 * @returns Parsed filter dict, or undefined if raw is undefined.
-	 * @throws ValidationError If JSON is invalid.
-	 */
 	if (!raw) return undefined;
+	const v = _validation().filters as Record<string, string>;
 	try {
 		const parsed = JSON.parse(raw);
 		if (
@@ -80,12 +106,12 @@ export function parseFilterJson(
 			Array.isArray(parsed) ||
 			parsed === null
 		) {
-			throw new ValidationError("--filter must be a JSON object.");
+			throw new ValidationError(v.objectError);
 		}
 		return parsed as Record<string, unknown>;
 	} catch (e) {
 		if (e instanceof ValidationError) throw e;
-		throw new ValidationError(`Invalid JSON in --filter: ${e}`);
+		throw new ValidationError(v.jsonError.replace("{error}", String(e)));
 	}
 }
 
@@ -96,32 +122,29 @@ export function buildFilters(opts: {
 	runId?: string;
 	extraFilters?: Record<string, unknown>;
 }): Record<string, unknown> | undefined {
-	/**
-	 * Build a filters dict for v3 Platform API endpoints.
-	 *
-	 * Entity IDs are ANDed (all provided IDs must match). Extra filters (date
-	 * ranges, categories) are also ANDed. If caller passes a pre-built filter
-	 * structure (e.g. with AND/OR keys), it is returned as-is.
-	 *
-	 * @param opts.userId - User ID filter.
-	 * @param opts.agentId - Agent ID filter.
-	 * @param opts.appId - App ID filter.
-	 * @param opts.runId - Run ID filter.
-	 * @param opts.extraFilters - Additional filters to merge (e.g. from --filter flag).
-	 * @returns Filter structure ready for API payload, or undefined if no filters.
-	 */
-	if (
-		opts.extraFilters &&
-		("AND" in opts.extraFilters || "OR" in opts.extraFilters)
-	) {
-		return opts.extraFilters;
+	const fb = _filterBuilding();
+
+	if (opts.extraFilters) {
+		for (const key of fb.passthroughKeys as string[]) {
+			if (key in opts.extraFilters) {
+				return opts.extraFilters;
+			}
+		}
 	}
 
+	const entityOrder = fb.entityOrder as string[];
+	const entityValues: Record<string, string | undefined> = {
+		user_id: opts.userId,
+		agent_id: opts.agentId,
+		app_id: opts.appId,
+		run_id: opts.runId,
+	};
+
 	const andConditions: Record<string, unknown>[] = [];
-	if (opts.userId) andConditions.push({ user_id: opts.userId });
-	if (opts.agentId) andConditions.push({ agent_id: opts.agentId });
-	if (opts.appId) andConditions.push({ app_id: opts.appId });
-	if (opts.runId) andConditions.push({ run_id: opts.runId });
+	for (const fieldName of entityOrder) {
+		const val = entityValues[fieldName];
+		if (val) andConditions.push({ [fieldName]: val });
+	}
 
 	if (opts.extraFilters) {
 		for (const [k, v] of Object.entries(opts.extraFilters)) {
@@ -130,7 +153,8 @@ export function buildFilters(opts: {
 	}
 
 	if (andConditions.length === 1) return andConditions[0];
-	if (andConditions.length > 1) return { AND: andConditions };
+	if (andConditions.length > 1)
+		return { [fb.combineOperator as string]: andConditions };
 	return undefined;
 }
 
@@ -147,40 +171,53 @@ export function buildAddPayload(opts: {
 	expires?: string;
 	categories?: string[];
 }): Record<string, unknown> {
-	/**
-	 * Build payload for POST /v3/memories/add/.
-	 *
-	 * @param opts.content - Raw text content (wrapped in user message if no messages).
-	 * @param opts.messages - Pre-constructed message array (takes precedence over content).
-	 * @param opts.userId - User ID to attach.
-	 * @param opts.agentId - Agent ID to attach.
-	 * @param opts.appId - App ID to attach.
-	 * @param opts.runId - Run ID to attach.
-	 * @param opts.metadata - Metadata dict.
-	 * @param opts.immutable - Whether memory is immutable.
-	 * @param opts.infer - Whether to enable inference.
-	 * @param opts.expires - Validated expiration date (YYYY-MM-DD).
-	 * @param opts.categories - List of categories.
-	 * @returns Complete add payload ready for the API.
-	 */
 	const payload: Record<string, unknown> = {};
+	const source = C.source as string;
+	const role = C.addMessageRole as string;
 
-	if (opts.messages) {
-		payload.messages = opts.messages;
-	} else if (opts.content) {
-		payload.messages = [{ role: "user", content: opts.content }];
+	const localVars: Record<string, unknown> = {
+		messages: opts.messages,
+		user_id: opts.userId,
+		agent_id: opts.agentId,
+		app_id: opts.appId,
+		run_id: opts.runId,
+		metadata: opts.metadata,
+		immutable: opts.immutable,
+		infer: opts.infer,
+		expires: opts.expires,
+		categories: opts.categories,
+	};
+
+	for (const fieldDef of C.addFields as FieldDef[]) {
+		const apiName = _resolveApiName(
+			fieldDef as unknown as Record<string, unknown>,
+		);
+		const fromName = fieldDef.from ?? "";
+
+		if ("literal" in fieldDef && fieldDef.literal !== undefined) {
+			payload[apiName] = fieldDef.literal;
+			continue;
+		}
+
+		if (fieldDef.type === "messages_or_content") {
+			if (opts.messages) {
+				payload[apiName] = opts.messages;
+			} else if (opts.content) {
+				payload[apiName] = [{ role, content: opts.content }];
+			}
+			continue;
+		}
+
+		const value = localVars[fromName];
+		if (value === undefined || value === null) continue;
+
+		if (fieldDef.rule === "includeWhenTrue" && !value) continue;
+		if (fieldDef.rule === "includeWhenFalse" && value) continue;
+
+		payload[apiName] = value;
 	}
 
-	if (opts.userId) payload.user_id = opts.userId;
-	if (opts.agentId) payload.agent_id = opts.agentId;
-	if (opts.appId) payload.app_id = opts.appId;
-	if (opts.runId) payload.run_id = opts.runId;
-	if (opts.metadata) payload.metadata = opts.metadata;
-	if (opts.immutable) payload.immutable = true;
-	if (opts.infer === false) payload.infer = false;
-	if (opts.expires) payload.expiration_date = opts.expires;
-	if (opts.categories) payload.categories = opts.categories;
-	payload.source = "CLI";
+	if (!("source" in payload)) payload.source = source;
 
 	return payload;
 }
@@ -200,26 +237,13 @@ export function buildSearchPayload(
 		fields?: string[];
 	},
 ): Record<string, unknown> {
-	/**
-	 * Build payload for POST /v3/memories/search/.
-	 *
-	 * @param query - Search query string.
-	 * @param opts.userId - User ID filter.
-	 * @param opts.agentId - Agent ID filter.
-	 * @param opts.appId - App ID filter.
-	 * @param opts.runId - Run ID filter.
-	 * @param opts.topK - Number of results to return.
-	 * @param opts.threshold - Minimum similarity threshold.
-	 * @param opts.rerank - Whether to enable reranking.
-	 * @param opts.keyword - Whether to use keyword search.
-	 * @param opts.filters - Pre-built filters dict (from buildFilters()).
-	 * @param opts.fields - List of fields to return.
-	 * @returns Complete search payload ready for the API.
-	 */
+	const defaults = C.defaults as Record<string, unknown>;
+	const source = C.source as string;
+
 	const payload: Record<string, unknown> = {
 		query,
-		top_k: opts.topK ?? 10,
-		threshold: opts.threshold ?? 0.3,
+		top_k: opts.topK ?? defaults.top_k,
+		threshold: opts.threshold ?? defaults.threshold,
 	};
 
 	const apiFilters = buildFilters({
@@ -230,10 +254,40 @@ export function buildSearchPayload(
 		extraFilters: opts.filters,
 	});
 	if (apiFilters) payload.filters = apiFilters;
-	if (opts.rerank) payload.rerank = true;
-	if (opts.keyword) payload.keyword_search = true;
-	if (opts.fields) payload.fields = opts.fields;
-	payload.source = "CLI";
+
+	const localVars: Record<string, unknown> = {
+		rerank: opts.rerank,
+		keyword: opts.keyword,
+		fields: opts.fields,
+	};
+
+	for (const fieldDef of C.searchFields as FieldDef[]) {
+		const apiName = _resolveApiName(
+			fieldDef as unknown as Record<string, unknown>,
+		);
+		const fromName = fieldDef.from ?? "";
+
+		if ("literal" in fieldDef && fieldDef.literal !== undefined) {
+			payload[apiName] = fieldDef.literal;
+			continue;
+		}
+
+		if (
+			apiName in payload ||
+			["query", "top_k", "threshold", "filters"].includes(fromName)
+		)
+			continue;
+
+		const value = localVars[fromName];
+		if (value === undefined || value === null) continue;
+
+		if (fieldDef.rule === "includeWhenTrue" && !value) continue;
+		if (fieldDef.rule === "includeWhenFalse" && value) continue;
+
+		payload[apiName] = value;
+	}
+
+	if (!("source" in payload)) payload.source = source;
 
 	return payload;
 }
@@ -250,36 +304,32 @@ export function buildListPayload(opts: {
 	payload: Record<string, unknown>;
 	params: Record<string, string>;
 } {
-	/**
-	 * Build payload and query params for POST /v3/memories/.
-	 *
-	 * @param opts.userId - User ID filter.
-	 * @param opts.agentId - Agent ID filter.
-	 * @param opts.appId - App ID filter.
-	 * @param opts.runId - Run ID filter.
-	 * @param opts.category - Category filter (contains match).
-	 * @param opts.after - Created-at lower bound (ISO date).
-	 * @param opts.before - Created-at upper bound (ISO date).
-	 * @returns Object containing payload and query params.
-	 */
 	const payload: Record<string, unknown> = {};
 	const params: Record<string, string> = {};
 
+	const listExtra = (_filterBuilding().listExtra ?? {}) as Record<
+		string,
+		Record<string, string>
+	>;
 	const extra: Record<string, unknown> = {};
-	if (opts.category) {
-		extra.categories = { contains: opts.category };
+
+	if (opts.category && "category" in listExtra) {
+		const spec = listExtra.category;
+		extra[spec.field] = { [spec.op]: opts.category };
 	}
-	if (opts.after) {
-		extra.created_at = {
-			...(extra.created_at as Record<string, unknown> | undefined),
-			gte: opts.after,
-		};
+
+	const createdAtParts: Record<string, string> = {};
+	if (opts.after && "after" in listExtra) {
+		const spec = listExtra.after;
+		createdAtParts[spec.op] = opts.after;
 	}
-	if (opts.before) {
-		extra.created_at = {
-			...(extra.created_at as Record<string, unknown> | undefined),
-			lte: opts.before,
-		};
+	if (opts.before && "before" in listExtra) {
+		const spec = listExtra.before;
+		createdAtParts[spec.op] = opts.before;
+	}
+	if (Object.keys(createdAtParts).length > 0 && "after" in listExtra) {
+		const spec = listExtra.after;
+		extra[spec.field] = createdAtParts;
 	}
 
 	const apiFilters = buildFilters({
@@ -290,20 +340,12 @@ export function buildListPayload(opts: {
 		extraFilters: Object.keys(extra).length > 0 ? extra : undefined,
 	});
 	if (apiFilters) payload.filters = apiFilters;
-	payload.source = "CLI";
+	payload.source = C.source;
 
 	return { payload, params };
 }
 
 export function handleValidationError(err: ValidationError): never {
-	/**
-	 * Print a validation error to stderr and exit.
-	 *
-	 * This provides a single exit point for validation errors so both CLIs show
-	 * the same error formatting.
-	 *
-	 * @param err - The ValidationError to handle.
-	 */
 	printError(err.message);
 	process.exit(1);
 }

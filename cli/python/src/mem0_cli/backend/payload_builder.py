@@ -1,8 +1,8 @@
-"""Shared payload builder for Platform API requests.
+"""Contract-driven payload builder for Platform API requests.
 
-Centralizes parameter normalization, validation, filter building, and payload
-construction for add/search/list operations so Python and Node CLIs produce
-identical request payloads with consistent error messages.
+All field names, defaults, error messages, filter merge order, and PENDING
+dedup rules are derived from the shared payload_contract.json so Python and
+Node CLIs produce identical request payloads with consistent behaviour.
 """
 
 from __future__ import annotations
@@ -11,9 +11,40 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import date
+from importlib.resources import files
 from typing import Any
 
 from mem0_cli.branding import print_error
+
+_CONTRACT_PATH = files("mem0_cli.contract").joinpath("payload_contract.json")
+_CONTRACT: dict[str, Any] = json.loads(_CONTRACT_PATH.read_text(encoding="utf-8"))
+
+
+def _validation() -> dict[str, Any]:
+    return _CONTRACT["validation"]
+
+
+def _field_mapping() -> dict[str, str]:
+    return _CONTRACT["fieldMapping"]
+
+
+def _filter_building() -> dict[str, Any]:
+    return _CONTRACT["filterBuilding"]
+
+
+def _pending_dedup() -> dict[str, Any]:
+    return _CONTRACT["pendingDedup"]
+
+
+def _agent_pick_fields() -> dict[str, Any]:
+    return _CONTRACT["agentPickFields"]
+
+
+def _resolve_api_name(field_def: dict[str, Any]) -> str:
+    from_name = field_def.get("from", field_def.get("api"))
+    if field_def.get("mapped") and from_name in _field_mapping():
+        return _field_mapping()[from_name]
+    return field_def["api"]
 
 
 @dataclass
@@ -24,72 +55,40 @@ class ValidationError(Exception):
 
 
 def normalize_categories(raw: str | None) -> list[str] | None:
-    """Parse categories from CLI input (JSON array or comma-separated string).
-
-    Args:
-        raw: Raw categories string from CLI (e.g. '["work","personal"]' or 'work,personal')
-
-    Returns:
-        List of category strings, or None if raw is None/empty.
-
-    Raises:
-        ValidationError: If JSON is provided but invalid.
-    """
     if not raw:
         return None
+    v = _validation()["categories"]
     try:
         parsed = json.loads(raw)
         if not isinstance(parsed, list):
-            raise ValidationError("--categories JSON must be an array.")
+            raise ValidationError(v["arrayError"])
         return [str(c).strip() for c in parsed if c]
     except json.JSONDecodeError:
         return [c.strip() for c in raw.split(",") if c.strip()]
 
 
 def validate_expires(raw: str | None) -> str | None:
-    """Validate expires date format and ensure it's in the future.
-
-    Args:
-        raw: Raw expires string from CLI (expected: YYYY-MM-DD)
-
-    Returns:
-        Validated date string if provided.
-
-    Raises:
-        ValidationError: If format is invalid or date is not in the future.
-    """
     if not raw:
         return None
-    if not re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
-        raise ValidationError(
-            "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31)."
-        )
+    v = _validation()["expires"]
+    if not re.match(v["pattern"], raw):
+        raise ValidationError(v["formatError"])
     if date.fromisoformat(raw) <= date.today():
-        raise ValidationError("--expires date must be in the future.")
+        raise ValidationError(v["futureError"])
     return raw
 
 
 def parse_filter_json(raw: str | None) -> dict | None:
-    """Parse JSON filter string from CLI.
-
-    Args:
-        raw: Raw JSON filter string from --filter flag.
-
-    Returns:
-        Parsed filter dict, or None if raw is None.
-
-    Raises:
-        ValidationError: If JSON is invalid.
-    """
     if not raw:
         return None
+    v = _validation()["filters"]
     try:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
-            raise ValidationError("--filter must be a JSON object.")
+            raise ValidationError(v["objectError"])
         return parsed
     except json.JSONDecodeError as e:
-        raise ValidationError(f"Invalid JSON in --filter: {e}") from None
+        raise ValidationError(v["jsonError"].replace("{error}", str(e))) from None
 
 
 def build_filters(
@@ -100,35 +99,26 @@ def build_filters(
     run_id: str | None = None,
     extra_filters: dict | None = None,
 ) -> dict | None:
-    """Build a filters dict for v3 Platform API endpoints.
+    fb = _filter_building()
 
-    Entity IDs are ANDed (all provided IDs must match). Extra filters (date
-    ranges, categories) are also ANDed. If caller passes a pre-built filter
-    structure (e.g. with AND/OR keys), it is returned as-is.
+    if extra_filters:
+        for key in fb["passthroughKeys"]:
+            if key in extra_filters:
+                return extra_filters
 
-    Args:
-        user_id: User ID filter.
-        agent_id: Agent ID filter.
-        app_id: App ID filter.
-        run_id: Run ID filter.
-        extra_filters: Additional filters to merge (e.g. from --filter flag).
-
-    Returns:
-        Filter structure ready for API payload, or None if no filters.
-    """
-    # If caller passed a pre-built filter structure, use it directly
-    if extra_filters and ("AND" in extra_filters or "OR" in extra_filters):
-        return extra_filters
+    entity_order: list[str] = fb["entityOrder"]
+    entity_values = {
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "app_id": app_id,
+        "run_id": run_id,
+    }
 
     and_conditions: list[dict[str, Any]] = []
-    if user_id:
-        and_conditions.append({"user_id": user_id})
-    if agent_id:
-        and_conditions.append({"agent_id": agent_id})
-    if app_id:
-        and_conditions.append({"app_id": app_id})
-    if run_id:
-        and_conditions.append({"run_id": run_id})
+    for field_name in entity_order:
+        val = entity_values.get(field_name)
+        if val:
+            and_conditions.append({field_name: val})
 
     if extra_filters:
         for k, v in extra_filters.items():
@@ -137,7 +127,7 @@ def build_filters(
     if len(and_conditions) == 1:
         return and_conditions[0]
     elif and_conditions:
-        return {"AND": and_conditions}
+        return {fb["combineOperator"]: and_conditions}
     return None
 
 
@@ -155,50 +145,53 @@ def build_add_payload(
     expires: str | None = None,
     categories: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build payload for POST /v3/memories/add/.
-
-    Args:
-        content: Raw text content (wrapped in user message if no messages).
-        messages: Pre-constructed message array (takes precedence over content).
-        user_id: User ID to attach.
-        agent_id: Agent ID to attach.
-        app_id: App ID to attach.
-        run_id: Run ID to attach.
-        metadata: Metadata dict.
-        immutable: Whether memory is immutable.
-        infer: Whether to enable inference.
-        expires: Validated expiration date (YYYY-MM-DD).
-        categories: List of categories.
-
-    Returns:
-        Complete add payload ready for the API.
-    """
     payload: dict[str, Any] = {}
+    source = _CONTRACT["source"]
+    role = _CONTRACT["addMessageRole"]
 
-    if messages:
-        payload["messages"] = messages
-    elif content:
-        payload["messages"] = [{"role": "user", "content": content}]
+    local_vars = {
+        "messages": messages,
+        "user_id": user_id,
+        "agent_id": agent_id,
+        "app_id": app_id,
+        "run_id": run_id,
+        "metadata": metadata,
+        "immutable": immutable,
+        "infer": infer,
+        "expires": expires,
+        "categories": categories,
+    }
 
-    if user_id:
-        payload["user_id"] = user_id
-    if agent_id:
-        payload["agent_id"] = agent_id
-    if app_id:
-        payload["app_id"] = app_id
-    if run_id:
-        payload["run_id"] = run_id
-    if metadata:
-        payload["metadata"] = metadata
-    if immutable:
-        payload["immutable"] = True
-    if not infer:
-        payload["infer"] = False
-    if expires:
-        payload["expiration_date"] = expires
-    if categories:
-        payload["categories"] = categories
-    payload["source"] = "CLI"
+    for field_def in _CONTRACT["addFields"]:
+        api_name = _resolve_api_name(field_def)
+        from_name = field_def.get("from", "")
+
+        if "literal" in field_def:
+            payload[api_name] = field_def["literal"]
+            continue
+
+        if field_def.get("type") == "messages_or_content":
+            if messages:
+                payload[api_name] = messages
+            elif content:
+                payload[api_name] = [{"role": role, "content": content}]
+            continue
+
+        value = local_vars.get(from_name)
+
+        if value is None:
+            continue
+
+        rule = field_def.get("rule")
+        if rule == "includeWhenTrue" and not value:
+            continue
+        if rule == "includeWhenFalse" and value:
+            continue
+
+        payload[api_name] = value
+
+    if "source" not in payload:
+        payload["source"] = source
 
     return payload
 
@@ -210,32 +203,21 @@ def build_search_payload(
     agent_id: str | None = None,
     app_id: str | None = None,
     run_id: str | None = None,
-    top_k: int = 10,
-    threshold: float = 0.3,
+    top_k: int | None = None,
+    threshold: float | None = None,
     rerank: bool = False,
     keyword: bool = False,
     filters: dict | None = None,
     fields: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Build payload for POST /v3/memories/search/.
+    defaults = _CONTRACT["defaults"]
+    source = _CONTRACT["source"]
 
-    Args:
-        query: Search query string.
-        user_id: User ID filter.
-        agent_id: Agent ID filter.
-        app_id: App ID filter.
-        run_id: Run ID filter.
-        top_k: Number of results to return.
-        threshold: Minimum similarity threshold.
-        rerank: Whether to enable reranking.
-        keyword: Whether to use keyword search.
-        filters: Pre-built filters dict (from build_filters()).
-        fields: List of fields to return.
-
-    Returns:
-        Complete search payload ready for the API.
-    """
-    payload: dict[str, Any] = {"query": query, "top_k": top_k, "threshold": threshold}
+    payload: dict[str, Any] = {
+        "query": query,
+        "top_k": top_k if top_k is not None else defaults["top_k"],
+        "threshold": threshold if threshold is not None else defaults["threshold"],
+    }
 
     api_filters = build_filters(
         user_id=user_id,
@@ -246,13 +228,38 @@ def build_search_payload(
     )
     if api_filters:
         payload["filters"] = api_filters
-    if rerank:
-        payload["rerank"] = True
-    if keyword:
-        payload["keyword_search"] = True
-    if fields:
-        payload["fields"] = fields
-    payload["source"] = "CLI"
+
+    local_vars = {
+        "rerank": rerank,
+        "keyword": keyword,
+        "fields": fields,
+    }
+
+    for field_def in _CONTRACT["searchFields"]:
+        api_name = _resolve_api_name(field_def)
+        from_name = field_def.get("from", "")
+
+        if "literal" in field_def:
+            payload[api_name] = field_def["literal"]
+            continue
+
+        if api_name in payload or from_name in ("query", "top_k", "threshold", "filters"):
+            continue
+
+        value = local_vars.get(from_name)
+        if value is None:
+            continue
+
+        rule = field_def.get("rule")
+        if rule == "includeWhenTrue" and not value:
+            continue
+        if rule == "includeWhenFalse" and value:
+            continue
+
+        payload[api_name] = value
+
+    if "source" not in payload:
+        payload["source"] = source
 
     return payload
 
@@ -267,30 +274,26 @@ def build_list_payload(
     after: str | None = None,
     before: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Build payload and query params for POST /v3/memories/.
-
-    Args:
-        user_id: User ID filter.
-        agent_id: Agent ID filter.
-        app_id: App ID filter.
-        run_id: Run ID filter.
-        category: Category filter (contains match).
-        after: Created-at lower bound (ISO date).
-        before: Created-at upper bound (ISO date).
-
-    Returns:
-        Tuple of (payload dict, query params dict).
-    """
     payload: dict[str, Any] = {}
     params: dict[str, str] = {}
 
+    list_extra = _filter_building().get("listExtra", {})
     extra: dict[str, Any] = {}
-    if category:
-        extra["categories"] = {"contains": category}
-    if after:
-        extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
-    if before:
-        extra["created_at"] = {**(extra.get("created_at", {})), "lte": before}
+
+    if category and "category" in list_extra:
+        spec = list_extra["category"]
+        extra[spec["field"]] = {spec["op"]: category}
+
+    created_at_parts: dict[str, str] = {}
+    if after and "after" in list_extra:
+        spec = list_extra["after"]
+        created_at_parts[spec["op"]] = after
+    if before and "before" in list_extra:
+        spec = list_extra["before"]
+        created_at_parts[spec["op"]] = before
+    if created_at_parts and "after" in list_extra:
+        spec = list_extra["after"]
+        extra[spec["field"]] = created_at_parts
 
     api_filters = build_filters(
         user_id=user_id,
@@ -301,20 +304,11 @@ def build_list_payload(
     )
     if api_filters:
         payload["filters"] = api_filters
-    payload["source"] = "CLI"
+    payload["source"] = _CONTRACT["source"]
 
     return payload, params
 
 
 def handle_validation_error(err: ValidationError, err_console: Any) -> None:
-    """Print a validation error to stderr and exit.
-
-    This provides a single exit point for validation errors so both CLIs show
-    the same error formatting.
-
-    Args:
-        err: The ValidationError to handle.
-        err_console: Rich console for stderr output.
-    """
     print_error(err_console, err.message)
     raise SystemExit(1) from None

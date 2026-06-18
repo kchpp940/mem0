@@ -4,6 +4,7 @@
 
 import boxen from "boxen";
 import Table from "cli-table3";
+import { _agentPickFields, _pendingDedup } from "./backend/payloadBuilder.js";
 import { colors, sym } from "./branding.js";
 import { takeNotice } from "./state.js";
 
@@ -12,11 +13,16 @@ const { brand, accent, success, error: errorColor, dim } = colors;
 export function dedupePendingResults(
 	results: Record<string, unknown>[],
 ): Record<string, unknown>[] {
+	const cfg = _pendingDedup();
+	const statusKey = cfg.statusKey as string;
+	const pendingVal = cfg.pendingValue as string;
+	const dedupKey = cfg.dedupKey as string;
+
 	const seenEvents = new Set<string>();
 	const deduped: Record<string, unknown>[] = [];
 	for (const r of results) {
-		if (r.status === "PENDING") {
-			const eid = (r.event_id as string) ?? "";
+		if (r[statusKey] === pendingVal) {
+			const eid = (r[dedupKey] as string) ?? "";
 			if (eid && seenEvents.has(eid)) continue;
 			if (eid) seenEvents.add(eid);
 		}
@@ -299,39 +305,34 @@ function pick(
 export function sanitizeAgentData(command: string, data: unknown): unknown {
 	if (data === null || data === undefined) return data;
 
+	const pickCfg = _agentPickFields();
+
 	switch (command) {
 		case "add": {
+			const addCfg = pickCfg.add as Record<string, string[]>;
 			const items = Array.isArray(data) ? data : [data];
-			// Deduplicate PENDING entries sharing the same event_id before projecting
 			const deduped = dedupePendingResults(items as Record<string, unknown>[]);
 			return deduped.map((item) => {
 				const r = item as Record<string, unknown>;
-				if (r.status === "PENDING") return pick(r, ["status", "event_id"]);
-				return pick(r, ["id", "memory", "event"]);
+				if (r.status === "PENDING") return pick(r, addCfg.pending);
+				return pick(r, addCfg.normal);
 			});
 		}
 		case "search":
 			return (data as Record<string, unknown>[]).map((r) =>
-				pick(r, ["id", "memory", "score", "created_at", "categories"]),
+				pick(r, pickCfg.search as string[]),
 			);
 		case "list":
 			return (data as Record<string, unknown>[]).map((r) =>
-				pick(r, ["id", "memory", "created_at", "categories"]),
+				pick(r, pickCfg.list as string[]),
 			);
 		case "get": {
 			const r = data as Record<string, unknown>;
-			return pick(r, [
-				"id",
-				"memory",
-				"created_at",
-				"updated_at",
-				"categories",
-				"metadata",
-			]);
+			return pick(r, pickCfg.get as string[]);
 		}
 		case "update": {
 			const r = data as Record<string, unknown>;
-			return pick(r, ["id", "memory"]);
+			return pick(r, pickCfg.update as string[]);
 		}
 		case "delete":
 		case "delete-all":
@@ -344,7 +345,7 @@ export function sanitizeAgentData(command: string, data: unknown): unknown {
 			}));
 		case "event list":
 			return (data as Record<string, unknown>[]).map((r) =>
-				pick(r, ["id", "event_type", "status", "latency", "created_at"]),
+				pick(r, pickCfg.event_list as string[]),
 			);
 		case "event status": {
 			const ev = data as Record<string, unknown>;
@@ -360,14 +361,7 @@ export function sanitizeAgentData(command: string, data: unknown): unknown {
 				};
 			});
 			return {
-				...pick(ev, [
-					"id",
-					"event_type",
-					"status",
-					"latency",
-					"created_at",
-					"updated_at",
-				]),
+				...pick(ev, pickCfg.event_status as string[]),
 				results: sanitizedResults,
 			};
 		}

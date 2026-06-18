@@ -43,6 +43,7 @@ mem0 = "mem0_cli.app:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mem0_cli"]
+artifacts = ["src/mem0_cli/contract/payload_contract.json"]
 
 [tool.hatch.build.targets.sdist]
 include = ["src/mem0_cli"]

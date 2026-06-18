@@ -11,22 +11,26 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from mem0_cli.backend.payload_builder import _agent_pick_fields, _pending_dedup
 from mem0_cli.branding import ACCENT_COLOR, BRAND_COLOR, DIM_COLOR, SUCCESS_COLOR, _sym
 
 
 def dedupe_pending_results(results: list[dict]) -> list[dict]:
     """Deduplicate PENDING entries sharing the same event_id.
 
-    The Platform API may return multiple PENDING rows for the same event_id
-    when a single add spans multiple memory extractions. Collapse them so
-    text / json / agent output never shows the same pending event twice.
-    Non-PENDING entries pass through unchanged.
+    Uses the contract-driven dedup configuration so the dedup key and
+    pending-value are always derived from the shared schema.
     """
+    cfg = _pending_dedup()
+    status_key = cfg["statusKey"]
+    pending_val = cfg["pendingValue"]
+    dedup_key = cfg["dedupKey"]
+
     seen_events: set[str] = set()
     deduped: list[dict] = []
     for r in results:
-        if r.get("status") == "PENDING":
-            eid = r.get("event_id", "")
+        if r.get(status_key) == pending_val:
+            eid = r.get(dedup_key, "")
             if eid and eid in seen_events:
                 continue
             if eid:
@@ -269,7 +273,11 @@ def format_json_envelope(
 
 
 def sanitize_agent_data(command: str, data: Any) -> Any:
-    """Project API response data to minimal relevant fields for agent consumption."""
+    """Project API response data to minimal relevant fields for agent consumption.
+
+    Pick-field lists are derived from the shared contract so Python and Node
+    always project the same fields for each command.
+    """
 
     def pick(obj: dict, keys: list) -> dict:
         return {k: obj[k] for k in keys if k in obj}
@@ -277,29 +285,27 @@ def sanitize_agent_data(command: str, data: Any) -> Any:
     if data is None:
         return data
 
+    pick_cfg = _agent_pick_fields()
+
     if command == "add":
         items = data if isinstance(data, list) else [data]
-        # Deduplicate PENDING entries sharing the same event_id before projecting
         items = dedupe_pending_results(items)
         result = []
         for item in items:
             if item.get("status") == "PENDING":
-                result.append(pick(item, ["status", "event_id"]))
+                result.append(pick(item, pick_cfg["add"]["pending"]))
             else:
-                result.append(pick(item, ["id", "memory", "event"]))
+                result.append(pick(item, pick_cfg["add"]["normal"]))
         return result
 
-    if command == "search":
-        return [pick(r, ["id", "memory", "score", "created_at", "categories"]) for r in data]
-
-    if command == "list":
-        return [pick(r, ["id", "memory", "created_at", "categories"]) for r in data]
+    if command in ("search", "list") and command in pick_cfg:
+        return [pick(r, pick_cfg[command]) for r in data]
 
     if command == "get":
-        return pick(data, ["id", "memory", "created_at", "updated_at", "categories", "metadata"])
+        return pick(data, pick_cfg.get("get", []))
 
     if command == "update":
-        return pick(data, ["id", "memory"])
+        return pick(data, pick_cfg.get("update", []))
 
     if command in ("delete", "delete-all", "entity delete"):
         return data
@@ -313,7 +319,7 @@ def sanitize_agent_data(command: str, data: Any) -> Any:
         return result
 
     if command == "event list":
-        return [pick(r, ["id", "event_type", "status", "latency", "created_at"]) for r in data]
+        return [pick(r, pick_cfg.get("event_list", [])) for r in data]
 
     if command == "event status":
         ev = data
@@ -330,11 +336,10 @@ def sanitize_agent_data(command: str, data: Any) -> Any:
                     "memory": memory,
                 }
             )
-        result = pick(ev, ["id", "event_type", "status", "latency", "created_at", "updated_at"])
+        result = pick(ev, pick_cfg.get("event_status", []))
         result["results"] = sanitized_results
         return result
 
-    # Pass-through: status, import, config show/get/set
     return data
 
 

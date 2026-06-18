@@ -4,45 +4,10 @@
 
 import boxen from "boxen";
 import Table from "cli-table3";
-import { _agentPickFields, _pendingDedup } from "./backend/payloadBuilder.js";
 import { colors, sym } from "./branding.js";
 import { takeNotice } from "./state.js";
 
 const { brand, accent, success, error: errorColor, dim } = colors;
-
-export function dedupePendingResults(
-	results: Record<string, unknown>[],
-): Record<string, unknown>[] {
-	const cfg = _pendingDedup();
-	const statusKey = cfg.statusKey as string;
-	const pendingVal = cfg.pendingValue as string;
-	const dedupKey = cfg.dedupKey as string;
-
-	const seenEvents = new Set<string>();
-	const deduped: Record<string, unknown>[] = [];
-	for (const r of results) {
-		if (r[statusKey] === pendingVal) {
-			const eid = (r[dedupKey] as string) ?? "";
-			if (eid && seenEvents.has(eid)) continue;
-			if (eid) seenEvents.add(eid);
-		}
-		deduped.push(r);
-	}
-	return deduped;
-}
-
-export function dedupeAddResult(
-	result: Record<string, unknown> | Record<string, unknown>[],
-): Record<string, unknown> | Record<string, unknown>[] {
-	const resultsList = Array.isArray(result)
-		? result
-		: ((result.results as Record<string, unknown>[]) ?? [result]);
-	const deduped = dedupePendingResults(resultsList);
-	if (!Array.isArray(result) && "results" in result) {
-		return { ...result, results: deduped };
-	}
-	return deduped;
-}
 
 function formatDate(dtStr?: string): string | undefined {
 	if (!dtStr) return undefined;
@@ -199,19 +164,20 @@ export function formatAddResult(
 		? result
 		: ((result.results as Record<string, unknown>[]) ?? [result]);
 
-	// Use shared deduplication so text / json / agent all agree
-	const deduped = dedupePendingResults(results);
-
-	if (!deduped.length) {
+	if (!results.length) {
 		console.log(`  ${dim("No memories extracted.")}`);
 		return;
 	}
 
 	console.log();
-	for (const r of deduped) {
+	const seenPendingEvents = new Set<string>();
+	for (const r of results) {
 		// Detect async PENDING response
 		if (r.status === "PENDING") {
 			const eventId = (r.event_id as string) ?? "";
+			// Deduplicate PENDING entries with the same event_id
+			if (eventId && seenPendingEvents.has(eventId)) continue;
+			if (eventId) seenPendingEvents.add(eventId);
 			const icon = accent(sym("⧗", "..."));
 			const parts = [
 				`  ${icon} ${dim("Queued".padEnd(10))}`,
@@ -305,34 +271,37 @@ function pick(
 export function sanitizeAgentData(command: string, data: unknown): unknown {
 	if (data === null || data === undefined) return data;
 
-	const pickCfg = _agentPickFields();
-
 	switch (command) {
 		case "add": {
-			const addCfg = pickCfg.add as Record<string, string[]>;
 			const items = Array.isArray(data) ? data : [data];
-			const deduped = dedupePendingResults(items as Record<string, unknown>[]);
-			return deduped.map((item) => {
+			return items.map((item) => {
 				const r = item as Record<string, unknown>;
-				if (r.status === "PENDING") return pick(r, addCfg.pending);
-				return pick(r, addCfg.normal);
+				if (r.status === "PENDING") return pick(r, ["status", "event_id"]);
+				return pick(r, ["id", "memory", "event"]);
 			});
 		}
 		case "search":
 			return (data as Record<string, unknown>[]).map((r) =>
-				pick(r, pickCfg.search as string[]),
+				pick(r, ["id", "memory", "score", "created_at", "categories"]),
 			);
 		case "list":
 			return (data as Record<string, unknown>[]).map((r) =>
-				pick(r, pickCfg.list as string[]),
+				pick(r, ["id", "memory", "created_at", "categories"]),
 			);
 		case "get": {
 			const r = data as Record<string, unknown>;
-			return pick(r, pickCfg.get as string[]);
+			return pick(r, [
+				"id",
+				"memory",
+				"created_at",
+				"updated_at",
+				"categories",
+				"metadata",
+			]);
 		}
 		case "update": {
 			const r = data as Record<string, unknown>;
-			return pick(r, pickCfg.update as string[]);
+			return pick(r, ["id", "memory"]);
 		}
 		case "delete":
 		case "delete-all":
@@ -345,7 +314,7 @@ export function sanitizeAgentData(command: string, data: unknown): unknown {
 			}));
 		case "event list":
 			return (data as Record<string, unknown>[]).map((r) =>
-				pick(r, pickCfg.event_list as string[]),
+				pick(r, ["id", "event_type", "status", "latency", "created_at"]),
 			);
 		case "event status": {
 			const ev = data as Record<string, unknown>;
@@ -361,7 +330,14 @@ export function sanitizeAgentData(command: string, data: unknown): unknown {
 				};
 			});
 			return {
-				...pick(ev, pickCfg.event_status as string[]),
+				...pick(ev, [
+					"id",
+					"event_type",
+					"status",
+					"latency",
+					"created_at",
+					"updated_at",
+				]),
 				results: sanitizedResults,
 			};
 		}

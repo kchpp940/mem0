@@ -50,6 +50,11 @@ from mem0.memory.notices import (
     get_temporal_feature_error_message,
     get_temporal_feature_error_message_async,
 )
+from mem0.memory.lifecycle import (
+    LifecyclePolicy,
+    annotate_memory_result,
+    resolve_expiration,
+)
 from mem0.memory.utils import (
     extract_json,
     parse_messages,
@@ -662,6 +667,8 @@ class Memory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
+        expires: Optional[Any] = None,
+        ttl_days: Optional[int] = None,
     ):
         """
         Create a new memory.
@@ -685,7 +692,10 @@ class Memory(MemoryBase):
                 creating procedural memories (typically requires 'agent_id'). Otherwise, memories
                 are treated as general conversational/factual memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
-
+            expires (str | datetime, optional): Explicit expiration date (ISO 8601 string
+                or datetime). Takes highest precedence over any policy.
+            ttl_days (int, optional): Explicit TTL in days. Takes precedence over policies
+                but lower than `expires`.
 
         Returns:
             dict: A dictionary containing the result of the memory addition operation, typically
@@ -709,6 +719,28 @@ class Memory(MemoryBase):
             run_id=run_id,
             input_metadata=metadata,
         )
+
+        # ---- Resolve lifecycle expiration once for this add() call ----
+        lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
+        default_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
+            else None
+        )
+        workspace_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
+            else None
+        )
+        effective_expires_at, effective_ttl_source = resolve_expiration(
+            request_expires=expires,
+            request_ttl_days=ttl_days,
+            workspace_policy=workspace_policy,
+            default_policy=default_policy,
+        )
+        if effective_expires_at is not None:
+            processed_metadata["expires_at"] = effective_expires_at
+            processed_metadata["ttl_source"] = effective_ttl_source.value
 
         if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
             raise Mem0ValidationError(
@@ -785,13 +817,15 @@ class Memory(MemoryBase):
                 mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
                 returned_memories.append(
-                    {
+                    annotate_memory_result({
                         "id": mem_id,
                         "memory": msg_content,
                         "event": "ADD",
                         "actor_id": actor_name if actor_name else None,
                         "role": message_dict["role"],
-                    }
+                        "expires_at": per_msg_meta.get("expires_at"),
+                        "ttl_source": per_msg_meta.get("ttl_source"),
+                    })
                 )
             return returned_memories
 
@@ -1057,7 +1091,13 @@ class Memory(MemoryBase):
         self.db.save_messages(messages, session_scope)
 
         returned_memories = [
-            {"id": r[0], "memory": r[1], "event": "ADD"}
+            annotate_memory_result({
+                "id": r[0],
+                "memory": r[1],
+                "event": "ADD",
+                "expires_at": r[3].get("expires_at"),
+                "ttl_source": r[3].get("ttl_source"),
+            })
             for r in records
         ]
 
@@ -1093,7 +1133,11 @@ class Memory(MemoryBase):
             "role",
         ]
 
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
 
         result_item = MemoryItem(
             id=memory.id,
@@ -1101,6 +1145,8 @@ class Memory(MemoryBase):
             hash=memory.payload.get("hash"),
             created_at=memory.payload.get("created_at"),
             updated_at=memory.payload.get("updated_at"),
+            expires_at=memory.payload.get("expires_at"),
+            ttl_source=memory.payload.get("ttl_source"),
         ).model_dump()
 
         for key in promoted_payload_keys:
@@ -1110,6 +1156,8 @@ class Memory(MemoryBase):
         additional_metadata = {k: v for k, v in memory.payload.items() if k not in core_and_promoted_keys}
         if additional_metadata:
             result_item["metadata"] = additional_metadata
+
+        annotate_memory_result(result_item)
 
         display_first_run_notice(self, "sync", "get")
         return result_item
@@ -1205,7 +1253,11 @@ class Memory(MemoryBase):
             "actor_id",
             "role",
         ]
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
 
         formatted_memories = []
         for mem in actual_memories:
@@ -1215,6 +1267,8 @@ class Memory(MemoryBase):
                 hash=mem.payload.get("hash"),
                 created_at=mem.payload.get("created_at"),
                 updated_at=mem.payload.get("updated_at"),
+                expires_at=mem.payload.get("expires_at"),
+                ttl_source=mem.payload.get("ttl_source"),
             ).model_dump(exclude={"score"})
 
             for key in promoted_payload_keys:
@@ -1224,6 +1278,8 @@ class Memory(MemoryBase):
             additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
             if additional_metadata:
                 memory_item_dict["metadata"] = additional_metadata
+
+            annotate_memory_result(memory_item_dict)
 
             formatted_memories.append(memory_item_dict)
 
@@ -1540,7 +1596,11 @@ class Memory(MemoryBase):
             "actor_id",
             "role",
         ]
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
 
         original_memories = []
         for scored in scored_results:
@@ -1555,6 +1615,8 @@ class Memory(MemoryBase):
                 hash=payload.get("hash"),
                 created_at=payload.get("created_at"),
                 updated_at=payload.get("updated_at"),
+                expires_at=payload.get("expires_at"),
+                ttl_source=payload.get("ttl_source"),
                 score=scored["score"],
             ).model_dump()
 
@@ -1569,6 +1631,8 @@ class Memory(MemoryBase):
                 memory_item_dict["metadata"].update(additional_metadata)
             if explain and "score_details" in scored:
                 memory_item_dict["score_details"] = scored["score_details"]
+
+            annotate_memory_result(memory_item_dict)
 
             original_memories.append(memory_item_dict)
 
@@ -1656,7 +1720,14 @@ class Memory(MemoryBase):
 
         return memory_boosts
 
-    def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
+    def update(
+        self,
+        memory_id,
+        data,
+        metadata: Optional[Dict[str, Any]] = None,
+        expires: Optional[Any] = None,
+        ttl_days: Optional[int] = None,
+    ):
         """
         Update a memory by ID.
 
@@ -1664,6 +1735,9 @@ class Memory(MemoryBase):
             memory_id (str): ID of the memory to update.
             data (str): New content to update the memory with.
             metadata (dict, optional): Metadata to update with the memory. Defaults to None.
+            expires (str | datetime, optional): New explicit expiration date (ISO 8601
+                string or datetime). Pass a falsy value other than None to make permanent.
+            ttl_days (int, optional): New TTL in days (relative to now).
 
         Returns:
             dict: Success message indicating the memory was updated.
@@ -1673,6 +1747,42 @@ class Memory(MemoryBase):
             {'message': 'Memory updated successfully!'}
         """
         capture_event("mem0.update", self, {"memory_id": memory_id, "sync_type": "sync"})
+
+        if expires is not None or ttl_days is not None:
+            from mem0.memory.lifecycle import resolve_expiration
+
+            lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
+            default_policy = (
+                LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
+                if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
+                else None
+            )
+            workspace_policy = (
+                LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
+                if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
+                else None
+            )
+            # If expires is explicitly falsy (e.g. empty string) but not None → make permanent
+            if expires is not None and not expires:
+                effective_expires_at = None
+                effective_ttl_source_value = "default"
+            else:
+                effective_expires_at, effective_ttl_source = resolve_expiration(
+                    request_expires=expires,
+                    request_ttl_days=ttl_days,
+                    workspace_policy=workspace_policy,
+                    default_policy=default_policy,
+                )
+                effective_ttl_source_value = effective_ttl_source.value
+
+            if metadata is None:
+                metadata = {}
+            if effective_expires_at is not None:
+                metadata["expires_at"] = effective_expires_at
+                metadata["ttl_source"] = effective_ttl_source_value
+            else:
+                metadata["expires_at"] = None
+                metadata["ttl_source"] = "default"
 
         existing_embeddings = {data: self.embedding_model.embed(data, "update")}
 
@@ -2291,13 +2401,15 @@ class AsyncMemory(MemoryBase):
                 mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
                 returned_memories.append(
-                    {
+                    annotate_memory_result({
                         "id": mem_id,
                         "memory": msg_content,
                         "event": "ADD",
                         "actor_id": actor_name if actor_name else None,
                         "role": message_dict["role"],
-                    }
+                        "expires_at": per_msg_meta.get("expires_at"),
+                        "ttl_source": per_msg_meta.get("ttl_source"),
+                    })
                 )
             return returned_memories
 

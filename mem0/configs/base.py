@@ -8,6 +8,34 @@ from mem0.embeddings.configs import EmbedderConfig
 from mem0.llms.configs import LlmConfig
 from mem0.vector_stores.configs import VectorStoreConfig
 
+
+class LifecyclePolicyConfig(BaseModel):
+    """Configurable lifecycle / retention policy.
+
+    default_ttl_days: default TTL in days applied when no per-request override
+                      or higher-scope policy is present. None = permanent.
+    enabled: whether this policy scope is active.
+    """
+
+    default_ttl_days: Optional[int] = Field(
+        None,
+        description="Default retention period in days. None means permanent.",
+    )
+    enabled: bool = Field(True, description="Whether the policy is active.")
+
+
+class LifecyclePoliciesConfig(BaseModel):
+    """Hierarchy of lifecycle policies (workspace > category > user > agent > default)."""
+
+    default: LifecyclePolicyConfig = Field(
+        default_factory=LifecyclePolicyConfig,
+        description="Fallback policy when no higher-scope policy applies.",
+    )
+    workspace: Optional[LifecyclePolicyConfig] = Field(
+        None,
+        description="Workspace-wide default policy (if applicable).",
+    )
+
 # Set up the directory path
 home_dir = os.path.expanduser("~")
 mem0_dir = os.environ.get("MEM0_DIR") or os.path.join(home_dir, ".mem0")
@@ -24,6 +52,18 @@ class MemoryItem(BaseModel):
     score: Optional[float] = Field(None, description="The score associated with the text data")
     created_at: Optional[str] = Field(None, description="The timestamp when the memory was created")
     updated_at: Optional[str] = Field(None, description="The timestamp when the memory was updated")
+    expires_at: Optional[str] = Field(
+        None,
+        description="ISO 8601 UTC timestamp when the memory expires, or None for permanent.",
+    )
+    ttl_state: Optional[str] = Field(
+        None,
+        description='TTL lifecycle state: "active" | "expiring_soon" | "expired" | "permanent".',
+    )
+    ttl_source: Optional[str] = Field(
+        None,
+        description='Which policy scope produced expires_at: "default" | "category" | "user" | "agent" | "workspace" | "request".',
+    )
 
 
 class MemoryConfig(BaseModel):
@@ -54,6 +94,10 @@ class MemoryConfig(BaseModel):
     custom_instructions: Optional[str] = Field(
         description="Custom instructions for fact extraction",
         default=None,
+    )
+    lifecycle_policies: LifecyclePoliciesConfig = Field(
+        description="Memory lifecycle / retention policies",
+        default_factory=LifecyclePoliciesConfig,
     )
 
 

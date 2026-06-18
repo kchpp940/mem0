@@ -272,6 +272,9 @@ def add(
     immutable: bool = typer.Option(False, "--immutable", help="Prevent future updates."),
     no_infer: bool = typer.Option(False, "--no-infer", help="Skip inference, store raw."),
     expires: str | None = typer.Option(None, "--expires", help="Expiration date (YYYY-MM-DD)."),
+    ttl_days: int | None = typer.Option(
+        None, "--ttl-days", help="TTL in days (added from now, lower precedence than --expires)."
+    ),
     categories: str | None = typer.Option(
         None, "--categories", help="Categories (JSON array or comma-separated)."
     ),
@@ -311,6 +314,7 @@ def add(
         immutable=immutable,
         no_infer=no_infer,
         expires=expires,
+        ttl_days=ttl_days,
         categories=categories,
         output=output,
     )
@@ -464,6 +468,12 @@ def list_cmd(
     before: str | None = typer.Option(
         None, "--before", help="Created before (YYYY-MM-DD).", rich_help_panel="Filters"
     ),
+    ttl_state: str | None = typer.Option(
+        None,
+        "--ttl-state",
+        help="Filter by TTL state: active, expiring_soon, expired, permanent.",
+        rich_help_panel="Filters",
+    ),
     output: str = typer.Option(
         "table", "--output", "-o", help="Output: text, json, table.", rich_help_panel="Output"
     ),
@@ -497,6 +507,7 @@ def list_cmd(
         category=category,
         after=after,
         before=before,
+        ttl_state=ttl_state,
         output=output,
     )
 
@@ -509,6 +520,14 @@ def update(
     memory_id: str = typer.Argument(..., help="Memory ID to update."),
     text: str | None = typer.Argument(None, help="New memory text."),
     metadata: str | None = typer.Option(None, "--metadata", "-m", help="Update metadata (JSON)."),
+    expires: str | None = typer.Option(
+        None,
+        "--expires",
+        help="New expiration date (YYYY-MM-DD). Pass 'permanent' (or empty string) to remove expiration.",
+    ),
+    ttl_days: int | None = typer.Option(
+        None, "--ttl-days", help="New TTL in days (relative to now)."
+    ),
     output: str = typer.Option(
         "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
     ),
@@ -523,12 +542,13 @@ def update(
         None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
     ),
 ) -> None:
-    """Update a memory's text or metadata.
+    """Update a memory's text, metadata, or TTL policy.
 
     Examples:
       mem0 update abc-123-def-456 "new text"
-      mem0 update abc-123 --metadata '{{"key":"val"}}'
-      echo "new text" | mem0 update abc-123
+      mem0 update abc-123 --expires 2026-12-31
+      mem0 update abc-123 --ttl-days 30
+      mem0 update abc-123 --expires permanent
     """
     from mem0_cli.commands.memory import cmd_update
 
@@ -536,8 +556,20 @@ def update(
     if text is None:
         text = _read_stdin()
 
+    # Treat "permanent" / "none" as clearing expires (falsy non-None)
+    if isinstance(expires, str) and expires.lower() in {"permanent", "none", "never", ""}:
+        expires = ""
+
     backend = _get_backend(api_key, base_url)
-    cmd_update(backend, memory_id, text, metadata=metadata, output=output)
+    cmd_update(
+        backend,
+        memory_id,
+        text,
+        metadata=metadata,
+        expires=expires,
+        ttl_days=ttl_days,
+        output=output,
+    )
 
 
 # ── Memory: delete ────────────────────────────────────────────────────────

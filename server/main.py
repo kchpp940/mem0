@@ -134,6 +134,9 @@ DEFAULT_CONFIG = {
     },
     "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
     "history_db_path": HISTORY_DB_PATH,
+    "lifecycle_policies": {
+        "default": {"default_ttl_days": None, "enabled": True},
+    },
 }
 
 
@@ -184,11 +187,27 @@ class MemoryCreate(BaseModel):
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+    expires: Optional[str] = Field(
+        None,
+        description="Explicit expiration date (ISO 8601 string). Takes highest precedence.",
+    )
+    ttl_days: Optional[int] = Field(
+        None,
+        description="Explicit TTL in days. Takes precedence over default policies but lower than `expires`.",
+    )
 
 
 class MemoryUpdate(BaseModel):
     text: str = Field(..., description="New content to update the memory with.")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to update.")
+    expires: Optional[str] = Field(
+        None,
+        description="New expiration date (ISO 8601 string) or null to make permanent.",
+    )
+    ttl_days: Optional[int] = Field(
+        None,
+        description="New TTL in days (relative to now).",
+    )
 
 
 class SearchRequest(BaseModel):
@@ -359,7 +378,9 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     try:
-        response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        response = get_memory_instance().add(
+            messages=[m.model_dump() for m in memory_create.messages], **params
+        )
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
         return JSONResponse(content=response)
@@ -368,12 +389,17 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at"}
+_RESERVED_PAYLOAD_KEYS = {
+    "data", "user_id", "agent_id", "run_id", "hash",
+    "created_at", "updated_at", "expires_at", "ttl_source",
+}
 
 
 def _serialize_memory(row: Any) -> Dict[str, Any]:
+    from mem0.memory.lifecycle import annotate_memory_result
+
     payload = getattr(row, "payload", None) or {}
-    return {
+    item = {
         "id": getattr(row, "id", None),
         "memory": payload.get("data"),
         "user_id": payload.get("user_id"),
@@ -383,7 +409,11 @@ def _serialize_memory(row: Any) -> Dict[str, Any]:
         "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
         "created_at": payload.get("created_at"),
         "updated_at": payload.get("updated_at"),
+        "expires_at": payload.get("expires_at"),
+        "ttl_source": payload.get("ttl_source"),
     }
+    annotate_memory_result(item)
+    return item
 
 
 def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:
@@ -464,7 +494,11 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
     """Update an existing memory."""
     try:
         return get_memory_instance().update(
-            memory_id=memory_id, data=updated_memory.text, metadata=updated_memory.metadata
+            memory_id=memory_id,
+            data=updated_memory.text,
+            metadata=updated_memory.metadata,
+            expires=updated_memory.expires,
+            ttl_days=updated_memory.ttl_days,
         )
     except Exception:
         raise upstream_error()

@@ -25,7 +25,8 @@ class Backend(ABC):
         immutable: bool = False,
         infer: bool = True,
         expires: str | None = None,
-        categories: str | None = None,
+        ttl_days: int | None = None,
+        categories: list[str] | None = None,
     ) -> dict: ...
 
     @abstractmethod
@@ -41,7 +42,7 @@ class Backend(ABC):
         threshold: float = 0.3,
         rerank: bool = False,
         keyword: bool = False,
-        filters: str | None = None,
+        filters: dict | None = None,
         fields: list[str] | None = None,
     ) -> list[dict]: ...
 
@@ -61,11 +62,18 @@ class Backend(ABC):
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
+        ttl_state: str | None = None,
     ) -> list[dict]: ...
 
     @abstractmethod
     def update(
-        self, memory_id: str, content: str | None = None, metadata: dict | None = None
+        self,
+        memory_id: str,
+        content: str | None = None,
+        metadata: dict | None = None,
+        *,
+        expires: str | None = None,
+        ttl_days: int | None = None,
     ) -> dict: ...
 
     @abstractmethod

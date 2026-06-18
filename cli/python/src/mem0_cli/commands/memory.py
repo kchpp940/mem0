@@ -13,7 +13,6 @@ import typer
 from rich.console import Console
 
 from mem0_cli.backend.base import Backend
-from mem0_cli.backend.payload_builder import ValidationError, handle_validation_error
 from mem0_cli.branding import (
     print_error,
     print_info,
@@ -22,7 +21,6 @@ from mem0_cli.branding import (
     timed_status,
 )
 from mem0_cli.output import (
-    dedupe_add_result,
     format_add_result,
     format_agent_envelope,
     format_json,
@@ -63,6 +61,7 @@ def cmd_add(
     immutable: bool,
     no_infer: bool,
     expires: str | None,
+    ttl_days: int | None,
     categories: str | None,
     output: str = "text",
 ) -> None:
@@ -110,6 +109,28 @@ def cmd_add(
             print_error(err_console, "Invalid JSON in --metadata.")
             raise typer.Exit(1) from None
 
+    cats = None
+    if categories:
+        try:
+            cats = json.loads(categories)
+        except json.JSONDecodeError:
+            cats = [c.strip() for c in categories.split(",")]
+
+    # Validate --expires
+    if expires:
+        import re
+
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expires):
+            print_error(
+                err_console, "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31)."
+            )
+            raise typer.Exit(1)
+        from datetime import date
+
+        if date.fromisoformat(expires) <= date.today():
+            print_error(err_console, "--expires date must be in the future.")
+            raise typer.Exit(1)
+
     with timed_status(err_console, "Adding memory...") as ts:
         try:
             result = backend.add(
@@ -123,10 +144,9 @@ def cmd_add(
                 immutable=immutable,
                 infer=not no_infer,
                 expires=expires,
-                categories=categories,
+                ttl_days=ttl_days,
+                categories=cats,
             )
-        except ValidationError as e:
-            handle_validation_error(e, err_console)
         except Exception as e:
             ts.error_msg = str(e)
             raise typer.Exit(1) from None
@@ -135,13 +155,22 @@ def cmd_add(
         return
 
     # Deduplicate PENDING entries sharing the same event_id across all output modes
-    # Uses shared dedupe logic from output.py so text/json/agent agree
-    deduped_result = dedupe_add_result(result)
-    deduped_list = (
-        deduped_result.get("results", [deduped_result])
-        if isinstance(deduped_result, dict)
-        else deduped_result
-    )
+    results_list = result if isinstance(result, list) else result.get("results", [result])
+    seen_events: set[str] = set()
+    deduped: list[dict] = []
+    for r in results_list:
+        if r.get("status") == "PENDING":
+            eid = r.get("event_id", "")
+            if eid and eid in seen_events:
+                continue
+            if eid:
+                seen_events.add(eid)
+        deduped.append(r)
+    # Write back so downstream formatters see deduplicated data
+    if isinstance(result, dict) and "results" in result:
+        result = {**result, "results": deduped}
+    else:
+        result = deduped
 
     if output == "agent":
         scope = {
@@ -157,20 +186,20 @@ def cmd_add(
         format_agent_envelope(
             console,
             command="add",
-            data=deduped_list,
+            data=deduped,
             scope=scope or None,
-            count=len(deduped_list),
+            count=len(deduped),
         )
         return
 
     if output == "json":
-        format_add_result(console, deduped_result, output)
+        format_add_result(console, result, output)
         return
 
     console.print()
     print_scope(console, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    count = len(deduped_list)
-    all_pending = count > 0 and all(r.get("status") == "PENDING" for r in deduped_list)
+    count = len(deduped)
+    all_pending = count > 0 and all(r.get("status") == "PENDING" for r in deduped)
     if all_pending:
         print_success(
             console,
@@ -180,7 +209,7 @@ def cmd_add(
         print_success(
             console, f"Memory processed — {count} memor{'y' if count == 1 else 'ies'} extracted"
         )
-    format_add_result(console, deduped_result, output)
+    format_add_result(console, result, output)
 
 
 def cmd_search(
@@ -205,6 +234,13 @@ def cmd_search(
     set_current_command("search")
     if is_agent_mode():
         output = "agent"
+    filters = None
+    if filter_json:
+        try:
+            filters = json.loads(filter_json)
+        except json.JSONDecodeError:
+            print_error(err_console, "Invalid JSON in --filter.")
+            raise typer.Exit(1) from None
 
     field_list = None
     if fields:
@@ -230,11 +266,9 @@ def cmd_search(
                 threshold=threshold,
                 rerank=rerank,
                 keyword=keyword,
-                filters=filter_json,
+                filters=filters,
                 fields=field_list,
             )
-        except ValidationError as e:
-            handle_validation_error(e, err_console)
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None
@@ -320,6 +354,7 @@ def cmd_list(
     category: str | None,
     after: str | None,
     before: str | None,
+    ttl_state: str | None,
     output: str = "table",
 ) -> None:
     """List memories."""
@@ -333,6 +368,12 @@ def cmd_list(
         raise typer.Exit(1)
     if page < 1:
         print_error(err_console, "--page must be >= 1.")
+        raise typer.Exit(1)
+    if ttl_state and ttl_state not in {"active", "expiring_soon", "expired", "permanent"}:
+        print_error(
+            err_console,
+            "Invalid --ttl-state. Must be one of: active, expiring_soon, expired, permanent.",
+        )
         raise typer.Exit(1)
 
     _start = _time.perf_counter()
@@ -348,6 +389,7 @@ def cmd_list(
                 category=category,
                 after=after,
                 before=before,
+                ttl_state=ttl_state,
             )
         except Exception as e:
             print_error(err_console, str(e))
@@ -357,7 +399,7 @@ def cmd_list(
     if output == "quiet":
         return
 
-    if output == "agent":
+    if output in ("json", "agent"):
         scope = {
             k: v
             for k, v in {
@@ -376,8 +418,6 @@ def cmd_list(
             count=len(results),
             duration_ms=int(_elapsed * 1000),
         )
-    elif output == "json":
-        format_json(console, results)
     elif output == "table":
         if results:
             format_memories_table(console, results)
@@ -416,6 +456,8 @@ def cmd_update(
     text: str | None,
     *,
     metadata: str | None,
+    expires: str | None = None,
+    ttl_days: int | None = None,
     output: str,
 ) -> None:
     """Update a memory."""
@@ -432,10 +474,30 @@ def cmd_update(
             print_error(err_console, "Invalid JSON in --metadata.")
             raise typer.Exit(1) from None
 
+    # Validate expires
+    if expires:
+        import re
+        from datetime import date
+
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expires):
+            print_error(
+                err_console, "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31)."
+            )
+            raise typer.Exit(1)
+        if date.fromisoformat(expires) <= date.today():
+            print_error(err_console, "--expires date must be in the future.")
+            raise typer.Exit(1)
+
     _start = _time.perf_counter()
     with timed_status(err_console, "Updating memory...") as _ts:
         try:
-            result = backend.update(memory_id, content=text, metadata=meta)
+            result = backend.update(
+                memory_id,
+                content=text,
+                metadata=meta,
+                expires=expires,
+                ttl_days=ttl_days,
+            )
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None

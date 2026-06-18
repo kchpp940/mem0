@@ -8,16 +8,7 @@ import httpx
 
 from mem0_cli import __version__
 from mem0_cli.backend.base import Backend
-from mem0_cli.backend.payload_builder import (
-    build_add_payload,
-    build_list_payload,
-    build_search_payload,
-    normalize_categories,
-    parse_filter_json,
-    validate_expires,
-)
 from mem0_cli.config import PlatformConfig
-from mem0_cli.output import dedupe_add_result, dedupe_pending_results
 
 
 class PlatformBackend(Backend):
@@ -91,26 +82,39 @@ class PlatformBackend(Backend):
         immutable: bool = False,
         infer: bool = True,
         expires: str | None = None,
-        categories: str | None = None,
+        ttl_days: int | None = None,
+        categories: list[str] | None = None,
     ) -> dict:
-        parsed_categories = normalize_categories(categories)
-        validated_expires = validate_expires(expires)
+        payload: dict[str, Any] = {}
 
-        payload = build_add_payload(
-            content=content,
-            messages=messages,
-            user_id=user_id,
-            agent_id=agent_id,
-            app_id=app_id,
-            run_id=run_id,
-            metadata=metadata,
-            immutable=immutable,
-            infer=infer,
-            expires=validated_expires,
-            categories=parsed_categories,
-        )
-        raw = self._request("POST", "/v3/memories/add/", json=payload)
-        return dedupe_add_result(raw)
+        if messages:
+            payload["messages"] = messages
+        elif content:
+            payload["messages"] = [{"role": "user", "content": content}]
+
+        if user_id:
+            payload["user_id"] = user_id
+        if agent_id:
+            payload["agent_id"] = agent_id
+        if app_id:
+            payload["app_id"] = app_id
+        if run_id:
+            payload["run_id"] = run_id
+        if metadata:
+            payload["metadata"] = metadata
+        if immutable:
+            payload["immutable"] = True
+        if not infer:
+            payload["infer"] = False
+        if expires:
+            payload["expiration_date"] = expires
+        if ttl_days is not None:
+            payload["ttl_days"] = ttl_days
+        if categories:
+            payload["categories"] = categories
+        payload["source"] = "CLI"
+
+        return self._request("POST", "/v3/memories/add/", json=payload)
 
     def _build_filters(
         self,
@@ -123,18 +127,35 @@ class PlatformBackend(Backend):
     ) -> dict | None:
         """Build a filters dict for v3 API endpoints.
 
-        Delegates to the shared payload builder to ensure consistency between
-        Python and Node CLIs.
+        Entity IDs are ANDed (all provided IDs must match).
+        Extra filters (date ranges, categories) are also ANDed.
         """
-        from mem0_cli.backend.payload_builder import build_filters
+        # If caller passed a pre-built filter structure (e.g. --filter from CLI), use it directly
+        if extra_filters and ("AND" in extra_filters or "OR" in extra_filters):
+            return extra_filters
 
-        return build_filters(
-            user_id=user_id,
-            agent_id=agent_id,
-            app_id=app_id,
-            run_id=run_id,
-            extra_filters=extra_filters,
-        )
+        # Build AND conditions for entity IDs
+        and_conditions: list[dict[str, Any]] = []
+        if user_id:
+            and_conditions.append({"user_id": user_id})
+        if agent_id:
+            and_conditions.append({"agent_id": agent_id})
+        if app_id:
+            and_conditions.append({"app_id": app_id})
+        if run_id:
+            and_conditions.append({"run_id": run_id})
+
+        # Append any extra filters (dates, categories)
+        if extra_filters:
+            for k, v in extra_filters.items():
+                and_conditions.append({k: v})
+
+        if len(and_conditions) == 1:
+            return and_conditions[0]
+        elif and_conditions:
+            return {"AND": and_conditions}
+        else:
+            return None
 
     def search(
         self,
@@ -148,31 +169,34 @@ class PlatformBackend(Backend):
         threshold: float = 0.3,
         rerank: bool = False,
         keyword: bool = False,
-        filters: str | None = None,
+        filters: dict | None = None,
         fields: list[str] | None = None,
     ) -> list[dict]:
-        parsed_filters = parse_filter_json(filters)
+        payload: dict[str, Any] = {"query": query, "top_k": top_k, "threshold": threshold}
 
-        payload = build_search_payload(
-            query,
+        api_filters = self._build_filters(
             user_id=user_id,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
-            top_k=top_k,
-            threshold=threshold,
-            rerank=rerank,
-            keyword=keyword,
-            filters=parsed_filters,
-            fields=fields,
+            extra_filters=filters,
         )
+        if api_filters:
+            payload["filters"] = api_filters
+        if rerank:
+            payload["rerank"] = True
+        if keyword:
+            payload["keyword_search"] = True
+        if fields:
+            payload["fields"] = fields
+        payload["source"] = "CLI"
+
         result = self._request("POST", "/v3/memories/search/", json=payload)
-        items = (
+        return (
             result
             if isinstance(result, list)
             else result.get("results", result.get("memories", []))
         )
-        return dedupe_pending_results(items)
 
     def get(self, memory_id: str) -> dict:
         return self._request("GET", f"/v1/memories/{memory_id}/", params={"source": "CLI"})
@@ -189,18 +213,30 @@ class PlatformBackend(Backend):
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
+        ttl_state: str | None = None,
     ) -> list[dict]:
-        payload, params = build_list_payload(
+        payload: dict[str, Any] = {}
+        params = {"page": str(page), "page_size": str(page_size)}
+
+        # Build filters — entity IDs and date filters go inside "filters"
+        extra: dict[str, Any] = {}
+        if category:
+            extra["categories"] = {"contains": category}
+        if after:
+            extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
+        if before:
+            extra["created_at"] = {**(extra.get("created_at", {})), "lte": before}
+
+        api_filters = self._build_filters(
             user_id=user_id,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
-            category=category,
-            after=after,
-            before=before,
+            extra_filters=extra if extra else None,
         )
-        params["page"] = str(page)
-        params["page_size"] = str(page_size)
+        if api_filters:
+            payload["filters"] = api_filters
+        payload["source"] = "CLI"
 
         result = self._request("POST", "/v3/memories/", json=payload, params=params)
         items = (
@@ -208,16 +244,32 @@ class PlatformBackend(Backend):
             if isinstance(result, list)
             else result.get("results", result.get("memories", []))
         )
-        return dedupe_pending_results(items)
+        # Client-side TTL state filter when API doesn't support it natively
+        if ttl_state:
+            from mem0.memory.lifecycle import annotate_memory_result
+
+            annotated = [annotate_memory_result(dict(it)) for it in items]
+            items = [it for it in annotated if it.get("ttl_state") == ttl_state]
+        return items
 
     def update(
-        self, memory_id: str, content: str | None = None, metadata: dict | None = None
+        self,
+        memory_id: str,
+        content: str | None = None,
+        metadata: dict | None = None,
+        *,
+        expires: str | None = None,
+        ttl_days: int | None = None,
     ) -> dict:
         payload: dict[str, Any] = {}
         if content:
             payload["text"] = content
         if metadata:
             payload["metadata"] = metadata
+        if expires:
+            payload["expiration_date"] = expires
+        if ttl_days is not None:
+            payload["ttl_days"] = ttl_days
         payload["source"] = "CLI"
         return self._request("PUT", f"/v1/memories/{memory_id}/", json=payload)
 

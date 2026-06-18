@@ -5,10 +5,6 @@
 import fs from "node:fs";
 import type { Backend } from "../backend/base.js";
 import {
-	ValidationError,
-	handleValidationError,
-} from "../backend/payloadBuilder.js";
-import {
 	printError,
 	printInfo,
 	printScope,
@@ -16,7 +12,6 @@ import {
 	timedStatus,
 } from "../branding.js";
 import {
-	dedupeAddResult,
 	formatAddResult,
 	formatAgentEnvelope,
 	formatJson,
@@ -98,6 +93,20 @@ export async function cmdAdd(
 		process.exit(1);
 	}
 
+	// Validate --expires
+	if (opts.expires) {
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.expires)) {
+			printError(
+				"Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
+			);
+			process.exit(1);
+		}
+		if (new Date(opts.expires) <= new Date()) {
+			printError("--expires date must be in the future.");
+			process.exit(1);
+		}
+	}
+
 	let meta: Record<string, unknown> | undefined;
 	if (opts.metadata) {
 		try {
@@ -105,6 +114,15 @@ export async function cmdAdd(
 		} catch {
 			printError("Invalid JSON in --metadata.");
 			process.exit(1);
+		}
+	}
+
+	let cats: string[] | undefined;
+	if (opts.categories) {
+		try {
+			cats = JSON.parse(opts.categories);
+		} catch {
+			cats = opts.categories.split(",").map((c) => c.trim());
 		}
 	}
 
@@ -120,11 +138,10 @@ export async function cmdAdd(
 				immutable: opts.immutable,
 				infer: opts.infer !== false,
 				expires: opts.expires,
-				categories: opts.categories,
+				categories: cats,
 			});
 		});
 	} catch (e) {
-		if (e instanceof ValidationError) handleValidationError(e);
 		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
@@ -132,16 +149,23 @@ export async function cmdAdd(
 	if (opts.output === "quiet") return;
 
 	// Deduplicate PENDING entries sharing the same event_id across all output modes
-	// Uses shared dedupe logic from output.ts so text/json/agent agree
-	const dedupedResult = dedupeAddResult(result);
-	const dedupedList = (
-		Array.isArray(dedupedResult)
-			? dedupedResult
-			: (((dedupedResult as Record<string, unknown>).results as Record<
-					string,
-					unknown
-				>[]) ?? [dedupedResult])
-	) as Record<string, unknown>[];
+	const rawResults: Record<string, unknown>[] = Array.isArray(result)
+		? result
+		: ((result.results as Record<string, unknown>[]) ?? [result]);
+	const seenEvents = new Set<string>();
+	const deduped: Record<string, unknown>[] = [];
+	for (const r of rawResults) {
+		if (r.status === "PENDING") {
+			const eid = (r.event_id as string) ?? "";
+			if (eid && seenEvents.has(eid)) continue;
+			if (eid) seenEvents.add(eid);
+		}
+		deduped.push(r);
+	}
+	// Write back so downstream formatters see deduplicated data
+	const dedupedResult: Record<string, unknown> = Array.isArray(result)
+		? (deduped as unknown as Record<string, unknown>)
+		: { ...result, results: deduped };
 
 	if (opts.output === "agent") {
 		const scope: Record<string, string | undefined> = {
@@ -152,9 +176,9 @@ export async function cmdAdd(
 		};
 		formatAgentEnvelope({
 			command: "add",
-			data: dedupedList,
+			data: deduped,
 			scope,
-			count: dedupedList.length,
+			count: deduped.length,
 		});
 		return;
 	}
@@ -171,9 +195,8 @@ export async function cmdAdd(
 		app_id: opts.appId,
 		run_id: opts.runId,
 	});
-	const count = dedupedList.length;
-	const allPending =
-		count > 0 && dedupedList.every((r) => r.status === "PENDING");
+	const count = deduped.length;
+	const allPending = count > 0 && deduped.every((r) => r.status === "PENDING");
 	if (allPending) {
 		printSuccess(
 			`Memory queued — ${count} event${count !== 1 ? "s" : ""} pending`,
@@ -209,6 +232,16 @@ export async function cmdSearch(
 		process.exit(1);
 	}
 
+	let filters: Record<string, unknown> | undefined;
+	if (opts.filterJson) {
+		try {
+			filters = JSON.parse(opts.filterJson);
+		} catch {
+			printError("Invalid JSON in --filter.");
+			process.exit(1);
+		}
+	}
+
 	const fieldList = opts.fields
 		? opts.fields.split(",").map((f) => f.trim())
 		: undefined;
@@ -236,12 +269,11 @@ export async function cmdSearch(
 				threshold: opts.threshold,
 				rerank: opts.rerank,
 				keyword: opts.keyword,
-				filters: opts.filterJson,
+				filters,
 				fields: fieldList,
 			});
 		});
 	} catch (e) {
-		if (e instanceof ValidationError) handleValidationError(e);
 		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
@@ -369,7 +401,7 @@ export async function cmdList(
 
 	if (opts.output === "quiet") return;
 
-	if (opts.output === "agent") {
+	if (opts.output === "agent" || opts.output === "json") {
 		const scope: Record<string, string | undefined> = {
 			user_id: opts.userId,
 			agent_id: opts.agentId,
@@ -383,8 +415,6 @@ export async function cmdList(
 			count: results.length,
 			durationMs: Math.round(elapsed * 1000),
 		});
-	} else if (opts.output === "json") {
-		formatJson(results);
 	} else if (opts.output === "table") {
 		if (results.length > 0) {
 			formatMemoriesTable(results);

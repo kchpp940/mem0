@@ -5,6 +5,9 @@ export interface Memory {
   agent_id?: string;
   created_at?: string;
   updated_at?: string;
+  expires_at?: string | null;
+  ttl_state?: string | null;
+  ttl_source?: string | null;
 }
 
 export interface ApiKey {

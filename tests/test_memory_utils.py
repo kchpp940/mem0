@@ -4,11 +4,16 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 from memory_utils import (
+    EntityResponseItem,
+    MemoryListResponse,
+    MemoryResponseItem,
     USER_METADATA_EXCLUDE,
+    VALID_ENTITY_TYPES,
     extract_payload,
     format_memory_response,
     format_vector_store_row,
-    is_memory_item,
+    is_entity_response_item,
+    is_memory_response_item,
     iter_formatted_rows,
     list_vector_store_memories,
     normalize_memory_item,
@@ -17,38 +22,133 @@ from memory_utils import (
 )
 
 
+class TestTypedDictSchemas:
+    def test_memory_response_item_fields(self):
+        item = MemoryResponseItem(
+            id="abc",
+            memory="hello",
+            user_id="u1",
+            agent_id="a1",
+            run_id="r1",
+            actor_id="alice",
+            role="user",
+            hash="h1",
+            metadata={"tag": "x"},
+            score=0.9,
+            score_details={"semantic": 0.8},
+            event="ADD",
+            created_at="2025-01-01",
+            updated_at="2025-01-02",
+        )
+        assert item["id"] == "abc"
+        assert item["memory"] == "hello"
+        assert item["user_id"] == "u1"
+        assert item["actor_id"] == "alice"
+        assert item["score"] == 0.9
+
+    def test_memory_response_item_partial(self):
+        item = MemoryResponseItem(id="abc", memory="hello")
+        assert item["id"] == "abc"
+        assert item["memory"] == "hello"
+
+    def test_entity_response_item_fields(self):
+        entity = EntityResponseItem(
+            id="u1",
+            type="user",
+            total_memories=10,
+            created_at="2025-01-01",
+            updated_at="2025-01-02",
+        )
+        assert entity["id"] == "u1"
+        assert entity["type"] == "user"
+        assert entity["total_memories"] == 10
+
+    def test_memory_list_response(self):
+        item = MemoryResponseItem(id="x", memory="y")
+        resp = MemoryListResponse(results=[item])
+        assert len(resp["results"]) == 1
+        assert resp["results"][0]["id"] == "x"
+
+    def test_entity_type_values(self):
+        assert VALID_ENTITY_TYPES == {"user", "agent", "run"}
+
+
+class TestIsMemoryResponseItem:
+    def test_true_with_both_id_and_memory(self):
+        assert is_memory_response_item({"id": "abc", "memory": "hello"}) is True
+
+    def test_true_with_extra_fields(self):
+        assert is_memory_response_item({"id": "abc", "memory": "hello", "user_id": "u1"}) is True
+
+    def test_false_with_only_id(self):
+        assert is_memory_response_item({"id": "abc", "name": "John"}) is False
+
+    def test_false_with_only_memory(self):
+        assert is_memory_response_item({"memory": "hello"}) is False
+
+    def test_false_with_api_log_dict(self):
+        log = {"id": "req-123", "method": "GET", "path": "/memories", "status_code": 200}
+        assert is_memory_response_item(log) is False
+
+    def test_false_with_api_key_dict(self):
+        key = {"id": "k1", "label": "test", "key_prefix": "sk-", "created_at": "2025"}
+        assert is_memory_response_item(key) is False
+
+    def test_false_with_entity_dict(self):
+        entity = {"id": "u1", "type": "user", "total_memories": 5}
+        assert is_memory_response_item(entity) is False
+
+    def test_false_non_dict(self):
+        assert is_memory_response_item("not a dict") is False
+        assert is_memory_response_item(None) is False
+        assert is_memory_response_item(123) is False
+
+
+class TestIsEntityResponseItem:
+    def test_true_with_all_required_fields(self):
+        assert is_entity_response_item({"id": "u1", "type": "user", "total_memories": 10}) is True
+
+    def test_true_with_timestamp_fields(self):
+        assert is_entity_response_item({
+            "id": "a1", "type": "agent", "total_memories": 5,
+            "created_at": "2025", "updated_at": "2025",
+        }) is True
+
+    def test_false_missing_id(self):
+        assert is_entity_response_item({"type": "user", "total_memories": 5}) is False
+
+    def test_false_missing_type(self):
+        assert is_entity_response_item({"id": "u1", "total_memories": 5}) is False
+
+    def test_false_missing_total_memories(self):
+        assert is_entity_response_item({"id": "u1", "type": "user"}) is False
+
+    def test_false_invalid_type_value(self):
+        assert is_entity_response_item({"id": "u1", "type": "invalid", "total_memories": 5}) is False
+        assert is_entity_response_item({"id": "u1", "type": "project", "total_memories": 5}) is False
+
+    def test_false_memory_item_not_entity(self):
+        assert is_entity_response_item({"id": "abc", "memory": "hello"}) is False
+
+    def test_false_non_dict(self):
+        assert is_entity_response_item("not a dict") is False
+
+
 class TestExtractPayload:
     def test_extracts_payload_dict(self):
         class FakeRow:
             payload = {"data": "hello", "user_id": "u1"}
-
         assert extract_payload(FakeRow()) == {"data": "hello", "user_id": "u1"}
 
     def test_handles_none_payload(self):
         class FakeRow:
             payload = None
-
         assert extract_payload(FakeRow()) == {}
 
     def test_handles_missing_payload(self):
         class FakeRow:
             pass
-
         assert extract_payload(FakeRow()) == {}
-
-
-class TestIsMemoryItem:
-    def test_detects_memory_item_by_id(self):
-        assert is_memory_item({"id": "abc", "memory": "test"}) is True
-
-    def test_detects_memory_item_by_memory(self):
-        assert is_memory_item({"memory": "test"}) is True
-
-    def test_rejects_non_memory_dict(self):
-        assert is_memory_item({"message": "hello"}) is False
-
-    def test_rejects_non_dict(self):
-        assert is_memory_item("not a dict") is False
 
 
 class TestFormatMemoryResponse:
@@ -123,10 +223,10 @@ class TestFormatMemoryResponse:
         result = format_memory_response(item)
         assert "metadata" not in result
 
-    def test_non_dict_metadata_preserved(self):
-        item = {"id": "abc", "memory": "test", "metadata": "some-string"}
-        result = format_memory_response(item)
-        assert result["metadata"] == "some-string"
+    def test_returns_typed_dict(self):
+        result = format_memory_response({"id": "x", "memory": "y"})
+        assert isinstance(result, dict)
+        assert "id" in result and "memory" in result
 
 
 class TestFormatVectorStoreRow:
@@ -177,14 +277,13 @@ class TestFormatVectorStoreRow:
         class FakeRow:
             id = "row-3"
             payload = None
-
         result = format_vector_store_row(FakeRow())
         assert result["id"] == "row-3"
         assert result["memory"] == ""
 
 
 class TestNormalizeMemoryItem:
-    def test_dict_with_memory_normalized(self):
+    def test_dict_with_both_id_and_memory_normalized(self):
         item = {
             "id": "abc",
             "memory": "test",
@@ -200,8 +299,15 @@ class TestNormalizeMemoryItem:
         assert result["metadata"]["category"] == "sports"
         assert "text_lemmatized" not in result["metadata"]
 
-    def test_non_memory_dict_returned_as_is(self):
-        assert normalize_memory_item({"message": "deleted"}) == {"message": "deleted"}
+    def test_id_only_not_normalized(self):
+        item = {"id": "req-123", "method": "GET", "path": "/memories"}
+        result = normalize_memory_item(item)
+        assert result == item
+
+    def test_memory_only_not_normalized(self):
+        item = {"memory": "incomplete item"}
+        result = normalize_memory_item(item)
+        assert result == item
 
     def test_non_dict_returned_as_is(self):
         assert normalize_memory_item("not a dict") == "not a dict"
@@ -214,17 +320,19 @@ class TestNormalizeMemoryItem:
 
 
 class TestNormalizeMemoryList:
-    def test_formats_list(self):
+    def test_formats_only_valid_memory_items(self):
         items = [
             {"id": "1", "memory": "first", "user_id": "u1"},
             {"id": "2", "memory": "second", "agent_id": "a1"},
+            {"id": "log1", "path": "/memories", "method": "GET"},
             {"not": "a memory item"},
         ]
         result = normalize_memory_list(items)
-        assert len(result) == 3
+        assert len(result) == 4
         assert result[0]["user_id"] == "u1"
         assert result[1]["agent_id"] == "a1"
-        assert result[2] == {"not": "a memory item"}
+        assert result[2] == {"id": "log1", "path": "/memories", "method": "GET"}
+        assert result[3] == {"not": "a memory item"}
 
 
 class TestNormalizeResponse:
@@ -249,7 +357,27 @@ class TestNormalizeResponse:
         assert result["memory"] == "a single memory"
 
     def test_preserves_other_response_shapes(self):
-        response = {"message": "Memory deleted successfully"}
+        msg = {"message": "Memory deleted successfully"}
+        assert normalize_response(msg) == msg
+
+    def test_preserves_entity_list_shape(self):
+        entities = [
+            {"id": "u1", "type": "user", "total_memories": 5},
+            {"id": "a1", "type": "agent", "total_memories": 3},
+        ]
+        result = normalize_response(entities)
+        assert isinstance(result, list)
+        assert len(result) == 2
+        assert result[0]["id"] == "u1"
+        assert result[0]["type"] == "user"
+
+    def test_preserves_dict_with_non_memory_results(self):
+        response = {"results": [{"id": "log1", "method": "GET", "path": "/x"}]}
+        result = normalize_response(response)
+        assert result == response
+
+    def test_preserves_non_memory_plain_list(self):
+        response = [{"id": "log1", "method": "GET"}, {"id": "log2", "method": "POST"}]
         result = normalize_response(response)
         assert result == response
 
@@ -379,3 +507,15 @@ class TestInternalFieldConsistency:
         for key in ("text_lemmatized", "attributed_to"):
             assert key not in result
             assert key not in result.get("metadata", {})
+
+    def test_strict_detection_prevents_false_positives(self):
+        non_memory_objects = [
+            {"id": "req-1", "path": "/memories", "method": "GET"},
+            {"id": "key-1", "label": "production", "key_prefix": "sk-"},
+            {"id": "user-1", "type": "user", "total_memories": 10},
+            {"message": "ok"},
+            {"id": "x", "data": "something without memory field"},
+        ]
+        for obj in non_memory_objects:
+            assert is_memory_response_item(obj) is False, f"Should not detect as memory: {obj}"
+            assert normalize_response(obj) == obj

@@ -10,9 +10,9 @@ export interface Memory {
   metadata?: Record<string, unknown>;
   score?: number;
   score_details?: Record<string, unknown>;
+  event?: string;
   created_at?: string;
   updated_at?: string;
-  event?: string;
 }
 
 export interface ApiKey {
@@ -47,6 +47,6 @@ export interface Entity {
   id: string;
   type: EntityType;
   total_memories: number;
-  created_at: string | null;
-  updated_at: string | null;
+  created_at?: string;
+  updated_at?: string;
 }

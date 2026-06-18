@@ -8,6 +8,7 @@ export interface Memory {
   expires_at?: string | null;
   ttl_state?: string | null;
   ttl_source?: string | null;
+  categories?: string[] | null;
 }
 
 export interface ApiKey {

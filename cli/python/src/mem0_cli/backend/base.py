@@ -59,6 +59,7 @@ class Backend(ABC):
         run_id: str | None = None,
         page: int = 1,
         page_size: int = 100,
+        categories: list[str] | None = None,
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
@@ -74,6 +75,7 @@ class Backend(ABC):
         *,
         expires: str | None = None,
         ttl_days: int | None = None,
+        categories: list[str] | None = None,
         category: str | None = None,
     ) -> dict: ...
 

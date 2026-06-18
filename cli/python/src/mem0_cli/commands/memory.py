@@ -351,6 +351,7 @@ def cmd_list(
     run_id: str | None,
     page: int,
     page_size: int,
+    categories: str | None,
     category: str | None,
     after: str | None,
     before: str | None,
@@ -376,6 +377,15 @@ def cmd_list(
         )
         raise typer.Exit(1)
 
+    # Parse categories: prefer --categories list, fall back to --category
+    cat_list: list[str] | None = None
+    if categories:
+        cat_list = [c.strip() for c in categories.split(",") if c.strip()]
+        if not cat_list:
+            cat_list = None
+    elif category:
+        cat_list = [category]
+
     _start = _time.perf_counter()
     with timed_status(err_console, "Listing memories...") as _ts:
         try:
@@ -386,7 +396,7 @@ def cmd_list(
                 run_id=run_id,
                 page=page,
                 page_size=page_size,
-                category=category,
+                categories=cat_list,
                 after=after,
                 before=before,
                 ttl_state=ttl_state,
@@ -458,6 +468,8 @@ def cmd_update(
     metadata: str | None,
     expires: str | None = None,
     ttl_days: int | None = None,
+    categories: str | None = None,
+    category: str | None = None,
     output: str,
 ) -> None:
     """Update a memory."""
@@ -473,6 +485,15 @@ def cmd_update(
         except json.JSONDecodeError:
             print_error(err_console, "Invalid JSON in --metadata.")
             raise typer.Exit(1) from None
+
+    # Parse categories
+    cat_list: list[str] | None = None
+    if categories:
+        cat_list = [c.strip() for c in categories.split(",") if c.strip()]
+        if not cat_list:
+            cat_list = None
+    elif category:
+        cat_list = [category]
 
     # Validate expires
     if expires:
@@ -497,6 +518,8 @@ def cmd_update(
                 metadata=meta,
                 expires=expires,
                 ttl_days=ttl_days,
+                categories=cat_list,
+                category=category,
             )
         except Exception as e:
             print_error(err_console, str(e))

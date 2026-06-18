@@ -198,9 +198,13 @@ class MemoryCreate(BaseModel):
         None,
         description="Explicit TTL in days. Takes precedence over default policies but lower than `expires`.",
     )
+    categories: Optional[List[str]] = Field(
+        None,
+        description="Category tags for lifecycle policy resolution (shortest TTL wins) and filtering.",
+    )
     category: Optional[str] = Field(
         None,
-        description="Optional category name for per-category lifecycle policy resolution.",
+        description="Deprecated: use `categories` instead. Single category alias.",
     )
 
 
@@ -215,9 +219,13 @@ class MemoryUpdate(BaseModel):
         None,
         description="New TTL in days (relative to now).",
     )
+    categories: Optional[List[str]] = Field(
+        None,
+        description="New category tags. Lifecycle policy is re-resolved (shortest TTL wins).",
+    )
     category: Optional[str] = Field(
         None,
-        description="Re-resolve per-category lifecycle policy on update.",
+        description="Deprecated: use `categories` instead.",
     )
 
 
@@ -406,7 +414,7 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 ALL_MEMORIES_LIMIT = 1000
 _RESERVED_PAYLOAD_KEYS = {
     "data", "user_id", "agent_id", "run_id", "hash",
-    "created_at", "updated_at", "expires_at", "ttl_source",
+    "created_at", "updated_at", "expires_at", "ttl_source", "categories",
 }
 
 
@@ -426,6 +434,7 @@ def _serialize_memory(row: Any) -> Dict[str, Any]:
         "updated_at": payload.get("updated_at"),
         "expires_at": payload.get("expires_at"),
         "ttl_source": payload.get("ttl_source"),
+        "categories": payload.get("categories"),
     }
     annotate_memory_result(item)
     return item
@@ -542,6 +551,7 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
             metadata=updated_memory.metadata,
             expires=updated_memory.expires,
             ttl_days=updated_memory.ttl_days,
+            categories=updated_memory.categories,
             category=updated_memory.category,
         )
     except Exception:

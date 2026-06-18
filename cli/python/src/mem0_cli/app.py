@@ -467,7 +467,13 @@ def list_cmd(
         100, "--page-size", help="Results per page.", rich_help_panel="Pagination"
     ),
     category: str | None = typer.Option(
-        None, "--category", help="Filter by category.", rich_help_panel="Filters"
+        None, "--category", help="Filter by category (single).", rich_help_panel="Filters"
+    ),
+    categories: str | None = typer.Option(
+        None,
+        "--categories",
+        help="Filter by categories (comma-separated). All must match.",
+        rich_help_panel="Filters",
     ),
     after: str | None = typer.Option(
         None, "--after", help="Created after (YYYY-MM-DD).", rich_help_panel="Filters"
@@ -511,6 +517,7 @@ def list_cmd(
         **ids,
         page=page,
         page_size=page_size,
+        categories=categories,
         category=category,
         after=after,
         before=before,
@@ -534,6 +541,16 @@ def update(
     ),
     ttl_days: int | None = typer.Option(
         None, "--ttl-days", help="New TTL in days (relative to now)."
+    ),
+    categories: str | None = typer.Option(
+        None,
+        "--categories",
+        help="New category tags (comma-separated). Re-resolves lifecycle policy.",
+    ),
+    category: str | None = typer.Option(
+        None,
+        "--category",
+        help="Deprecated: use --categories. Single category tag.",
     ),
     output: str = typer.Option(
         "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
@@ -575,6 +592,8 @@ def update(
         metadata=metadata,
         expires=expires,
         ttl_days=ttl_days,
+        categories=categories,
+        category=category,
         output=output,
     )
 

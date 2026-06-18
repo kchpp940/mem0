@@ -210,6 +210,7 @@ class PlatformBackend(Backend):
         run_id: str | None = None,
         page: int = 1,
         page_size: int = 100,
+        categories: list[str] | None = None,
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
@@ -218,10 +219,19 @@ class PlatformBackend(Backend):
         payload: dict[str, Any] = {}
         params = {"page": str(page), "page_size": str(page_size)}
 
+        # Normalise categories: prefer list, fall back to single category alias
+        if categories is None and category is not None:
+            categories = [category]
+        if categories is not None:
+            categories = [c for c in categories if c]
+            if not categories:
+                categories = None
+
         # Build filters — entity IDs and date filters go inside "filters"
         extra: dict[str, Any] = {}
-        if category:
-            extra["categories"] = {"contains": category}
+        if categories and len(categories) == 1:
+            # Single category: use server-side contains filter
+            extra["categories"] = {"contains": categories[0]}
         if after:
             extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
         if before:
@@ -244,7 +254,14 @@ class PlatformBackend(Backend):
             if isinstance(result, list)
             else result.get("results", result.get("memories", []))
         )
-        # Client-side TTL state filter when API doesn't support it natively
+
+        # Client-side filters: multi-category containment + TTL state
+        if categories and len(categories) > 1:
+            items = [
+                it for it in items
+                if isinstance(it.get("categories"), list)
+                and all(c in it["categories"] for c in categories)
+            ]
         if ttl_state:
             from mem0.memory.lifecycle import annotate_memory_result
 
@@ -260,6 +277,7 @@ class PlatformBackend(Backend):
         *,
         expires: str | None = None,
         ttl_days: int | None = None,
+        categories: list[str] | None = None,
         category: str | None = None,
     ) -> dict:
         payload: dict[str, Any] = {}
@@ -271,8 +289,10 @@ class PlatformBackend(Backend):
             payload["expiration_date"] = expires
         if ttl_days is not None:
             payload["ttl_days"] = ttl_days
-        if category:
-            payload["category"] = category
+        if categories is None and category is not None:
+            categories = [category]
+        if categories:
+            payload["categories"] = categories
         payload["source"] = "CLI"
         return self._request("PUT", f"/v1/memories/{memory_id}/", json=payload)
 

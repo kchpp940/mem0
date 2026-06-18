@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import datetime
-from dataclasses import asdict
 
 from mem0.configs.base import LifecyclePoliciesConfig
 from mem0.memory.lifecycle import (
@@ -185,6 +184,80 @@ def test_lifecycle_policy_from_dict_to_dict():
     p3 = LifecyclePolicy.from_dict(None)
     assert p3.default_ttl_days is None
     assert p3.enabled is True
+
+
+def test_resolve_expiration_multi_category_shortest_wins():
+    """When a memory has multiple categories, the shortest TTL wins."""
+    now = datetime.datetime(2025, 6, 15, tzinfo=datetime.timezone.utc)
+    cat_policies = {
+        "work": LifecyclePolicy(default_ttl_days=90, enabled=True),
+        "sensitive": LifecyclePolicy(default_ttl_days=7, enabled=True),
+        "personal": LifecyclePolicy(default_ttl_days=30, enabled=True),
+    }
+    exp, src = resolve_expiration(
+        categories=["work", "personal"],
+        category_policies=cat_policies,
+        now=now,
+    )
+    assert src == TtlSource.CATEGORY
+    # shortest is personal = 30 days (work=90, personal=30)
+    expected = now + datetime.timedelta(days=30)
+    assert exp == expected.isoformat()
+
+    # Add sensitive → shortest becomes 7 days
+    exp2, src2 = resolve_expiration(
+        categories=["work", "sensitive", "personal"],
+        category_policies=cat_policies,
+        now=now,
+    )
+    assert src2 == TtlSource.CATEGORY
+    expected2 = now + datetime.timedelta(days=7)
+    assert exp2 == expected2.isoformat()
+
+
+def test_resolve_expiration_multi_category_some_disabled():
+    """Disabled category policies are skipped; we still pick the shortest enabled one."""
+    now = datetime.datetime(2025, 6, 15, tzinfo=datetime.timezone.utc)
+    cat_policies = {
+        "work": LifecyclePolicy(default_ttl_days=90, enabled=False),
+        "personal": LifecyclePolicy(default_ttl_days=30, enabled=True),
+    }
+    exp, src = resolve_expiration(
+        categories=["work", "personal"],
+        category_policies=cat_policies,
+        default_policy=LifecyclePolicy(default_ttl_days=365, enabled=True),
+        now=now,
+    )
+    assert src == TtlSource.CATEGORY
+    expected = now + datetime.timedelta(days=30)
+    assert exp == expected.isoformat()
+
+
+def test_resolve_expiration_no_matching_category_falls_through():
+    now = datetime.datetime(2025, 6, 15, tzinfo=datetime.timezone.utc)
+    cat_policies = {"other": LifecyclePolicy(default_ttl_days=7, enabled=True)}
+    exp, src = resolve_expiration(
+        categories=["random"],
+        category_policies=cat_policies,
+        default_policy=LifecyclePolicy(default_ttl_days=365, enabled=True),
+        now=now,
+    )
+    assert src == TtlSource.DEFAULT
+    expected = now + datetime.timedelta(days=365)
+    assert exp == expected.isoformat()
+
+
+def test_annotate_memory_result_preserves_categories():
+    """categories list passes through annotate_memory_result unchanged."""
+    item = {
+        "id": "1",
+        "memory": "test",
+        "categories": ["work", "personal"],
+        "expires_at": "2025-12-31T00:00:00+00:00",
+    }
+    result = annotate_memory_result(item)
+    assert result["categories"] == ["work", "personal"]
+    assert result["ttl_state"] == "active"
 
 
 if __name__ == "__main__":

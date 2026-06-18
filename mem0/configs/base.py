@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -83,6 +83,10 @@ class MemoryItem(BaseModel):
     ttl_source: Optional[str] = Field(
         None,
         description='Which policy scope produced expires_at: "default" | "category" | "user" | "agent" | "workspace" | "request".',
+    )
+    categories: Optional[List[str]] = Field(
+        None,
+        description="Category tags assigned to the memory.",
     )
 
 

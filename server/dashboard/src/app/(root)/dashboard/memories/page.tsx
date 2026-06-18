@@ -381,6 +381,24 @@ export default function MemoriesPage() {
                   </div>
                 )}
               </div>
+              {selectedMemory.categories && selectedMemory.categories.length > 0 && (
+                <div className="space-y-2">
+                  <Label className="text-xs text-onSurface-default-tertiary">
+                    Categories
+                  </Label>
+                  <div className="flex flex-wrap gap-1.5">
+                    {selectedMemory.categories.map((cat) => (
+                      <Badge
+                        key={cat}
+                        variant="outline"
+                        className="font-normal text-xs"
+                      >
+                        {cat}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
               <Button
                 variant="outline"
                 size="sm"

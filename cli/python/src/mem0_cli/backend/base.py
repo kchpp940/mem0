@@ -25,7 +25,7 @@ class Backend(ABC):
         immutable: bool = False,
         infer: bool = True,
         expires: str | None = None,
-        categories: list[str] | None = None,
+        categories: str | None = None,
     ) -> dict: ...
 
     @abstractmethod
@@ -41,7 +41,7 @@ class Backend(ABC):
         threshold: float = 0.3,
         rerank: bool = False,
         keyword: bool = False,
-        filters: dict | None = None,
+        filters: str | None = None,
         fields: list[str] | None = None,
     ) -> list[dict]: ...
 

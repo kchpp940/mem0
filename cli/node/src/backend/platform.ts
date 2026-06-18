@@ -3,6 +3,7 @@
  */
 
 import type { PlatformConfig } from "../config.js";
+import { dedupeAddResult, dedupePendingResults } from "../output.js";
 import { captureNotice, isAgentMode } from "../state.js";
 import { CLI_VERSION } from "../version.js";
 import {
@@ -21,6 +22,9 @@ import {
 	buildFilters,
 	buildListPayload,
 	buildSearchPayload,
+	normalizeCategories,
+	parseFilterJson,
+	validateExpires,
 } from "./payloadBuilder.js";
 
 export class PlatformBackend implements Backend {
@@ -136,6 +140,9 @@ export class PlatformBackend implements Backend {
 		messages?: Record<string, unknown>[],
 		opts: AddOptions = {},
 	): Promise<Record<string, unknown>> {
+		const parsedCategories = normalizeCategories(opts.categories);
+		const validatedExpires = validateExpires(opts.expires);
+
 		const payload = buildAddPayload({
 			content,
 			messages,
@@ -146,12 +153,13 @@ export class PlatformBackend implements Backend {
 			metadata: opts.metadata,
 			immutable: opts.immutable,
 			infer: opts.infer,
-			expires: opts.expires,
-			categories: opts.categories,
+			expires: validatedExpires,
+			categories: parsedCategories,
 		});
-		return (await this._request("POST", "/v3/memories/add/", {
+		const raw = (await this._request("POST", "/v3/memories/add/", {
 			json: payload,
 		})) as Record<string, unknown>;
+		return dedupeAddResult(raw) as Record<string, unknown>;
 	}
 
 	private _buildFilters(opts: {
@@ -174,6 +182,8 @@ export class PlatformBackend implements Backend {
 		query: string,
 		opts: SearchOptions = {},
 	): Promise<Record<string, unknown>[]> {
+		const parsedFilters = parseFilterJson(opts.filters);
+
 		const payload = buildSearchPayload(query, {
 			userId: opts.userId,
 			agentId: opts.agentId,
@@ -183,16 +193,21 @@ export class PlatformBackend implements Backend {
 			threshold: opts.threshold,
 			rerank: opts.rerank,
 			keyword: opts.keyword,
-			filters: opts.filters,
+			filters: parsedFilters,
 			fields: opts.fields,
 		});
 
 		const result = (await this._request("POST", "/v3/memories/search/", {
 			json: payload,
 		})) as unknown;
-		if (Array.isArray(result)) return result;
-		const obj = result as Record<string, unknown>;
-		return (obj.results ?? obj.memories ?? []) as Record<string, unknown>[];
+		let items: Record<string, unknown>[];
+		if (Array.isArray(result)) {
+			items = result;
+		} else {
+			const obj = result as Record<string, unknown>;
+			items = (obj.results ?? obj.memories ?? []) as Record<string, unknown>[];
+		}
+		return dedupePendingResults(items);
 	}
 
 	async get(memoryId: string): Promise<Record<string, unknown>> {
@@ -220,9 +235,14 @@ export class PlatformBackend implements Backend {
 			json: payload,
 			params,
 		})) as unknown;
-		if (Array.isArray(result)) return result;
-		const obj = result as Record<string, unknown>;
-		return (obj.results ?? obj.memories ?? []) as Record<string, unknown>[];
+		let items: Record<string, unknown>[];
+		if (Array.isArray(result)) {
+			items = result;
+		} else {
+			const obj = result as Record<string, unknown>;
+			items = (obj.results ?? obj.memories ?? []) as Record<string, unknown>[];
+		}
+		return dedupePendingResults(items);
 	}
 
 	async update(

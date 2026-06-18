@@ -13,13 +13,7 @@ import typer
 from rich.console import Console
 
 from mem0_cli.backend.base import Backend
-from mem0_cli.backend.payload_builder import (
-    ValidationError,
-    handle_validation_error,
-    normalize_categories,
-    parse_filter_json,
-    validate_expires,
-)
+from mem0_cli.backend.payload_builder import ValidationError, handle_validation_error
 from mem0_cli.branding import (
     print_error,
     print_info,
@@ -116,12 +110,6 @@ def cmd_add(
             print_error(err_console, "Invalid JSON in --metadata.")
             raise typer.Exit(1) from None
 
-    try:
-        cats = normalize_categories(categories)
-        expires = validate_expires(expires)
-    except ValidationError as e:
-        handle_validation_error(e, err_console)
-
     with timed_status(err_console, "Adding memory...") as ts:
         try:
             result = backend.add(
@@ -135,8 +123,10 @@ def cmd_add(
                 immutable=immutable,
                 infer=not no_infer,
                 expires=expires,
-                categories=cats,
+                categories=categories,
             )
+        except ValidationError as e:
+            handle_validation_error(e, err_console)
         except Exception as e:
             ts.error_msg = str(e)
             raise typer.Exit(1) from None
@@ -215,10 +205,6 @@ def cmd_search(
     set_current_command("search")
     if is_agent_mode():
         output = "agent"
-    try:
-        filters = parse_filter_json(filter_json)
-    except ValidationError as e:
-        handle_validation_error(e, err_console)
 
     field_list = None
     if fields:
@@ -244,9 +230,11 @@ def cmd_search(
                 threshold=threshold,
                 rerank=rerank,
                 keyword=keyword,
-                filters=filters,
+                filters=filter_json,
                 fields=field_list,
             )
+        except ValidationError as e:
+            handle_validation_error(e, err_console)
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None

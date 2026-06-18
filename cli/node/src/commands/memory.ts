@@ -7,9 +7,6 @@ import type { Backend } from "../backend/base.js";
 import {
 	ValidationError,
 	handleValidationError,
-	normalizeCategories,
-	parseFilterJson,
-	validateExpires,
 } from "../backend/payloadBuilder.js";
 import {
 	printError,
@@ -101,16 +98,6 @@ export async function cmdAdd(
 		process.exit(1);
 	}
 
-	let cats: string[] | undefined;
-	let expires: string | undefined;
-	try {
-		cats = normalizeCategories(opts.categories);
-		expires = validateExpires(opts.expires);
-	} catch (e) {
-		if (e instanceof ValidationError) handleValidationError(e);
-		throw e;
-	}
-
 	let meta: Record<string, unknown> | undefined;
 	if (opts.metadata) {
 		try {
@@ -132,11 +119,12 @@ export async function cmdAdd(
 				metadata: meta,
 				immutable: opts.immutable,
 				infer: opts.infer !== false,
-				expires: expires,
-				categories: cats,
+				expires: opts.expires,
+				categories: opts.categories,
 			});
 		});
 	} catch (e) {
+		if (e instanceof ValidationError) handleValidationError(e);
 		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
@@ -221,14 +209,6 @@ export async function cmdSearch(
 		process.exit(1);
 	}
 
-	let filters: Record<string, unknown> | undefined;
-	try {
-		filters = parseFilterJson(opts.filterJson);
-	} catch (e) {
-		if (e instanceof ValidationError) handleValidationError(e);
-		throw e;
-	}
-
 	const fieldList = opts.fields
 		? opts.fields.split(",").map((f) => f.trim())
 		: undefined;
@@ -256,11 +236,12 @@ export async function cmdSearch(
 				threshold: opts.threshold,
 				rerank: opts.rerank,
 				keyword: opts.keyword,
-				filters,
+				filters: opts.filterJson,
 				fields: fieldList,
 			});
 		});
 	} catch (e) {
+		if (e instanceof ValidationError) handleValidationError(e);
 		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}

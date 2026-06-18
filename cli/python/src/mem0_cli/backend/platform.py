@@ -12,8 +12,12 @@ from mem0_cli.backend.payload_builder import (
     build_add_payload,
     build_list_payload,
     build_search_payload,
+    normalize_categories,
+    parse_filter_json,
+    validate_expires,
 )
 from mem0_cli.config import PlatformConfig
+from mem0_cli.output import dedupe_add_result, dedupe_pending_results
 
 
 class PlatformBackend(Backend):
@@ -87,8 +91,11 @@ class PlatformBackend(Backend):
         immutable: bool = False,
         infer: bool = True,
         expires: str | None = None,
-        categories: list[str] | None = None,
+        categories: str | None = None,
     ) -> dict:
+        parsed_categories = normalize_categories(categories)
+        validated_expires = validate_expires(expires)
+
         payload = build_add_payload(
             content=content,
             messages=messages,
@@ -99,10 +106,11 @@ class PlatformBackend(Backend):
             metadata=metadata,
             immutable=immutable,
             infer=infer,
-            expires=expires,
-            categories=categories,
+            expires=validated_expires,
+            categories=parsed_categories,
         )
-        return self._request("POST", "/v3/memories/add/", json=payload)
+        raw = self._request("POST", "/v3/memories/add/", json=payload)
+        return dedupe_add_result(raw)
 
     def _build_filters(
         self,
@@ -140,9 +148,11 @@ class PlatformBackend(Backend):
         threshold: float = 0.3,
         rerank: bool = False,
         keyword: bool = False,
-        filters: dict | None = None,
+        filters: str | None = None,
         fields: list[str] | None = None,
     ) -> list[dict]:
+        parsed_filters = parse_filter_json(filters)
+
         payload = build_search_payload(
             query,
             user_id=user_id,
@@ -153,15 +163,16 @@ class PlatformBackend(Backend):
             threshold=threshold,
             rerank=rerank,
             keyword=keyword,
-            filters=filters,
+            filters=parsed_filters,
             fields=fields,
         )
         result = self._request("POST", "/v3/memories/search/", json=payload)
-        return (
+        items = (
             result
             if isinstance(result, list)
             else result.get("results", result.get("memories", []))
         )
+        return dedupe_pending_results(items)
 
     def get(self, memory_id: str) -> dict:
         return self._request("GET", f"/v1/memories/{memory_id}/", params={"source": "CLI"})
@@ -192,11 +203,12 @@ class PlatformBackend(Backend):
         params["page_size"] = str(page_size)
 
         result = self._request("POST", "/v3/memories/", json=payload, params=params)
-        return (
+        items = (
             result
             if isinstance(result, list)
             else result.get("results", result.get("memories", []))
         )
+        return dedupe_pending_results(items)
 
     def update(
         self, memory_id: str, content: str | None = None, metadata: dict | None = None

@@ -14,7 +14,7 @@ export interface AddOptions {
 	immutable?: boolean;
 	infer?: boolean;
 	expires?: string;
-	categories?: string[];
+	categories?: string;
 }
 
 export interface SearchOptions {
@@ -26,7 +26,7 @@ export interface SearchOptions {
 	threshold?: number;
 	rerank?: boolean;
 	keyword?: boolean;
-	filters?: Record<string, unknown>;
+	filters?: string;
 	fields?: string[];
 }
 

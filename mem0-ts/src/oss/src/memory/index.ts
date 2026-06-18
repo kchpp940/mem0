@@ -38,7 +38,7 @@ import {
   GetAllMemoryOptions,
   UpdateProjectOptions,
 } from "./memory.types";
-import { parse_vision_messages, buildCandidatePool } from "../utils/memory";
+import { parse_vision_messages } from "../utils/memory";
 import { HistoryManager } from "../storage/base";
 import { captureClientEvent } from "../utils/telemetry";
 import {
@@ -1257,49 +1257,42 @@ export class Memory {
 
     const searchStartMs = Date.now();
 
+    // Step 1: Preprocess query
     const queryLemmatized = lemmatizeForBm25(query);
     const queryEntities = extractEntities(query);
 
+    // Step 2: Embed query
     const queryEmbedding = await this.embedder.embed(query);
 
+    // Step 3: Semantic search (over-fetch for scoring pool)
     const internalLimit = Math.max(topK * 4, 60);
+    const semanticResults = await this.vectorStore.search(
+      queryEmbedding,
+      internalLimit,
+      effectiveFilters,
+    );
 
-    let semanticResults: Array<{
-      id: string;
-      score?: number;
-      payload: Record<string, any>;
-    }> | null = null;
-    try {
-      semanticResults = await this.vectorStore.search(
-        queryEmbedding,
-        internalLimit,
-        effectiveFilters,
-      );
-    } catch (e) {
-      console.warn("Semantic search failed:", e);
-    }
-
+    // Step 4: Keyword search (if store supports it)
     let keywordResults: Array<{
       id: string;
       score?: number;
       payload: Record<string, any>;
     }> | null = null;
-    try {
-      if (typeof this.vectorStore.keywordSearch === "function") {
+    if (typeof this.vectorStore.keywordSearch === "function") {
+      try {
         keywordResults =
           (await this.vectorStore.keywordSearch(
             queryLemmatized,
             internalLimit,
             effectiveFilters,
           )) ?? null;
+      } catch {
+        keywordResults = null;
       }
-    } catch (e) {
-      console.warn("Keyword search failed, degrading to semantic-only:", e);
-      keywordResults = null;
     }
 
+    // Step 5: Compute BM25 scores from keyword results
     const bm25Scores: Record<string, number> = {};
-    const keywordCandidates: Record<string, Record<string, any>> = {};
     if (keywordResults) {
       const [midpoint, steepness] = getBm25Params(query, queryLemmatized);
       for (const mem of keywordResults) {
@@ -1308,7 +1301,6 @@ export class Memory {
         if (rawScore > 0) {
           bm25Scores[memId] = normalizeBm25(rawScore, midpoint, steepness);
         }
-        keywordCandidates[memId] = mem.payload || {};
       }
     }
 
@@ -1389,41 +1381,14 @@ export class Memory {
       }
     }
 
-    const precomputedPayloads: Record<string, Record<string, any>> = {};
-    const seenBeforePool = new Set<string>();
-    if (semanticResults !== null) {
-      for (const mem of semanticResults) {
-        seenBeforePool.add(String(mem.id));
-      }
-    }
-    for (const mid of Object.keys(keywordCandidates)) {
-      seenBeforePool.add(mid);
-    }
-    const entityOnlyIds = Object.keys(entityBoosts).filter(
-      (id) => !seenBeforePool.has(id),
-    );
+    // Step 7: Build candidate set from semantic results
+    const candidates = semanticResults.map((mem) => ({
+      id: String(mem.id),
+      score: mem.score ?? 0,
+      payload: mem.payload || {},
+    }));
 
-    if (entityOnlyIds.length > 0) {
-      try {
-        for (const memId of entityOnlyIds) {
-          const result = await this.vectorStore.get(memId);
-          if (result) {
-            precomputedPayloads[memId] = result.payload || {};
-          }
-        }
-      } catch (e) {
-        console.warn("Failed to fetch payloads for entity-only candidates:", e);
-      }
-    }
-
-    const [candidates, poolStatus] = buildCandidatePool(
-      semanticResults,
-      keywordCandidates,
-      entityBoosts,
-      null,
-      precomputedPayloads,
-    );
-
+    // Step 8: Score and rank
     const scoredResults = scoreAndRank(
       candidates,
       bm25Scores,
@@ -1431,7 +1396,6 @@ export class Memory {
       threshold ?? 0.1,
       topK,
       explain,
-      poolStatus,
     );
 
     // Step 9: Format results
@@ -1447,11 +1411,11 @@ export class Memory {
       "attributedTo",
     ]);
 
-    const results: MemoryItem[] = scoredResults
+    const results = scoredResults
       .filter((scored) => scored.payload?.data)
       .map((scored) => {
         const payload = scored.payload || {};
-        const item: MemoryItem = {
+        return {
           id: scored.id,
           memory: payload.data,
           hash: payload.hash,
@@ -1464,18 +1428,8 @@ export class Memory {
           ...(payload.user_id && { user_id: payload.user_id }),
           ...(payload.agent_id && { agent_id: payload.agent_id }),
           ...(payload.run_id && { run_id: payload.run_id }),
+          ...(scored.scoreDetails && { score_details: scored.scoreDetails }),
         };
-        if (scored.score_details) {
-          item.score_details = scored.score_details;
-        }
-        if (explain && poolStatus.degraded) {
-          item.metadata = item.metadata || {};
-          item.metadata.degraded_from_hybrid = true;
-        }
-        if (scored.degraded_from_hybrid) {
-          item.degraded_from_hybrid = true;
-        }
-        return item;
       });
 
     const result = {

@@ -3,8 +3,16 @@ export interface Memory {
   memory: string;
   user_id?: string;
   agent_id?: string;
+  run_id?: string;
+  actor_id?: string;
+  role?: string;
+  hash?: string;
+  metadata?: Record<string, unknown>;
+  score?: number;
+  score_details?: Record<string, unknown>;
   created_at?: string;
   updated_at?: string;
+  event?: string;
 }
 
 export interface ApiKey {

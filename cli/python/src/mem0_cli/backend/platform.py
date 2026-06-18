@@ -82,7 +82,6 @@ class PlatformBackend(Backend):
         immutable: bool = False,
         infer: bool = True,
         expires: str | None = None,
-        ttl_days: int | None = None,
         categories: list[str] | None = None,
     ) -> dict:
         payload: dict[str, Any] = {}
@@ -108,8 +107,6 @@ class PlatformBackend(Backend):
             payload["infer"] = False
         if expires:
             payload["expiration_date"] = expires
-        if ttl_days is not None:
-            payload["ttl_days"] = ttl_days
         if categories:
             payload["categories"] = categories
         payload["source"] = "CLI"
@@ -210,28 +207,17 @@ class PlatformBackend(Backend):
         run_id: str | None = None,
         page: int = 1,
         page_size: int = 100,
-        categories: list[str] | None = None,
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
-        ttl_state: str | None = None,
     ) -> list[dict]:
         payload: dict[str, Any] = {}
         params = {"page": str(page), "page_size": str(page_size)}
 
-        # Normalise categories: prefer list, fall back to single category alias
-        if categories is None and category is not None:
-            categories = [category]
-        if categories is not None:
-            categories = [c for c in categories if c]
-            if not categories:
-                categories = None
-
         # Build filters — entity IDs and date filters go inside "filters"
         extra: dict[str, Any] = {}
-        if categories and len(categories) == 1:
-            # Single category: use server-side contains filter
-            extra["categories"] = {"contains": categories[0]}
+        if category:
+            extra["categories"] = {"contains": category}
         if after:
             extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
         if before:
@@ -249,50 +235,20 @@ class PlatformBackend(Backend):
         payload["source"] = "CLI"
 
         result = self._request("POST", "/v3/memories/", json=payload, params=params)
-        items = (
+        return (
             result
             if isinstance(result, list)
             else result.get("results", result.get("memories", []))
         )
 
-        # Client-side filters: multi-category containment + TTL state
-        if categories and len(categories) > 1:
-            items = [
-                it for it in items
-                if isinstance(it.get("categories"), list)
-                and all(c in it["categories"] for c in categories)
-            ]
-        if ttl_state:
-            from mem0.memory.lifecycle import annotate_memory_result
-
-            annotated = [annotate_memory_result(dict(it)) for it in items]
-            items = [it for it in annotated if it.get("ttl_state") == ttl_state]
-        return items
-
     def update(
-        self,
-        memory_id: str,
-        content: str | None = None,
-        metadata: dict | None = None,
-        *,
-        expires: str | None = None,
-        ttl_days: int | None = None,
-        categories: list[str] | None = None,
-        category: str | None = None,
+        self, memory_id: str, content: str | None = None, metadata: dict | None = None
     ) -> dict:
         payload: dict[str, Any] = {}
         if content:
             payload["text"] = content
         if metadata:
             payload["metadata"] = metadata
-        if expires:
-            payload["expiration_date"] = expires
-        if ttl_days is not None:
-            payload["ttl_days"] = ttl_days
-        if categories is None and category is not None:
-            categories = [category]
-        if categories:
-            payload["categories"] = categories
         payload["source"] = "CLI"
         return self._request("PUT", f"/v1/memories/{memory_id}/", json=payload)
 
@@ -391,28 +347,6 @@ class PlatformBackend(Backend):
 
     def get_event(self, event_id: str) -> dict:
         return self._request("GET", f"/v1/event/{event_id}/")
-
-    def get_lifecycle_policies(self) -> dict:
-        return self._request("GET", "/lifecycle-policies/")
-
-    def set_lifecycle_policy(
-        self,
-        *,
-        scope: str,
-        scope_id: str | None = None,
-        default_ttl_days: int | None = None,
-        enabled: bool | None = None,
-        remove: bool = False,
-    ) -> dict:
-        policy: dict[str, Any] = {}
-        if default_ttl_days is not None:
-            policy["default_ttl_days"] = default_ttl_days
-        if enabled is not None:
-            policy["enabled"] = enabled
-        payload: dict[str, Any] = {"scope": scope, "policy": policy, "remove": remove}
-        if scope_id is not None:
-            payload["scope_id"] = scope_id
-        return self._request("PUT", "/lifecycle-policies/", json=payload)
 
 
 class AuthError(Exception):

@@ -165,6 +165,7 @@ export class ConfigManager {
       })(),
       disableHistory:
         userConfig.disableHistory || DEFAULT_MEMORY_CONFIG.disableHistory,
+      searchProfiles: userConfig.searchProfiles ?? undefined,
     };
 
     // Validate the merged config

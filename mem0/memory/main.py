@@ -10,7 +10,7 @@ import uuid
 import warnings
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
 
@@ -669,8 +669,6 @@ class Memory(MemoryBase):
         prompt: Optional[str] = None,
         expires: Optional[Any] = None,
         ttl_days: Optional[int] = None,
-        categories: Optional[List[str]] = None,
-        category: Optional[str] = None,
     ):
         """
         Create a new memory.
@@ -698,11 +696,6 @@ class Memory(MemoryBase):
                 or datetime). Takes highest precedence over any policy.
             ttl_days (int, optional): Explicit TTL in days. Takes precedence over policies
                 but lower than `expires`.
-            categories (list[str], optional): Category tags for this memory. Used for
-                lifecycle policy resolution (shortest TTL across matching categories wins)
-                and for filtering / display.
-            category (str, optional): Deprecated single-category alias for `categories`.
-                If provided along with `categories`, `categories` takes precedence.
 
         Returns:
             dict: A dictionary containing the result of the memory addition operation, typically
@@ -727,15 +720,6 @@ class Memory(MemoryBase):
             input_metadata=metadata,
         )
 
-        # Normalise categories: prefer `categories` list; fall back to `category` string
-        if categories is None and category is not None:
-            categories = [category]
-        if categories is not None:
-            # Coerce to list of strings, drop empty/None
-            categories = [str(c).strip() for c in categories if c is not None and str(c).strip()]
-            if not categories:
-                categories = None
-
         # ---- Resolve lifecycle expiration once for this add() call ----
         lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
         default_policy = (
@@ -748,43 +732,14 @@ class Memory(MemoryBase):
             if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
             else None
         )
-        user_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.users[user_id].model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "users", None) and user_id and user_id in lifecycle_cfg.users
-            else None
-        )
-        agent_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.agents[agent_id].model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "agents", None) and agent_id and agent_id in lifecycle_cfg.agents
-            else None
-        )
-        # Build category_policies map from config for all matching categories
-        category_policies: Dict[str, LifecyclePolicy] = {}
-        if (
-            lifecycle_cfg
-            and getattr(lifecycle_cfg, "categories", None)
-            and categories
-        ):
-            for cat in categories:
-                cat_cfg = lifecycle_cfg.categories.get(cat)
-                if cat_cfg is not None:
-                    category_policies[cat] = LifecyclePolicy.from_dict(cat_cfg.model_dump())
         effective_expires_at, effective_ttl_source = resolve_expiration(
             request_expires=expires,
             request_ttl_days=ttl_days,
-            categories=categories,
-            category_policies=category_policies,
-            user_policy=user_policy,
-            agent_policy=agent_policy,
             workspace_policy=workspace_policy,
             default_policy=default_policy,
         )
-        if categories is not None:
-            processed_metadata["categories"] = categories
         if effective_expires_at is not None:
             processed_metadata["expires_at"] = effective_expires_at
-            processed_metadata["ttl_source"] = effective_ttl_source.value
-        elif category_policies or user_policy or agent_policy or workspace_policy or default_policy:
             processed_metadata["ttl_source"] = effective_ttl_source.value
 
         if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
@@ -862,15 +817,13 @@ class Memory(MemoryBase):
                 mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
                 returned_memories.append(
-                    annotate_memory_result({
+                    {
                         "id": mem_id,
                         "memory": msg_content,
                         "event": "ADD",
                         "actor_id": actor_name if actor_name else None,
                         "role": message_dict["role"],
-                        "expires_at": per_msg_meta.get("expires_at"),
-                        "ttl_source": per_msg_meta.get("ttl_source"),
-                    })
+                    }
                 )
             return returned_memories
 
@@ -1136,13 +1089,7 @@ class Memory(MemoryBase):
         self.db.save_messages(messages, session_scope)
 
         returned_memories = [
-            annotate_memory_result({
-                "id": r[0],
-                "memory": r[1],
-                "event": "ADD",
-                "expires_at": r[3].get("expires_at"),
-                "ttl_source": r[3].get("ttl_source"),
-            })
+            {"id": r[0], "memory": r[1], "event": "ADD"}
             for r in records
         ]
 
@@ -1765,16 +1712,7 @@ class Memory(MemoryBase):
 
         return memory_boosts
 
-    def update(
-        self,
-        memory_id,
-        data,
-        metadata: Optional[Dict[str, Any]] = None,
-        expires: Optional[Any] = None,
-        ttl_days: Optional[int] = None,
-        categories: Optional[List[str]] = None,
-        category: Optional[str] = None,
-    ):
+    def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
         """
         Update a memory by ID.
 
@@ -1782,12 +1720,6 @@ class Memory(MemoryBase):
             memory_id (str): ID of the memory to update.
             data (str): New content to update the memory with.
             metadata (dict, optional): Metadata to update with the memory. Defaults to None.
-            expires (str | datetime, optional): New explicit expiration date (ISO 8601
-                string or datetime). Pass a falsy value other than None to make permanent.
-            ttl_days (int, optional): New TTL in days (relative to now).
-            categories (list[str], optional): New category tags. When set, lifecycle
-                policy is re-resolved (shortest TTL across matching categories wins).
-            category (str, optional): Deprecated single-category alias.
 
         Returns:
             dict: Success message indicating the memory was updated.
@@ -1797,91 +1729,6 @@ class Memory(MemoryBase):
             {'message': 'Memory updated successfully!'}
         """
         capture_event("mem0.update", self, {"memory_id": memory_id, "sync_type": "sync"})
-
-        _existing_user_id = None
-        _existing_agent_id = None
-        if expires is not None or ttl_days is not None or categories is not None or category is not None:
-            from mem0.memory.lifecycle import resolve_expiration
-
-            existing = self.vector_store.get(vector_id=memory_id)
-            existing_payload = getattr(existing, "payload", None) or {} if existing else {}
-            _existing_user_id = existing_payload.get("user_id")
-            _existing_agent_id = existing_payload.get("agent_id")
-
-            # Normalise categories: prefer arg > existing.categories > category alias
-            if categories is None and category is not None:
-                categories = [category]
-            if categories is None:
-                existing_cats = existing_payload.get("categories")
-                if isinstance(existing_cats, list):
-                    categories = existing_cats
-                # fall back to legacy single "category" field
-                elif existing_payload.get("category"):
-                    categories = [existing_payload["category"]]
-            if categories is not None:
-                categories = [str(c).strip() for c in categories if c is not None and str(c).strip()]
-                if not categories:
-                    categories = None
-
-            lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
-            default_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
-                else None
-            )
-            workspace_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
-                else None
-            )
-            user_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.users[_existing_user_id].model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "users", None)
-                   and _existing_user_id and _existing_user_id in lifecycle_cfg.users
-                else None
-            )
-            agent_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.agents[_existing_agent_id].model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "agents", None)
-                   and _existing_agent_id and _existing_agent_id in lifecycle_cfg.agents
-                else None
-            )
-            category_policies: Dict[str, LifecyclePolicy] = {}
-            if (
-                lifecycle_cfg
-                and getattr(lifecycle_cfg, "categories", None)
-                and categories
-            ):
-                for cat in categories:
-                    cat_cfg = lifecycle_cfg.categories.get(cat)
-                    if cat_cfg is not None:
-                        category_policies[cat] = LifecyclePolicy.from_dict(cat_cfg.model_dump())
-            if expires is not None and not expires:
-                effective_expires_at = None
-                effective_ttl_source_value = "default"
-            else:
-                effective_expires_at, effective_ttl_source = resolve_expiration(
-                    request_expires=expires,
-                    request_ttl_days=ttl_days,
-                    categories=categories,
-                    category_policies=category_policies,
-                    user_policy=user_policy,
-                    agent_policy=agent_policy,
-                    workspace_policy=workspace_policy,
-                    default_policy=default_policy,
-                )
-                effective_ttl_source_value = effective_ttl_source.value
-
-            if metadata is None:
-                metadata = {}
-            if categories is not None:
-                metadata["categories"] = categories
-            if effective_expires_at is not None:
-                metadata["expires_at"] = effective_expires_at
-                metadata["ttl_source"] = effective_ttl_source_value
-            else:
-                metadata["expires_at"] = None
-                metadata["ttl_source"] = "default"
 
         existing_embeddings = {data: self.embedding_model.embed(data, "update")}
 
@@ -2391,10 +2238,6 @@ class AsyncMemory(MemoryBase):
         infer: bool = True,
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
-        expires: Optional[Any] = None,
-        ttl_days: Optional[int] = None,
-        categories: Optional[List[str]] = None,
-        category: Optional[str] = None,
         llm=None,
     ):
         """
@@ -2411,15 +2254,6 @@ class AsyncMemory(MemoryBase):
             memory_type (str, optional): Type of memory to create. Defaults to None.
                                          Pass "procedural_memory" to create procedural memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
-            expires (str | datetime, optional): Explicit expiration date (ISO 8601 string
-                or datetime). Takes highest precedence over any policy.
-            ttl_days (int, optional): Explicit TTL in days. Takes precedence over policies
-                but lower than `expires`.
-            categories (list[str], optional): Category tags for this memory. Used for
-                lifecycle policy resolution (shortest TTL across matching categories wins)
-                and for filtering / display.
-            category (str, optional): Deprecated single-category alias for `categories`.
-                If provided along with `categories`, `categories` takes precedence.
             llm (BaseChatModel, optional): LLM class to use for generating procedural memories. Defaults to None. Useful when user is using LangChain ChatModel.
         Returns:
             dict: A dictionary containing the result of the memory addition operation.
@@ -2431,66 +2265,6 @@ class AsyncMemory(MemoryBase):
         processed_metadata, effective_filters = _build_filters_and_metadata(
             user_id=user_id, agent_id=agent_id, run_id=run_id, input_metadata=metadata
         )
-
-        # Normalise categories: prefer `categories` list; fall back to `category` string
-        if categories is None and category is not None:
-            categories = [category]
-        if categories is not None:
-            categories = [str(c).strip() for c in categories if c is not None and str(c).strip()]
-            if not categories:
-                categories = None
-
-        # ---- Resolve lifecycle expiration once for this add() call ----
-        from mem0.memory.lifecycle import LifecyclePolicy, resolve_expiration
-
-        lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
-        default_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
-            else None
-        )
-        workspace_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
-            else None
-        )
-        user_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.users[user_id].model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "users", None) and user_id and user_id in lifecycle_cfg.users
-            else None
-        )
-        agent_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.agents[agent_id].model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "agents", None) and agent_id and agent_id in lifecycle_cfg.agents
-            else None
-        )
-        category_policies: Dict[str, LifecyclePolicy] = {}
-        if (
-            lifecycle_cfg
-            and getattr(lifecycle_cfg, "categories", None)
-            and categories
-        ):
-            for cat in categories:
-                cat_cfg = lifecycle_cfg.categories.get(cat)
-                if cat_cfg is not None:
-                    category_policies[cat] = LifecyclePolicy.from_dict(cat_cfg.model_dump())
-        effective_expires_at, effective_ttl_source = resolve_expiration(
-            request_expires=expires,
-            request_ttl_days=ttl_days,
-            categories=categories,
-            category_policies=category_policies,
-            user_policy=user_policy,
-            agent_policy=agent_policy,
-            workspace_policy=workspace_policy,
-            default_policy=default_policy,
-        )
-        if categories is not None:
-            processed_metadata["categories"] = categories
-        if effective_expires_at is not None:
-            processed_metadata["expires_at"] = effective_expires_at
-            processed_metadata["ttl_source"] = effective_ttl_source.value
-        elif category_policies or user_policy or agent_policy or workspace_policy or default_policy:
-            processed_metadata["ttl_source"] = effective_ttl_source.value
 
         if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
             raise ValueError(
@@ -2573,15 +2347,13 @@ class AsyncMemory(MemoryBase):
                 mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
 
                 returned_memories.append(
-                    annotate_memory_result({
+                    {
                         "id": mem_id,
                         "memory": msg_content,
                         "event": "ADD",
                         "actor_id": actor_name if actor_name else None,
                         "role": message_dict["role"],
-                        "expires_at": per_msg_meta.get("expires_at"),
-                        "ttl_source": per_msg_meta.get("ttl_source"),
-                    })
+                    }
                 )
             return returned_memories
 
@@ -3443,16 +3215,7 @@ class AsyncMemory(MemoryBase):
 
         return memory_boosts
 
-    async def update(
-        self,
-        memory_id,
-        data,
-        metadata: Optional[Dict[str, Any]] = None,
-        expires: Optional[Any] = None,
-        ttl_days: Optional[int] = None,
-        categories: Optional[List[str]] = None,
-        category: Optional[str] = None,
-    ):
+    async def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
         """
         Update a memory by ID asynchronously.
 
@@ -3460,12 +3223,6 @@ class AsyncMemory(MemoryBase):
             memory_id (str): ID of the memory to update.
             data (str): New content to update the memory with.
             metadata (dict, optional): Metadata to update with the memory. Defaults to None.
-            expires (str | datetime, optional): New explicit expiration date (ISO 8601
-                string or datetime). Pass a falsy value other than None to make permanent.
-            ttl_days (int, optional): New TTL in days (relative to now).
-            categories (list[str], optional): New category tags. When set, lifecycle
-                policy is re-resolved (shortest TTL across matching categories wins).
-            category (str, optional): Deprecated single-category alias.
 
         Returns:
             dict: Success message indicating the memory was updated.
@@ -3475,89 +3232,6 @@ class AsyncMemory(MemoryBase):
             {'message': 'Memory updated successfully!'}
         """
         capture_event("mem0.update", self, {"memory_id": memory_id, "sync_type": "async"})
-
-        _existing_user_id = None
-        _existing_agent_id = None
-        if expires is not None or ttl_days is not None or categories is not None or category is not None:
-            from mem0.memory.lifecycle import LifecyclePolicy, resolve_expiration
-
-            existing = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
-            existing_payload = getattr(existing, "payload", None) or {} if existing else {}
-            _existing_user_id = existing_payload.get("user_id")
-            _existing_agent_id = existing_payload.get("agent_id")
-
-            if categories is None and category is not None:
-                categories = [category]
-            if categories is None:
-                existing_cats = existing_payload.get("categories")
-                if isinstance(existing_cats, list):
-                    categories = existing_cats
-                elif existing_payload.get("category"):
-                    categories = [existing_payload["category"]]
-            if categories is not None:
-                categories = [str(c).strip() for c in categories if c is not None and str(c).strip()]
-                if not categories:
-                    categories = None
-
-            lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
-            default_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
-                else None
-            )
-            workspace_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
-                else None
-            )
-            user_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.users[_existing_user_id].model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "users", None)
-                   and _existing_user_id and _existing_user_id in lifecycle_cfg.users
-                else None
-            )
-            agent_policy = (
-                LifecyclePolicy.from_dict(lifecycle_cfg.agents[_existing_agent_id].model_dump())
-                if lifecycle_cfg and getattr(lifecycle_cfg, "agents", None)
-                   and _existing_agent_id and _existing_agent_id in lifecycle_cfg.agents
-                else None
-            )
-            category_policies: Dict[str, LifecyclePolicy] = {}
-            if (
-                lifecycle_cfg
-                and getattr(lifecycle_cfg, "categories", None)
-                and categories
-            ):
-                for cat in categories:
-                    cat_cfg = lifecycle_cfg.categories.get(cat)
-                    if cat_cfg is not None:
-                        category_policies[cat] = LifecyclePolicy.from_dict(cat_cfg.model_dump())
-            if expires is not None and not expires:
-                effective_expires_at = None
-                effective_ttl_source_value = "default"
-            else:
-                effective_expires_at, effective_ttl_source = resolve_expiration(
-                    request_expires=expires,
-                    request_ttl_days=ttl_days,
-                    categories=categories,
-                    category_policies=category_policies,
-                    user_policy=user_policy,
-                    agent_policy=agent_policy,
-                    workspace_policy=workspace_policy,
-                    default_policy=default_policy,
-                )
-                effective_ttl_source_value = effective_ttl_source.value
-
-            if metadata is None:
-                metadata = {}
-            if categories is not None:
-                metadata["categories"] = categories
-            if effective_expires_at is not None:
-                metadata["expires_at"] = effective_expires_at
-                metadata["ttl_source"] = effective_ttl_source_value
-            else:
-                metadata["expires_at"] = None
-                metadata["ttl_source"] = "default"
 
         embeddings = await asyncio.to_thread(self.embedding_model.embed, data, "update")
         existing_embeddings = {data: embeddings}

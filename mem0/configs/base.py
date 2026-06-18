@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -25,15 +25,7 @@ class LifecyclePolicyConfig(BaseModel):
 
 
 class LifecyclePoliciesConfig(BaseModel):
-    """Hierarchy of lifecycle policies.
-
-    Scope precedence (highest → lowest):
-      request > category > user > agent > workspace > default
-
-    - `default`, `workspace`: singleton policy dicts (single policy per scope).
-    - `users`, `agents`, `categories`: keyed by entity/category ID to the
-      per-entity policy. Omitted keys fall back to the next lower scope.
-    """
+    """Hierarchy of lifecycle policies (workspace > category > user > agent > default)."""
 
     default: LifecyclePolicyConfig = Field(
         default_factory=LifecyclePolicyConfig,
@@ -42,18 +34,6 @@ class LifecyclePoliciesConfig(BaseModel):
     workspace: Optional[LifecyclePolicyConfig] = Field(
         None,
         description="Workspace-wide default policy (if applicable).",
-    )
-    users: Dict[str, LifecyclePolicyConfig] = Field(
-        default_factory=dict,
-        description="Per-user policies keyed by user_id.",
-    )
-    agents: Dict[str, LifecyclePolicyConfig] = Field(
-        default_factory=dict,
-        description="Per-agent policies keyed by agent_id.",
-    )
-    categories: Dict[str, LifecyclePolicyConfig] = Field(
-        default_factory=dict,
-        description="Per-category policies keyed by category name.",
     )
 
 # Set up the directory path
@@ -83,10 +63,6 @@ class MemoryItem(BaseModel):
     ttl_source: Optional[str] = Field(
         None,
         description='Which policy scope produced expires_at: "default" | "category" | "user" | "agent" | "workspace" | "request".',
-    )
-    categories: Optional[List[str]] = Field(
-        None,
-        description="Category tags assigned to the memory.",
     )
 
 

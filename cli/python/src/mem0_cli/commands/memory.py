@@ -61,7 +61,6 @@ def cmd_add(
     immutable: bool,
     no_infer: bool,
     expires: str | None,
-    ttl_days: int | None,
     categories: str | None,
     output: str = "text",
 ) -> None:
@@ -144,7 +143,6 @@ def cmd_add(
                 immutable=immutable,
                 infer=not no_infer,
                 expires=expires,
-                ttl_days=ttl_days,
                 categories=cats,
             )
         except Exception as e:
@@ -351,11 +349,9 @@ def cmd_list(
     run_id: str | None,
     page: int,
     page_size: int,
-    categories: str | None,
     category: str | None,
     after: str | None,
     before: str | None,
-    ttl_state: str | None,
     output: str = "table",
 ) -> None:
     """List memories."""
@@ -370,21 +366,6 @@ def cmd_list(
     if page < 1:
         print_error(err_console, "--page must be >= 1.")
         raise typer.Exit(1)
-    if ttl_state and ttl_state not in {"active", "expiring_soon", "expired", "permanent"}:
-        print_error(
-            err_console,
-            "Invalid --ttl-state. Must be one of: active, expiring_soon, expired, permanent.",
-        )
-        raise typer.Exit(1)
-
-    # Parse categories: prefer --categories list, fall back to --category
-    cat_list: list[str] | None = None
-    if categories:
-        cat_list = [c.strip() for c in categories.split(",") if c.strip()]
-        if not cat_list:
-            cat_list = None
-    elif category:
-        cat_list = [category]
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Listing memories...") as _ts:
@@ -396,10 +377,9 @@ def cmd_list(
                 run_id=run_id,
                 page=page,
                 page_size=page_size,
-                categories=cat_list,
+                category=category,
                 after=after,
                 before=before,
-                ttl_state=ttl_state,
             )
         except Exception as e:
             print_error(err_console, str(e))
@@ -466,10 +446,6 @@ def cmd_update(
     text: str | None,
     *,
     metadata: str | None,
-    expires: str | None = None,
-    ttl_days: int | None = None,
-    categories: str | None = None,
-    category: str | None = None,
     output: str,
 ) -> None:
     """Update a memory."""
@@ -486,41 +462,10 @@ def cmd_update(
             print_error(err_console, "Invalid JSON in --metadata.")
             raise typer.Exit(1) from None
 
-    # Parse categories
-    cat_list: list[str] | None = None
-    if categories:
-        cat_list = [c.strip() for c in categories.split(",") if c.strip()]
-        if not cat_list:
-            cat_list = None
-    elif category:
-        cat_list = [category]
-
-    # Validate expires
-    if expires:
-        import re
-        from datetime import date
-
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expires):
-            print_error(
-                err_console, "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31)."
-            )
-            raise typer.Exit(1)
-        if date.fromisoformat(expires) <= date.today():
-            print_error(err_console, "--expires date must be in the future.")
-            raise typer.Exit(1)
-
     _start = _time.perf_counter()
     with timed_status(err_console, "Updating memory...") as _ts:
         try:
-            result = backend.update(
-                memory_id,
-                content=text,
-                metadata=meta,
-                expires=expires,
-                ttl_days=ttl_days,
-                categories=cat_list,
-                category=category,
-            )
+            result = backend.update(memory_id, content=text, metadata=meta)
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None

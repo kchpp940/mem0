@@ -53,14 +53,7 @@ event_app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-
-policy_app = typer.Typer(
-    name="policy",
-    help="Inspect and manage memory lifecycle/retention policies.",
-    no_args_is_help=True,
-    rich_markup_mode="rich",
-)
-# entity_app / event_app / policy_app registered after Memory commands to control panel ordering
+# entity_app and event_app registered after Memory commands to control panel ordering
 
 
 # ── Validated user identity (set by _get_backend_and_config) ──────────────
@@ -279,9 +272,6 @@ def add(
     immutable: bool = typer.Option(False, "--immutable", help="Prevent future updates."),
     no_infer: bool = typer.Option(False, "--no-infer", help="Skip inference, store raw."),
     expires: str | None = typer.Option(None, "--expires", help="Expiration date (YYYY-MM-DD)."),
-    ttl_days: int | None = typer.Option(
-        None, "--ttl-days", help="TTL in days (added from now, lower precedence than --expires)."
-    ),
     categories: str | None = typer.Option(
         None, "--categories", help="Categories (JSON array or comma-separated)."
     ),
@@ -321,7 +311,6 @@ def add(
         immutable=immutable,
         no_infer=no_infer,
         expires=expires,
-        ttl_days=ttl_days,
         categories=categories,
         output=output,
     )
@@ -467,25 +456,13 @@ def list_cmd(
         100, "--page-size", help="Results per page.", rich_help_panel="Pagination"
     ),
     category: str | None = typer.Option(
-        None, "--category", help="Filter by category (single).", rich_help_panel="Filters"
-    ),
-    categories: str | None = typer.Option(
-        None,
-        "--categories",
-        help="Filter by categories (comma-separated). All must match.",
-        rich_help_panel="Filters",
+        None, "--category", help="Filter by category.", rich_help_panel="Filters"
     ),
     after: str | None = typer.Option(
         None, "--after", help="Created after (YYYY-MM-DD).", rich_help_panel="Filters"
     ),
     before: str | None = typer.Option(
         None, "--before", help="Created before (YYYY-MM-DD).", rich_help_panel="Filters"
-    ),
-    ttl_state: str | None = typer.Option(
-        None,
-        "--ttl-state",
-        help="Filter by TTL state: active, expiring_soon, expired, permanent.",
-        rich_help_panel="Filters",
     ),
     output: str = typer.Option(
         "table", "--output", "-o", help="Output: text, json, table.", rich_help_panel="Output"
@@ -517,11 +494,9 @@ def list_cmd(
         **ids,
         page=page,
         page_size=page_size,
-        categories=categories,
         category=category,
         after=after,
         before=before,
-        ttl_state=ttl_state,
         output=output,
     )
 
@@ -534,24 +509,6 @@ def update(
     memory_id: str = typer.Argument(..., help="Memory ID to update."),
     text: str | None = typer.Argument(None, help="New memory text."),
     metadata: str | None = typer.Option(None, "--metadata", "-m", help="Update metadata (JSON)."),
-    expires: str | None = typer.Option(
-        None,
-        "--expires",
-        help="New expiration date (YYYY-MM-DD). Pass 'permanent' (or empty string) to remove expiration.",
-    ),
-    ttl_days: int | None = typer.Option(
-        None, "--ttl-days", help="New TTL in days (relative to now)."
-    ),
-    categories: str | None = typer.Option(
-        None,
-        "--categories",
-        help="New category tags (comma-separated). Re-resolves lifecycle policy.",
-    ),
-    category: str | None = typer.Option(
-        None,
-        "--category",
-        help="Deprecated: use --categories. Single category tag.",
-    ),
     output: str = typer.Option(
         "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
     ),
@@ -566,13 +523,12 @@ def update(
         None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
     ),
 ) -> None:
-    """Update a memory's text, metadata, or TTL policy.
+    """Update a memory's text or metadata.
 
     Examples:
       mem0 update abc-123-def-456 "new text"
-      mem0 update abc-123 --expires 2026-12-31
-      mem0 update abc-123 --ttl-days 30
-      mem0 update abc-123 --expires permanent
+      mem0 update abc-123 --metadata '{{"key":"val"}}'
+      echo "new text" | mem0 update abc-123
     """
     from mem0_cli.commands.memory import cmd_update
 
@@ -580,22 +536,8 @@ def update(
     if text is None:
         text = _read_stdin()
 
-    # Treat "permanent" / "none" as clearing expires (falsy non-None)
-    if isinstance(expires, str) and expires.lower() in {"permanent", "none", "never", ""}:
-        expires = ""
-
     backend = _get_backend(api_key, base_url)
-    cmd_update(
-        backend,
-        memory_id,
-        text,
-        metadata=metadata,
-        expires=expires,
-        ttl_days=ttl_days,
-        categories=categories,
-        category=category,
-        output=output,
-    )
+    cmd_update(backend, memory_id, text, metadata=metadata, output=output)
 
 
 # ── Memory: delete ────────────────────────────────────────────────────────
@@ -897,123 +839,8 @@ def event_status(
     cmd_event_status(backend, event_id, output=output)
 
 
-# ── Policy: show current lifecycle policies ──
-@policy_app.command("show")
-def policy_show(
-    output: str = typer.Option(
-        "table", "--output", "-o", help="Output: table, json, quiet.", rich_help_panel="Output"
-    ),
-    api_key: str | None = typer.Option(
-        None,
-        "--api-key",
-        help="Override API key.",
-        envvar="MEM0_API_KEY",
-        rich_help_panel="Connection",
-    ),
-    base_url: str | None = typer.Option(
-        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
-    ),
-) -> None:
-    """Display the current memory lifecycle retention policy hierarchy.
-
-    Examples:
-      mem0 policy show
-      mem0 policy show -o json
-    """
-    from mem0_cli.commands.policy import cmd_policy_show
-
-    backend = _get_backend(api_key, base_url)
-    cmd_policy_show(backend, output=output)
-
-
-# ── Policy: set/upsert/remove a lifecycle policy at a specific scope ──
-@policy_app.command("set")
-def policy_set(
-    scope: str = typer.Argument(
-        ..., help="Scope: default, workspace, user, agent, category."
-    ),
-    scope_id: str | None = typer.Argument(
-        None, help="Entity ID: required when scope is user, agent, or category."
-    ),
-    ttl_days: int | None = typer.Option(
-        None,
-        "--ttl-days",
-        help="Default retention in days for this scope. Omit to leave unchanged.",
-    ),
-    permanent: bool = typer.Option(
-        False,
-        "--permanent",
-        help="Set default_ttl_days to None (memories permanent at this scope).",
-    ),
-    enabled: bool | None = typer.Option(
-        None, "--enabled/--disabled", help="Enable or disable the policy at this scope."
-    ),
-    remove: bool = typer.Option(
-        False,
-        "--remove",
-        help="Remove a per-user/agent/category policy entry (falls back to lower scopes).",
-    ),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
-    ),
-    api_key: str | None = typer.Option(
-        None,
-        "--api-key",
-        help="Override API key.",
-        envvar="MEM0_API_KEY",
-        rich_help_panel="Connection",
-    ),
-    base_url: str | None = typer.Option(
-        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
-    ),
-) -> None:
-    """Configure a memory lifecycle retention policy for a given scope.
-
-    Policy precedence (highest → lowest):
-      request → category → user → agent → workspace → default → permanent
-
-    Examples:
-      mem0 policy set default --ttl-days 90
-      mem0 policy set workspace --ttl-days 60
-      mem0 policy set user alice --ttl-days 30
-      mem0 policy set category sensitive --ttl-days 7
-      mem0 policy set user alice --remove
-      mem0 policy set default --permanent
-    """
-    from mem0_cli.commands.policy import cmd_policy_set
-
-    VALID = {"default", "workspace", "user", "agent", "category"}
-    if scope.lower() not in VALID:
-        err_console.print(f"[bold red]✗[/bold red] Invalid scope '{scope}'. Must be one of: {sorted(VALID)}")
-        raise typer.Exit(1)
-
-    if scope.lower() in {"user", "agent", "category"} and not scope_id and not remove:
-        err_console.print(
-            f"[bold red]✗[/bold red] Scope '{scope}' requires an entity ID (second argument)."
-        )
-        raise typer.Exit(1)
-
-    # Distinguish "user didn't pass ttl_days" from "user passed --permanent"
-    effective_ttl = None if (permanent or ttl_days is None) else ttl_days
-    ttl_was_provided = permanent or ttl_days is not None
-
-    backend = _get_backend(api_key, base_url)
-    cmd_policy_set(
-        backend,
-        scope=scope.lower(),
-        scope_id=scope_id,
-        default_ttl_days=effective_ttl if ttl_was_provided else None,
-        enabled=enabled,
-        remove=remove,
-        permanent=permanent,
-        ttl_was_provided=ttl_was_provided,
-        output=output,
-    )
-
-
 # ── Event subgroup ──
 app.add_typer(event_app, name="event", rich_help_panel="Management")
-app.add_typer(policy_app, name="policy", rich_help_panel="Management")
 
 
 # ── Management commands ───────────────────────────────────────────────────

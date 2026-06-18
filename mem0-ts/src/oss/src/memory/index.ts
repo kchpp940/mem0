@@ -7,6 +7,10 @@ import {
   Message,
   SearchFilters,
   SearchResult,
+  SearchProfile,
+  SearchProfileStore,
+  ScoreWeights,
+  SearchExplainInfo,
 } from "../types";
 import {
   EmbedderFactory,
@@ -70,6 +74,7 @@ import {
   normalizeBm25,
   ENTITY_BOOST_WEIGHT,
   ScoredResult,
+  ScoreWeights as ScoringScoreWeights,
 } from "../utils/scoring";
 import { getDefaultVectorStoreDbPath } from "../utils/sqlite";
 import { getOrCreateMem0UserId } from "../../../client/config";
@@ -168,6 +173,7 @@ export class Memory {
   private _initPromise: Promise<void>;
   private _initError?: Error;
   private _entityStore?: VectorStore;
+  private _searchProfiles: SearchProfileStore;
 
   constructor(config: Partial<MemoryConfig> = {}) {
     // Merge and validate config
@@ -197,6 +203,7 @@ export class Memory {
     this.collectionName = this.config.vectorStore.config.collectionName;
     this.apiVersion = this.config.version || "v1.0";
     this.telemetryId = "anonymous";
+    this._searchProfiles = this.config.searchProfiles ?? {};
 
     // Auto-detect embedding dimension (if needed), create vector store,
     // and initialize it. All public methods await this before proceeding.
@@ -588,6 +595,155 @@ export class Memory {
       console.error("Configuration validation error:", e);
       throw e;
     }
+  }
+
+  registerSearchProfile(name: string, profile: SearchProfile): void {
+    if (!name || typeof name !== "string" || name.trim() === "") {
+      throw new Error("Profile name must be a non-empty string.");
+    }
+    validateSearchParams(profile.threshold, profile.topK);
+    this._searchProfiles[name] = { ...profile, name };
+  }
+
+  unregisterSearchProfile(name: string): boolean {
+    if (name in this._searchProfiles) {
+      delete this._searchProfiles[name];
+      return true;
+    }
+    return false;
+  }
+
+  getSearchProfile(name: string): SearchProfile | undefined {
+    return this._searchProfiles[name];
+  }
+
+  listSearchProfiles(): string[] {
+    return Object.keys(this._searchProfiles);
+  }
+
+  private _normalizeEntityFilters(
+    filters: SearchFilters | undefined,
+  ): Record<string, any> {
+    if (!filters) return {};
+    return Object.fromEntries(
+      Object.entries({
+        ...filters,
+        user_id: validateAndTrimEntityId(filters.user_id, "user_id"),
+        agent_id: validateAndTrimEntityId(filters.agent_id, "agent_id"),
+        run_id: validateAndTrimEntityId(filters.run_id, "run_id"),
+      }).filter(([, v]) => v !== undefined),
+    );
+  }
+
+  private _resolveSearchProfile(profile: string | SearchProfile | undefined): {
+    profile: SearchProfile | null;
+    profileName: string | null;
+  } {
+    if (profile === undefined || profile === null) {
+      return { profile: null, profileName: null };
+    }
+    if (typeof profile === "string") {
+      const stored = this._searchProfiles[profile];
+      if (!stored) {
+        throw new Error(
+          `Search profile '${profile}' not found. ` +
+            `Registered profiles: ${this.listSearchProfiles().join(", ") || "(none)"}`,
+        );
+      }
+      return { profile: { ...stored }, profileName: profile };
+    }
+    if (typeof profile === "object") {
+      return { profile: { ...profile }, profileName: profile.name ?? null };
+    }
+    throw new Error(
+      "Invalid profile parameter. Must be a string (profile name) or a SearchProfile object.",
+    );
+  }
+
+  private _mergeSearchConfig(options: SearchMemoryOptions): {
+    merged: Required<
+      Pick<SearchMemoryOptions, "topK" | "threshold" | "explain">
+    > & {
+      filters: Record<string, any>;
+      scoreWeights: ScoreWeights;
+      rerank: boolean;
+    };
+    profileInfo: {
+      name: string | null;
+      appliedConfig: Omit<SearchProfile, "name" | "description">;
+    } | null;
+    overriddenFields: string[];
+  } {
+    const { profile, ...optionsRest } = options;
+    const resolved = this._resolveSearchProfile(profile);
+    const profileConfig = resolved.profile ?? {};
+
+    const profileOptionFields = [
+      "topK",
+      "filters",
+      "threshold",
+      "explain",
+      "scoreWeights",
+      "rerank",
+    ] as const;
+    const overriddenFields: string[] = [];
+
+    for (const field of profileOptionFields) {
+      if (
+        (optionsRest as any)[field] !== undefined &&
+        (profileConfig as any)[field] !== undefined
+      ) {
+        overriddenFields.push(field);
+      }
+    }
+
+    const mergedFilters: Record<string, any> = {
+      ...this._normalizeEntityFilters(profileConfig.filters),
+      ...this._normalizeEntityFilters(optionsRest.filters),
+    };
+
+    const mergedScoreWeights: ScoreWeights = {
+      ...(profileConfig.scoreWeights ?? {}),
+      ...(optionsRest.scoreWeights ?? {}),
+    };
+
+    const topK = optionsRest.topK ?? profileConfig.topK ?? 20;
+    const threshold = optionsRest.threshold ?? profileConfig.threshold ?? 0.1;
+    const explain = optionsRest.explain ?? profileConfig.explain ?? false;
+    const rerank = optionsRest.rerank ?? profileConfig.rerank ?? false;
+
+    const appliedConfig: Omit<SearchProfile, "name" | "description"> = {
+      filters: { ...mergedFilters },
+      topK,
+      threshold,
+      explain,
+      scoreWeights: { ...mergedScoreWeights },
+      rerank,
+    };
+
+    const usedProfile = resolved.profile !== null;
+    const profileInfo: {
+      name: string | null;
+      appliedConfig: Omit<SearchProfile, "name" | "description">;
+    } | null = usedProfile
+      ? {
+          name: resolved.profileName,
+          appliedConfig,
+        }
+      : null;
+
+    return {
+      merged: {
+        topK,
+        threshold,
+        explain,
+        filters: mergedFilters,
+        scoreWeights: mergedScoreWeights,
+        rerank,
+      },
+      profileInfo,
+      overriddenFields,
+    };
   }
 
   async updateProject(options: UpdateProjectOptions = {}): Promise<never> {
@@ -1172,7 +1328,7 @@ export class Memory {
   async search(
     query: string,
     config: SearchMemoryOptions,
-  ): Promise<SearchResult> {
+  ): Promise<SearchResult & { explain?: SearchExplainInfo }> {
     if (config?.referenceDate !== undefined) {
       await this._getNoticeTelemetryId();
       throw new Error(
@@ -1183,46 +1339,37 @@ export class Memory {
       );
     }
 
-    const temporalUsageNotice = detectTemporalUsageFromSearch(
-      query,
-      config?.filters,
-    );
-
     // Reject top-level entity params - must use filters instead
     rejectTopLevelEntityParams(config as Record<string, any>, "search");
 
     // Validate search parameters (before applying defaults)
     validateSearchParams(config.threshold, config.topK);
 
-    // Validate and trim entity IDs in filters. Only include keys whose
-    // validated value is defined — otherwise downstream vector stores
-    // receive `agent_id: undefined` / `run_id: undefined` and fail
-    // (Qdrant rejects the malformed match, pgvector binds NULL, Redis
-    // emits a literal "undefined" string in TAG filters).
-    const normalizedFilters: Record<string, any> = config.filters
-      ? Object.fromEntries(
-          Object.entries({
-            ...config.filters,
-            user_id: validateAndTrimEntityId(config.filters.user_id, "user_id"),
-            agent_id: validateAndTrimEntityId(
-              config.filters.agent_id,
-              "agent_id",
-            ),
-            run_id: validateAndTrimEntityId(config.filters.run_id, "run_id"),
-          }).filter(([, v]) => v !== undefined),
-        )
-      : {};
-
     await this._ensureInitialized();
-    const { topK = 20, threshold = 0.1, explain = false } = config;
+
+    const { merged, profileInfo, overriddenFields } =
+      this._mergeSearchConfig(config);
+    const {
+      topK,
+      threshold,
+      explain,
+      filters: mergedFilters,
+      scoreWeights,
+    } = merged;
+
+    const temporalUsageNotice = detectTemporalUsageFromSearch(
+      query,
+      mergedFilters,
+    );
 
     await this._captureEvent("search", {
       query_length: query.length,
       topK,
-      has_filters: !!config.filters,
+      has_filters: Object.keys(mergedFilters).length > 0,
+      profile: profileInfo?.name ?? null,
     });
 
-    let effectiveFilters: Record<string, any> = { ...normalizedFilters };
+    let effectiveFilters: Record<string, any> = { ...mergedFilters };
 
     // Apply enhanced metadata filtering if advanced operators are detected
     if (this._hasAdvancedOperators(effectiveFilters)) {
@@ -1360,8 +1507,14 @@ export class Memory {
                 const numLinked = Math.max(linkedMemoryIds.length, 1);
                 const memoryCountWeight =
                   1.0 / (1.0 + 0.001 * (numLinked - 1) ** 2);
-                const boost =
-                  similarity * ENTITY_BOOST_WEIGHT * memoryCountWeight;
+                const hasCustomScoreWeightsLocal =
+                  scoreWeights.semanticWeight !== undefined ||
+                  scoreWeights.bm25Weight !== undefined ||
+                  scoreWeights.entityBoostWeight !== undefined;
+                const boostMultiplier = hasCustomScoreWeightsLocal
+                  ? 1.0
+                  : ENTITY_BOOST_WEIGHT;
+                const boost = similarity * boostMultiplier * memoryCountWeight;
 
                 for (const memoryId of linkedMemoryIds) {
                   if (memoryId) {
@@ -1388,14 +1541,24 @@ export class Memory {
       payload: mem.payload || {},
     }));
 
-    // Step 8: Score and rank
+    // Step 8: Score and rank with custom weights
+    const hasCustomScoreWeights =
+      scoreWeights.semanticWeight !== undefined ||
+      scoreWeights.bm25Weight !== undefined ||
+      scoreWeights.entityBoostWeight !== undefined;
+    const scoringWeights: ScoringScoreWeights = {
+      semanticWeight: scoreWeights.semanticWeight,
+      bm25Weight: scoreWeights.bm25Weight,
+      entityBoostWeight: scoreWeights.entityBoostWeight,
+    };
     const scoredResults = scoreAndRank(
       candidates,
       bm25Scores,
       entityBoosts,
-      threshold ?? 0.1,
+      threshold,
       topK,
       explain,
+      scoringWeights,
     );
 
     // Step 9: Format results
@@ -1432,9 +1595,19 @@ export class Memory {
         };
       });
 
-    const result = {
+    const result: SearchResult & { explain?: SearchExplainInfo } = {
       results,
     };
+
+    if (explain || profileInfo) {
+      result.explain = {};
+      if (profileInfo) {
+        result.explain.profile = profileInfo;
+      }
+      if (overriddenFields.length > 0) {
+        result.explain.overriddenFields = overriddenFields;
+      }
+    }
     const searchElapsedMs = Date.now() - searchStartMs;
     if (temporalUsageNotice) {
       await this._displayTemporalUsageNotice({
@@ -1610,16 +1783,8 @@ export class Memory {
 
     const { topK = 20 } = config;
 
-    // Validate and trim entity IDs in filters. Drop keys that resolve to
-    // undefined so downstream vector stores don't receive
-    // `agent_id: undefined` / `run_id: undefined` and fail.
-    const filters: Record<string, any> = Object.fromEntries(
-      Object.entries({
-        ...(config.filters || {}),
-        user_id: validateAndTrimEntityId(config.filters?.user_id, "user_id"),
-        agent_id: validateAndTrimEntityId(config.filters?.agent_id, "agent_id"),
-        run_id: validateAndTrimEntityId(config.filters?.run_id, "run_id"),
-      }).filter(([, v]) => v !== undefined),
+    const filters: Record<string, any> = this._normalizeEntityFilters(
+      config.filters,
     );
 
     await this._captureEvent("get_all", {

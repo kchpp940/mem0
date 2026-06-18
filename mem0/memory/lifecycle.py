@@ -129,8 +129,6 @@ def resolve_expiration(
     request_expires: Optional[Any] = None,
     request_ttl_days: Optional[int] = None,
     category_policy: Optional[LifecyclePolicy] = None,
-    categories: Optional[list] = None,
-    category_policies: Optional[Dict[str, LifecyclePolicy]] = None,
     user_policy: Optional[LifecyclePolicy] = None,
     agent_policy: Optional[LifecyclePolicy] = None,
     workspace_policy: Optional[LifecyclePolicy] = None,
@@ -140,20 +138,14 @@ def resolve_expiration(
     """Resolve the effective expires_at and its source from policy hierarchy.
 
     Precedence (highest first):
-      1. request_expires (explicit ISO date)           → ttl_source="request"
-      2. request_ttl_days (explicit TTL days)          → ttl_source="request"
-      3. best category policy (shortest TTL across
-         matching categories from category_policies)    → ttl_source="category"
-         + legacy single category_policy (used when
-           category_policies / categories are not set)
-      4. user_policy.default_ttl_days                   → ttl_source="user"
-      5. agent_policy.default_ttl_days                  → ttl_source="agent"
-      6. workspace_policy.default_ttl_days              → ttl_source="workspace"
-      7. default_policy.default_ttl_days                → ttl_source="default"
-      8. none of the above apply                        → expires_at=None, ttl_source="default"
-
-    When multiple categories match and more than one has an enabled policy,
-    the **shortest** TTL wins (most restrictive).
+      1. request_expires (explicit ISO date)     → ttl_source="request"
+      2. request_ttl_days (explicit TTL days)    → ttl_source="request"
+      3. category_policy.default_ttl_days        → ttl_source="category"
+      4. user_policy.default_ttl_days            → ttl_source="user"
+      5. agent_policy.default_ttl_days           → ttl_source="agent"
+      6. workspace_policy.default_ttl_days       → ttl_source="workspace"
+      7. default_policy.default_ttl_days         → ttl_source="default"
+      8. none of the above apply                 → expires_at=None, ttl_source="default"
 
     A policy with enabled=False is skipped entirely.
 
@@ -171,27 +163,8 @@ def resolve_expiration(
     if request_ttl_days is not None and request_ttl_days > 0:
         return compute_expires_at_from_ttl(request_ttl_days, now), TtlSource.REQUEST
 
-    # --- Category layer: shortest TTL across matching categories wins ---
-    shortest_category_ttl: Optional[int] = None
-    if categories and category_policies:
-        for cat in categories:
-            pol = category_policies.get(cat)
-            if pol and pol.enabled and pol.default_ttl_days and pol.default_ttl_days > 0:
-                if shortest_category_ttl is None or pol.default_ttl_days < shortest_category_ttl:
-                    shortest_category_ttl = pol.default_ttl_days
-    if shortest_category_ttl is not None:
-        return compute_expires_at_from_ttl(shortest_category_ttl, now), TtlSource.CATEGORY
-
-    # Legacy single category_policy for backwards compatibility
-    if (
-        category_policy
-        and category_policy.enabled
-        and category_policy.default_ttl_days
-        and category_policy.default_ttl_days > 0
-    ):
-        return compute_expires_at_from_ttl(category_policy.default_ttl_days, now), TtlSource.CATEGORY
-
     for policy, source in (
+        (category_policy, TtlSource.CATEGORY),
         (user_policy, TtlSource.USER),
         (agent_policy, TtlSource.AGENT),
         (workspace_policy, TtlSource.WORKSPACE),

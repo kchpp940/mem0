@@ -25,7 +25,6 @@ class Backend(ABC):
         immutable: bool = False,
         infer: bool = True,
         expires: str | None = None,
-        ttl_days: int | None = None,
         categories: list[str] | None = None,
     ) -> dict: ...
 
@@ -59,49 +58,15 @@ class Backend(ABC):
         run_id: str | None = None,
         page: int = 1,
         page_size: int = 100,
-        categories: list[str] | None = None,
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
-        ttl_state: str | None = None,
     ) -> list[dict]: ...
 
     @abstractmethod
     def update(
-        self,
-        memory_id: str,
-        content: str | None = None,
-        metadata: dict | None = None,
-        *,
-        expires: str | None = None,
-        ttl_days: int | None = None,
-        categories: list[str] | None = None,
-        category: str | None = None,
+        self, memory_id: str, content: str | None = None, metadata: dict | None = None
     ) -> dict: ...
-
-    @abstractmethod
-    def get_lifecycle_policies(self) -> dict:
-        """Fetch the current lifecycle retention policy hierarchy."""
-        ...
-
-    @abstractmethod
-    def set_lifecycle_policy(
-        self,
-        *,
-        scope: str,
-        scope_id: str | None = None,
-        default_ttl_days: int | None = None,
-        enabled: bool | None = None,
-        remove: bool = False,
-    ) -> dict:
-        """Upsert or remove a lifecycle policy at the given scope.
-
-        scope: "default" | "workspace" | "user" | "agent" | "category"
-        scope_id: required for per-entity scopes (user_id, agent_id, category name)
-        Pass default_ttl_days=None and/or enabled=True/False to set those fields.
-        Use remove=True to drop a per-entity policy entry.
-        """
-        ...
 
     @abstractmethod
     def delete(

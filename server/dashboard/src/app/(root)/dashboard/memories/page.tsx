@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Clock, Trash2 } from "lucide-react";
+import { useState } from "react";
+import { Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,20 +12,12 @@ import { TableSkeleton } from "@/components/shared/table-skeleton";
 import { EmptyState } from "@/components/self-hosted/empty-state";
 import DeleteConfirmationModal from "@/components/ui/delete-confirmation-modal";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Sheet,
   SheetContent,
   SheetHeader,
   SheetTitle,
   SheetDescription,
 } from "@/components/ui/sheet";
-import { Badge } from "@/components/ui/badge";
 import { UpgradeBanner } from "@/components/self-hosted/upgrade-banner";
 import { toast } from "@/components/ui/use-toast";
 import { getErrorMessage } from "@/lib/error-message";
@@ -36,55 +28,8 @@ import { Memory } from "@/types/api";
 
 const PAGE_SIZE = 20;
 
-const TTL_STATE_OPTIONS = [
-  { value: "all", label: "All memories" },
-  { value: "active", label: "Active" },
-  { value: "expiring_soon", label: "Expiring soon" },
-  { value: "expired", label: "Expired" },
-  { value: "permanent", label: "Permanent" },
-] as const;
-
-type TtlFilter = (typeof TTL_STATE_OPTIONS)[number]["value"];
-
-function ttlBadgeClass(state: string | null | undefined): string {
-  switch (state) {
-    case "active":
-      return "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/25";
-    case "expiring_soon":
-      return "bg-amber-500/15 text-amber-700 dark:text-amber-400 hover:bg-amber-500/25";
-    case "expired":
-      return "bg-rose-500/15 text-rose-700 dark:text-rose-400 hover:bg-rose-500/25";
-    case "permanent":
-      return "bg-indigo-500/15 text-indigo-700 dark:text-indigo-400 hover:bg-indigo-500/25";
-    default:
-      return "bg-slate-500/15 text-slate-700 dark:text-slate-400 hover:bg-slate-500/25";
-  }
-}
-
-function ttlSourceLabel(source: string | null | undefined): string {
-  switch (source) {
-    case "request":
-      return "Per request";
-    case "category":
-      return "Category policy";
-    case "user":
-      return "User policy";
-    case "agent":
-      return "Agent policy";
-    case "workspace":
-      return "Workspace policy";
-    case "default":
-      return "Default policy";
-    default:
-      return source ?? "--";
-  }
-}
-
 export default function MemoriesPage() {
   const [userId, setUserId] = useState("");
-  const [appliedUserId, setAppliedUserId] = useState("");
-  const [ttlFilter, setTtlFilter] = useState<TtlFilter>("all");
-  const [appliedTtlFilter, setAppliedTtlFilter] = useState<TtlFilter>("all");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
   const [page, setPage] = useState(0);
@@ -96,20 +41,13 @@ export default function MemoriesPage() {
     refetch,
   } = useApiQuery<Memory[]>(
     async () => {
-      const params: Record<string, string> = {};
-      if (appliedUserId.trim()) params.user_id = appliedUserId.trim();
-      if (appliedTtlFilter !== "all") params.ttl_state = appliedTtlFilter;
+      const params = userId.trim() ? { user_id: userId.trim() } : undefined;
       const res = await api.get(MEMORY_ENDPOINTS.BASE, { params });
       const raw = res.data?.results ?? res.data ?? [];
       return Array.isArray(raw) ? raw : [];
     },
     { errorToast: "Failed to load memories", initialData: [] },
   );
-
-  // Re-fetch whenever applied filters change
-  useEffect(() => {
-    void refetch();
-  }, [appliedUserId, appliedTtlFilter, refetch]);
 
   const totalPages = Math.ceil(memories.length / PAGE_SIZE);
   const paginatedMemories = memories.slice(
@@ -138,31 +76,17 @@ export default function MemoriesPage() {
     {
       key: "memory" as keyof Memory,
       label: "Content",
-      width: 360,
+      width: 400,
       render: (value: string) => (
         <span className="line-clamp-2 text-sm">{value}</span>
       ),
     },
-    { key: "user_id" as keyof Memory, label: "User", width: 90 },
-    { key: "agent_id" as keyof Memory, label: "Agent", width: 90 },
-    {
-      key: "ttl_state" as keyof Memory,
-      label: "TTL State",
-      width: 120,
-      render: (value: string | null | undefined, row: Memory) => (
-        <Badge
-          variant="secondary"
-          className={`font-normal ${ttlBadgeClass(value)}`}
-        >
-          <Clock className="size-3 mr-1 opacity-70" />
-          {value ?? "permanent"}
-        </Badge>
-      ),
-    },
+    { key: "user_id" as keyof Memory, label: "User", width: 100 },
+    { key: "agent_id" as keyof Memory, label: "Agent", width: 100 },
     {
       key: "created_at" as keyof Memory,
       label: "Created",
-      width: 110,
+      width: 120,
       render: (value: string) =>
         value ? format(new Date(value), "MMM d, yyyy") : "--",
     },
@@ -182,7 +106,7 @@ export default function MemoriesPage() {
         />
       )}
 
-      <div className="flex flex-wrap gap-3">
+      <div className="flex gap-3">
         <Input
           placeholder="Filter by User ID (optional)"
           value={userId}
@@ -190,42 +114,18 @@ export default function MemoriesPage() {
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               setPage(0);
-              setAppliedUserId(userId);
+              refetch();
             }
           }}
           className="w-64"
         />
-        <Select
-          value={ttlFilter}
-          onValueChange={(v) => {
-            const nv = v as TtlFilter;
-            setTtlFilter(nv);
-            setAppliedTtlFilter(nv);
-            setPage(0);
-          }}
-        >
-          <SelectTrigger className="w-52">
-            <SelectValue placeholder="Filter by TTL state" />
-          </SelectTrigger>
-          <SelectContent>
-            {TTL_STATE_OPTIONS.map((opt) => (
-              <SelectItem key={opt.value} value={opt.value}>
-                {opt.label}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
       </div>
 
       {isLoading ? (
-        <TableSkeleton rows={5} columns={5} />
+        <TableSkeleton rows={5} columns={4} />
       ) : memories.length === 0 ? (
         <EmptyState
-          title={
-            appliedTtlFilter !== "all"
-              ? `No ${appliedTtlFilter} memories`
-              : "No memories yet"
-          }
+          title="No memories yet"
           description="Create your first memory by sending a POST /memories request."
         >
           <pre className="text-xs text-left bg-surface-default-secondary p-3 rounded font-mono overflow-x-auto mt-3 max-w-lg">
@@ -334,42 +234,6 @@ export default function MemoriesPage() {
                     <p className="text-sm">{selectedMemory.agent_id}</p>
                   </div>
                 )}
-                <div className="space-y-1">
-                  <Label className="text-xs text-onSurface-default-tertiary">
-                    TTL State
-                  </Label>
-                  <div>
-                    <Badge
-                      variant="secondary"
-                      className={`font-normal ${ttlBadgeClass(
-                        selectedMemory.ttl_state,
-                      )}`}
-                    >
-                      <Clock className="size-3 mr-1 opacity-70" />
-                      {selectedMemory.ttl_state ?? "permanent"}
-                    </Badge>
-                  </div>
-                </div>
-                {selectedMemory.expires_at && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      Expires At
-                    </Label>
-                    <p className="text-sm">
-                      {new Date(selectedMemory.expires_at).toLocaleString()}
-                    </p>
-                  </div>
-                )}
-                {selectedMemory.ttl_source && (
-                  <div className="space-y-1">
-                    <Label className="text-xs text-onSurface-default-tertiary">
-                      TTL Source
-                    </Label>
-                    <p className="text-sm">
-                      {ttlSourceLabel(selectedMemory.ttl_source)}
-                    </p>
-                  </div>
-                )}
                 {selectedMemory.created_at && (
                   <div className="space-y-1">
                     <Label className="text-xs text-onSurface-default-tertiary">
@@ -381,24 +245,6 @@ export default function MemoriesPage() {
                   </div>
                 )}
               </div>
-              {selectedMemory.categories && selectedMemory.categories.length > 0 && (
-                <div className="space-y-2">
-                  <Label className="text-xs text-onSurface-default-tertiary">
-                    Categories
-                  </Label>
-                  <div className="flex flex-wrap gap-1.5">
-                    {selectedMemory.categories.map((cat) => (
-                      <Badge
-                        key={cat}
-                        variant="outline"
-                        className="font-normal text-xs"
-                      >
-                        {cat}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
               <Button
                 variant="outline"
                 size="sm"

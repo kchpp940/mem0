@@ -1,5 +1,34 @@
 import { z } from "zod";
 
+export interface ScoreWeights {
+  semanticWeight?: number;
+  bm25Weight?: number;
+  entityBoostWeight?: number;
+}
+
+export interface SearchProfile {
+  name?: string;
+  filters?: SearchFilters;
+  topK?: number;
+  threshold?: number;
+  explain?: boolean;
+  scoreWeights?: ScoreWeights;
+  rerank?: boolean;
+  description?: string;
+}
+
+export interface SearchProfileStore {
+  [name: string]: SearchProfile;
+}
+
+export interface SearchExplainInfo {
+  profile?: {
+    name: string | null;
+    appliedConfig: Omit<SearchProfile, "name" | "description">;
+  };
+  overriddenFields?: string[];
+}
+
 export interface MultiModalMessages {
   type: "image_url";
   image_url: {
@@ -72,6 +101,7 @@ export interface MemoryConfig {
   disableHistory?: boolean;
   historyDbPath?: string;
   customInstructions?: string;
+  searchProfiles?: SearchProfileStore;
 }
 
 export interface MemoryItem {
@@ -100,6 +130,25 @@ export interface VectorStoreResult {
   payload: Record<string, any>;
   score?: number;
 }
+
+const ScoreWeightsSchema = z.object({
+  semanticWeight: z.number().min(0).max(1).optional(),
+  bm25Weight: z.number().min(0).max(1).optional(),
+  entityBoostWeight: z.number().min(0).max(1).optional(),
+});
+
+const SearchProfileSchema = z.object({
+  name: z.string().optional(),
+  filters: z.record(z.string(), z.any()).optional(),
+  topK: z.number().int().min(0).optional(),
+  threshold: z.number().min(0).max(1).optional(),
+  explain: z.boolean().optional(),
+  scoreWeights: ScoreWeightsSchema.optional(),
+  rerank: z.boolean().optional(),
+  description: z.string().optional(),
+});
+
+const SearchProfileStoreSchema = z.record(z.string(), SearchProfileSchema);
 
 export const MemoryConfigSchema = z.object({
   version: z.string().optional(),
@@ -148,4 +197,5 @@ export const MemoryConfigSchema = z.object({
     })
     .optional(),
   disableHistory: z.boolean().optional(),
+  searchProfiles: SearchProfileStoreSchema.optional(),
 });

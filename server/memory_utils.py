@@ -1,5 +1,7 @@
 from typing import Any, Dict, List, Literal, Optional, TypedDict
 
+from pydantic import BaseModel
+
 
 EntityType = Literal["user", "agent", "run"]
 VALID_ENTITY_TYPES = frozenset({"user", "agent", "run"})
@@ -32,6 +34,31 @@ class EntityResponseItem(TypedDict, total=False):
 
 class MemoryListResponse(TypedDict):
     results: List[MemoryResponseItem]
+
+
+class MemoryResponseModel(BaseModel):
+    id: Optional[str] = None
+    memory: str = ""
+    user_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    run_id: Optional[str] = None
+    actor_id: Optional[str] = None
+    role: Optional[str] = None
+    hash: Optional[str] = None
+    metadata: Optional[Dict[str, Any]] = None
+    score: Optional[float] = None
+    score_details: Optional[Dict[str, Any]] = None
+    event: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class EntityResponseModel(BaseModel):
+    id: str
+    type: EntityType
+    total_memories: int
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 PROMOTED_KEYS = ("user_id", "agent_id", "run_id", "actor_id", "role")

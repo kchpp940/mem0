@@ -5,8 +5,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "server"))
 
 from memory_utils import (
     EntityResponseItem,
+    EntityResponseModel,
     MemoryListResponse,
     MemoryResponseItem,
+    MemoryResponseModel,
     USER_METADATA_EXCLUDE,
     VALID_ENTITY_TYPES,
     extract_payload,
@@ -519,3 +521,205 @@ class TestInternalFieldConsistency:
         for obj in non_memory_objects:
             assert is_memory_response_item(obj) is False, f"Should not detect as memory: {obj}"
             assert normalize_response(obj) == obj
+
+
+class TestPydanticModelValidation:
+    def test_memory_model_validates_format_output(self):
+        item = format_memory_response(
+            {"id": "x", "memory": "test", "user_id": "u1", "actor_id": "alice"},
+            score=0.9,
+        )
+        validated = MemoryResponseModel.model_validate(item)
+        assert validated.id == "x"
+        assert validated.memory == "test"
+        assert validated.user_id == "u1"
+        assert validated.actor_id == "alice"
+        assert validated.score == 0.9
+
+    def test_memory_model_validates_vector_store_row(self):
+        class FakeRow:
+            id = "r1"
+            payload = {"data": "hi", "user_id": "u1"}
+
+        item = format_vector_store_row(FakeRow())
+        validated = MemoryResponseModel.model_validate(item)
+        assert validated.id == "r1"
+        assert validated.memory == "hi"
+        assert validated.user_id == "u1"
+
+    def test_entity_model_validates_entity_item(self):
+        entity = {"id": "u1", "type": "user", "total_memories": 10}
+        validated = EntityResponseModel.model_validate(entity)
+        assert validated.id == "u1"
+        assert validated.type == "user"
+        assert validated.total_memories == 10
+
+    def test_memory_model_rejects_internal_fields(self):
+        for field in ("text_lemmatized", "attributed_to", "data"):
+            assert field not in MemoryResponseModel.model_fields, f"Internal field '{field}' in model"
+
+
+class TestSchemaParity:
+    def test_memory_typed_dict_matches_pydantic(self):
+        td_keys = set(MemoryResponseItem.__annotations__.keys())
+        pydantic_keys = set(MemoryResponseModel.model_fields.keys())
+        assert td_keys == pydantic_keys, (
+            f"Memory TypedDict != Pydantic.\n  TD only: {td_keys - pydantic_keys}\n  Pydantic only: {pydantic_keys - td_keys}"
+        )
+
+    def test_entity_typed_dict_matches_pydantic(self):
+        td_keys = set(EntityResponseItem.__annotations__.keys())
+        pydantic_keys = set(EntityResponseModel.model_fields.keys())
+        assert td_keys == pydantic_keys, (
+            f"Entity TypedDict != Pydantic.\n  TD only: {td_keys - pydantic_keys}\n  Pydantic only: {pydantic_keys - td_keys}"
+        )
+
+    def test_memory_typed_dict_matches_ts_interface(self):
+        ts_path = os.path.join(
+            os.path.dirname(__file__), "..", "server", "dashboard", "src", "types", "api.ts"
+        )
+        if not os.path.exists(ts_path):
+            return
+        import re
+        ts_content = open(ts_path).read()
+        pattern = r"export\s+interface\s+Memory\s*\{([^}]*)\}"
+        match = re.search(pattern, ts_content)
+        assert match, "Could not find Memory interface in api.ts"
+        ts_fields = set()
+        for line in match.group(1).strip().split("\n"):
+            line = line.strip().rstrip(";").rstrip(",")
+            if not line:
+                continue
+            parts = line.split(":")
+            if len(parts) >= 2:
+                name = parts[0].strip().rstrip("?")
+                if name.isidentifier():
+                    ts_fields.add(name)
+        td_keys = set(MemoryResponseItem.__annotations__.keys())
+        assert td_keys == ts_fields, (
+            f"Memory TypedDict != TS interface.\n  TD only: {td_keys - ts_fields}\n  TS only: {ts_fields - td_keys}"
+        )
+
+    def test_entity_typed_dict_matches_ts_interface(self):
+        ts_path = os.path.join(
+            os.path.dirname(__file__), "..", "server", "dashboard", "src", "types", "api.ts"
+        )
+        if not os.path.exists(ts_path):
+            return
+        import re
+        ts_content = open(ts_path).read()
+        pattern = r"export\s+interface\s+Entity\s*\{([^}]*)\}"
+        match = re.search(pattern, ts_content)
+        assert match, "Could not find Entity interface in api.ts"
+        ts_fields = set()
+        for line in match.group(1).strip().split("\n"):
+            line = line.strip().rstrip(";").rstrip(",")
+            if not line:
+                continue
+            parts = line.split(":")
+            if len(parts) >= 2:
+                name = parts[0].strip().rstrip("?")
+                if name.isidentifier():
+                    ts_fields.add(name)
+        td_keys = set(EntityResponseItem.__annotations__.keys())
+        assert td_keys == ts_fields, (
+            f"Entity TypedDict != TS interface.\n  TD only: {td_keys - ts_fields}\n  TS only: {ts_fields - td_keys}"
+        )
+
+    def test_entity_type_values_match_ts(self):
+        ts_path = os.path.join(
+            os.path.dirname(__file__), "..", "server", "dashboard", "src", "types", "api.ts"
+        )
+        if not os.path.exists(ts_path):
+            return
+        import re
+        ts_content = open(ts_path).read()
+        pattern = r'export\s+type\s+EntityType\s*=\s*([^;]+);'
+        match = re.search(pattern, ts_content)
+        if not match:
+            return
+        ts_values = {v.strip().strip('"').strip("'") for v in match.group(1).split("|")}
+        assert ts_values == VALID_ENTITY_TYPES, f"Backend: {VALID_ENTITY_TYPES}, TS: {ts_values}"
+
+
+class TestEndpointResponseShapeCompatibility:
+    def test_post_memories_list_shape(self):
+        result = normalize_response([{"id": "m1", "memory": "a", "event": "ADD"}])
+        assert isinstance(result, list)
+        MemoryResponseModel.model_validate(result[0])
+
+    def test_post_memories_dict_shape(self):
+        result = normalize_response({"results": [{"id": "m1", "memory": "a", "event": "ADD"}]})
+        assert isinstance(result, dict) and set(result.keys()) == {"results"}
+        MemoryResponseModel.model_validate(result["results"][0])
+
+    def test_get_memories_no_filter_shape(self):
+        class FakeRow:
+            id = "r1"
+            payload = {"data": "hi", "user_id": "u1", "text_lemmatized": "x"}
+
+        class FakeVS:
+            def list(self, top_k):
+                return [[FakeRow()]]
+
+        memories = list_vector_store_memories(FakeVS(), limit=100)
+        outer = {"results": memories}
+        assert isinstance(outer, dict) and set(outer.keys()) == {"results"}
+        assert "text_lemmatized" not in outer["results"][0]
+        MemoryResponseModel.model_validate(outer["results"][0])
+
+    def test_get_memories_with_filter_list_shape(self):
+        result = normalize_response([{"id": "m1", "memory": "a", "user_id": "u1"}])
+        assert isinstance(result, list)
+        MemoryResponseModel.model_validate(result[0])
+
+    def test_get_memories_with_filter_dict_shape(self):
+        result = normalize_response({"results": [{"id": "m1", "memory": "a", "user_id": "u1"}]})
+        assert isinstance(result, dict) and "results" in result
+        MemoryResponseModel.model_validate(result["results"][0])
+
+    def test_get_memory_by_id_shape(self):
+        result = normalize_response({"id": "m1", "memory": "hi", "actor_id": "bob", "metadata": {"custom": "y"}})
+        assert isinstance(result, dict)
+        MemoryResponseModel.model_validate(result)
+
+    def test_post_search_shape(self):
+        result = normalize_response({
+            "results": [
+                {"id": "m1", "memory": "a", "score": 0.9, "metadata": {"category": "sports"}},
+                {"id": "m2", "memory": "b", "score": 0.8, "actor_id": "alice"},
+            ]
+        })
+        assert isinstance(result, dict) and set(result.keys()) == {"results"}
+        assert result["results"][0]["score"] == 0.9
+        assert result["results"][1]["actor_id"] == "alice"
+        MemoryResponseModel.model_validate(result["results"][0])
+        MemoryResponseModel.model_validate(result["results"][1])
+
+    def test_get_entities_shape(self):
+        entities = [
+            {"id": "u1", "type": "user", "total_memories": 10, "created_at": "2025"},
+            {"id": "a1", "type": "agent", "total_memories": 3},
+        ]
+        result = normalize_response(entities)
+        assert isinstance(result, list) and len(result) == 2
+        assert not any(is_memory_response_item(e) for e in result)
+        assert all(is_entity_response_item(e) for e in result)
+        for e in result:
+            EntityResponseModel.model_validate(e)
+
+    def test_put_memories_message_passthrough(self):
+        assert normalize_response({"message": "Memory updated"}) == {"message": "Memory updated"}
+
+    def test_delete_message_passthrough(self):
+        msg = {"message": "Memory deleted successfully"}
+        result = normalize_response(msg)
+        assert result == msg and not is_memory_response_item(result)
+
+    def test_non_memory_list_passthrough(self):
+        api_logs = [{"id": "l1", "method": "GET"}, {"id": "l2", "method": "POST"}]
+        assert normalize_response(api_logs) == api_logs
+
+    def test_dict_with_non_memory_results_passthrough(self):
+        response = {"results": [{"id": "log1", "method": "GET"}]}
+        assert normalize_response(response) == response

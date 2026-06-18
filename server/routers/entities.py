@@ -5,8 +5,7 @@ from typing import Any, Optional
 from auth import require_admin, verify_auth
 from errors import upstream_error
 from fastapi import APIRouter, Depends
-from memory_utils import EntityType, VALID_ENTITY_TYPES, list_vector_store_memories
-from pydantic import BaseModel
+from memory_utils import EntityType, EntityResponseModel, list_vector_store_memories
 from schemas import MessageResponse
 from server_state import get_memory_instance
 
@@ -17,20 +16,7 @@ SCAN_LIMIT = 10_000
 TYPE_TO_FIELD: dict[EntityType, str] = {"user": "user_id", "agent": "agent_id", "run": "run_id"}
 
 
-class Entity(BaseModel):
-    model_config = {"json_schema_extra": {
-        "properties": {
-            "id": {"type": "string"},
-            "type": {"enum": list(VALID_ENTITY_TYPES)},
-            "total_memories": {"type": "integer"},
-            "created_at": {"type": ["string", "null"], "format": "date-time"},
-            "updated_at": {"type": ["string", "null"], "format": "date-time"},
-        }
-    }}
-
-    id: str
-    type: EntityType
-    total_memories: int
+class Entity(EntityResponseModel):
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 

@@ -12,6 +12,7 @@ import {
 	timedStatus,
 } from "../branding.js";
 import {
+	dedupeAddResult,
 	formatAddResult,
 	formatAgentEnvelope,
 	formatJson,
@@ -149,23 +150,16 @@ export async function cmdAdd(
 	if (opts.output === "quiet") return;
 
 	// Deduplicate PENDING entries sharing the same event_id across all output modes
-	const rawResults: Record<string, unknown>[] = Array.isArray(result)
-		? result
-		: ((result.results as Record<string, unknown>[]) ?? [result]);
-	const seenEvents = new Set<string>();
-	const deduped: Record<string, unknown>[] = [];
-	for (const r of rawResults) {
-		if (r.status === "PENDING") {
-			const eid = (r.event_id as string) ?? "";
-			if (eid && seenEvents.has(eid)) continue;
-			if (eid) seenEvents.add(eid);
-		}
-		deduped.push(r);
-	}
-	// Write back so downstream formatters see deduplicated data
-	const dedupedResult: Record<string, unknown> = Array.isArray(result)
-		? (deduped as unknown as Record<string, unknown>)
-		: { ...result, results: deduped };
+	// Uses shared dedupe logic from output.ts so text/json/agent agree
+	const dedupedResult = dedupeAddResult(result);
+	const dedupedList = (
+		Array.isArray(dedupedResult)
+			? dedupedResult
+			: (((dedupedResult as Record<string, unknown>).results as Record<
+					string,
+					unknown
+				>[]) ?? [dedupedResult])
+	) as Record<string, unknown>[];
 
 	if (opts.output === "agent") {
 		const scope: Record<string, string | undefined> = {
@@ -176,9 +170,9 @@ export async function cmdAdd(
 		};
 		formatAgentEnvelope({
 			command: "add",
-			data: deduped,
+			data: dedupedList,
 			scope,
-			count: deduped.length,
+			count: dedupedList.length,
 		});
 		return;
 	}
@@ -195,8 +189,9 @@ export async function cmdAdd(
 		app_id: opts.appId,
 		run_id: opts.runId,
 	});
-	const count = deduped.length;
-	const allPending = count > 0 && deduped.every((r) => r.status === "PENDING");
+	const count = dedupedList.length;
+	const allPending =
+		count > 0 && dedupedList.every((r) => r.status === "PENDING");
 	if (allPending) {
 		printSuccess(
 			`Memory queued — ${count} event${count !== 1 ? "s" : ""} pending`,
@@ -401,7 +396,7 @@ export async function cmdList(
 
 	if (opts.output === "quiet") return;
 
-	if (opts.output === "agent" || opts.output === "json") {
+	if (opts.output === "agent") {
 		const scope: Record<string, string | undefined> = {
 			user_id: opts.userId,
 			agent_id: opts.agentId,
@@ -415,6 +410,8 @@ export async function cmdList(
 			count: results.length,
 			durationMs: Math.round(elapsed * 1000),
 		});
+	} else if (opts.output === "json") {
+		formatJson(results);
 	} else if (opts.output === "table") {
 		if (results.length > 0) {
 			formatMemoriesTable(results);

@@ -2,7 +2,6 @@ import { VectorStore as LangchainVectorStoreInterface } from "@langchain/core/ve
 import { Document } from "@langchain/core/documents";
 import { VectorStore } from "./base"; // mem0's VectorStore interface
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { FilterCapability } from "../utils/filter_utils";
 
 // Config specifically for the Langchain wrapper
 interface LangchainStoreConfig extends VectorStoreConfig {
@@ -11,7 +10,6 @@ interface LangchainStoreConfig extends VectorStoreConfig {
 }
 
 export class LangchainVectorStore implements VectorStore {
-  readonly filterCapability: FilterCapability = "reject";
   private lcStore: LangchainVectorStoreInterface;
   private dimension?: number;
   private storeUserId: string = "anonymous-langchain-user"; // Simple in-memory user ID

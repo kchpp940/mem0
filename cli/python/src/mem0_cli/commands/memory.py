@@ -21,6 +21,7 @@ from mem0_cli.branding import (
     timed_status,
 )
 from mem0_cli.output import (
+    dedupe_add_result,
     format_add_result,
     format_agent_envelope,
     format_json,
@@ -153,22 +154,13 @@ def cmd_add(
         return
 
     # Deduplicate PENDING entries sharing the same event_id across all output modes
-    results_list = result if isinstance(result, list) else result.get("results", [result])
-    seen_events: set[str] = set()
-    deduped: list[dict] = []
-    for r in results_list:
-        if r.get("status") == "PENDING":
-            eid = r.get("event_id", "")
-            if eid and eid in seen_events:
-                continue
-            if eid:
-                seen_events.add(eid)
-        deduped.append(r)
-    # Write back so downstream formatters see deduplicated data
-    if isinstance(result, dict) and "results" in result:
-        result = {**result, "results": deduped}
-    else:
-        result = deduped
+    # Uses shared dedupe logic from output.py so text/json/agent agree
+    deduped_result = dedupe_add_result(result)
+    deduped_list = (
+        deduped_result.get("results", [deduped_result])
+        if isinstance(deduped_result, dict)
+        else deduped_result
+    )
 
     if output == "agent":
         scope = {
@@ -184,20 +176,20 @@ def cmd_add(
         format_agent_envelope(
             console,
             command="add",
-            data=deduped,
+            data=deduped_list,
             scope=scope or None,
-            count=len(deduped),
+            count=len(deduped_list),
         )
         return
 
     if output == "json":
-        format_add_result(console, result, output)
+        format_add_result(console, deduped_result, output)
         return
 
     console.print()
     print_scope(console, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    count = len(deduped)
-    all_pending = count > 0 and all(r.get("status") == "PENDING" for r in deduped)
+    count = len(deduped_list)
+    all_pending = count > 0 and all(r.get("status") == "PENDING" for r in deduped_list)
     if all_pending:
         print_success(
             console,
@@ -207,7 +199,7 @@ def cmd_add(
         print_success(
             console, f"Memory processed — {count} memor{'y' if count == 1 else 'ies'} extracted"
         )
-    format_add_result(console, result, output)
+    format_add_result(console, deduped_result, output)
 
 
 def cmd_search(
@@ -389,7 +381,7 @@ def cmd_list(
     if output == "quiet":
         return
 
-    if output in ("json", "agent"):
+    if output == "agent":
         scope = {
             k: v
             for k, v in {
@@ -408,6 +400,8 @@ def cmd_list(
             count=len(results),
             duration_ms=int(_elapsed * 1000),
         )
+    elif output == "json":
+        format_json(console, results)
     elif output == "table":
         if results:
             format_memories_table(console, results)

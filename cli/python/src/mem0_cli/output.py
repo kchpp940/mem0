@@ -14,6 +14,36 @@ from rich.text import Text
 from mem0_cli.branding import ACCENT_COLOR, BRAND_COLOR, DIM_COLOR, SUCCESS_COLOR, _sym
 
 
+def dedupe_pending_results(results: list[dict]) -> list[dict]:
+    """Deduplicate PENDING entries sharing the same event_id.
+
+    The Platform API may return multiple PENDING rows for the same event_id
+    when a single add spans multiple memory extractions. Collapse them so
+    text / json / agent output never shows the same pending event twice.
+    Non-PENDING entries pass through unchanged.
+    """
+    seen_events: set[str] = set()
+    deduped: list[dict] = []
+    for r in results:
+        if r.get("status") == "PENDING":
+            eid = r.get("event_id", "")
+            if eid and eid in seen_events:
+                continue
+            if eid:
+                seen_events.add(eid)
+        deduped.append(r)
+    return deduped
+
+
+def dedupe_add_result(result: dict | list) -> dict | list:
+    """Apply dedupe_pending_results to an add() response (list or {"results": [...]})."""
+    results_list = result if isinstance(result, list) else result.get("results", [result])
+    deduped = dedupe_pending_results(results_list)
+    if isinstance(result, dict) and "results" in result:
+        return {**result, "results": deduped}
+    return deduped
+
+
 def format_memories_text(console: Console, memories: list[dict], title: str = "memories") -> None:
     """Render memories in human-friendly text mode."""
     count = len(memories)
@@ -149,22 +179,18 @@ def format_add_result(console: Console, result: dict | list, output: str = "text
         return
 
     # result from API is typically {"results": [...]}
+    # Use shared deduplication so text / json / agent all agree
     results = result if isinstance(result, list) else result.get("results", [result])
+    results = dedupe_pending_results(results)
     if not results:
         console.print(f"  [{DIM_COLOR}]No memories extracted.[/]")
         return
 
     console.print()
-    seen_pending_events: set[str] = set()
     for r in results:
         # Detect async PENDING response from Platform API
         if r.get("status") == "PENDING":
             event_id = r.get("event_id", "")
-            # Deduplicate PENDING entries with the same event_id
-            if event_id and event_id in seen_pending_events:
-                continue
-            if event_id:
-                seen_pending_events.add(event_id)
             icon = f"[{ACCENT_COLOR}]{_sym('⧗', '...')}[/]"
             parts = [f"  {icon} [{DIM_COLOR}]{'Queued':<10}[/]"]
             parts.append("[white]Processing in background[/]")
@@ -253,6 +279,8 @@ def sanitize_agent_data(command: str, data: Any) -> Any:
 
     if command == "add":
         items = data if isinstance(data, list) else [data]
+        # Deduplicate PENDING entries sharing the same event_id before projecting
+        items = dedupe_pending_results(items)
         result = []
         for item in items:
             if item.get("status") == "PENDING":

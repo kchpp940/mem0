@@ -9,6 +9,35 @@ import { takeNotice } from "./state.js";
 
 const { brand, accent, success, error: errorColor, dim } = colors;
 
+export function dedupePendingResults(
+	results: Record<string, unknown>[],
+): Record<string, unknown>[] {
+	const seenEvents = new Set<string>();
+	const deduped: Record<string, unknown>[] = [];
+	for (const r of results) {
+		if (r.status === "PENDING") {
+			const eid = (r.event_id as string) ?? "";
+			if (eid && seenEvents.has(eid)) continue;
+			if (eid) seenEvents.add(eid);
+		}
+		deduped.push(r);
+	}
+	return deduped;
+}
+
+export function dedupeAddResult(
+	result: Record<string, unknown> | Record<string, unknown>[],
+): Record<string, unknown> | Record<string, unknown>[] {
+	const resultsList = Array.isArray(result)
+		? result
+		: ((result.results as Record<string, unknown>[]) ?? [result]);
+	const deduped = dedupePendingResults(resultsList);
+	if (!Array.isArray(result) && "results" in result) {
+		return { ...result, results: deduped };
+	}
+	return deduped;
+}
+
 function formatDate(dtStr?: string): string | undefined {
 	if (!dtStr) return undefined;
 	try {
@@ -164,20 +193,19 @@ export function formatAddResult(
 		? result
 		: ((result.results as Record<string, unknown>[]) ?? [result]);
 
-	if (!results.length) {
+	// Use shared deduplication so text / json / agent all agree
+	const deduped = dedupePendingResults(results);
+
+	if (!deduped.length) {
 		console.log(`  ${dim("No memories extracted.")}`);
 		return;
 	}
 
 	console.log();
-	const seenPendingEvents = new Set<string>();
-	for (const r of results) {
+	for (const r of deduped) {
 		// Detect async PENDING response
 		if (r.status === "PENDING") {
 			const eventId = (r.event_id as string) ?? "";
-			// Deduplicate PENDING entries with the same event_id
-			if (eventId && seenPendingEvents.has(eventId)) continue;
-			if (eventId) seenPendingEvents.add(eventId);
 			const icon = accent(sym("⧗", "..."));
 			const parts = [
 				`  ${icon} ${dim("Queued".padEnd(10))}`,
@@ -274,7 +302,9 @@ export function sanitizeAgentData(command: string, data: unknown): unknown {
 	switch (command) {
 		case "add": {
 			const items = Array.isArray(data) ? data : [data];
-			return items.map((item) => {
+			// Deduplicate PENDING entries sharing the same event_id before projecting
+			const deduped = dedupePendingResults(items as Record<string, unknown>[]);
+			return deduped.map((item) => {
 				const r = item as Record<string, unknown>;
 				if (r.status === "PENDING") return pick(r, ["status", "event_id"]);
 				return pick(r, ["id", "memory", "event"]);

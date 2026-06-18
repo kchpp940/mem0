@@ -43,13 +43,18 @@ export async function cmdEventList(
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	if (opts.output === "agent" || opts.output === "json") {
+	if (opts.output === "agent") {
 		formatAgentEnvelope({
 			command: "event list",
 			data: results,
 			count: results.length,
 			durationMs: Math.round(elapsed * 1000),
 		});
+		return;
+	}
+
+	if (opts.output === "json") {
+		formatJson(results);
 		return;
 	}
 
@@ -111,12 +116,17 @@ export async function cmdEventStatus(
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	if (opts.output === "agent" || opts.output === "json") {
+	if (opts.output === "agent") {
 		formatAgentEnvelope({
 			command: "event status",
 			data: ev,
 			durationMs: Math.round(elapsed * 1000),
 		});
+		return;
+	}
+
+	if (opts.output === "json") {
+		formatJson(ev);
 		return;
 	}
 

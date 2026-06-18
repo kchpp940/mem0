@@ -73,10 +73,6 @@ import {
 } from "../utils/scoring";
 import { getDefaultVectorStoreDbPath } from "../utils/sqlite";
 import { getOrCreateMem0UserId } from "../../../client/config";
-import {
-  normalizeEntityFilters,
-  normalizeAdvancedFilters,
-} from "../utils/filter_utils";
 
 // Entity params that must be passed via filters - check both snake_case and camelCase
 const ENTITY_PARAMS = [
@@ -635,14 +631,14 @@ export class Memory {
       has_filters: !!config.filters,
       infer: config.infer,
     });
-    const { metadata = {}, infer = true } = config;
-    const rawFilters = config.filters || {};
+    const { metadata = {}, filters = {}, infer = true } = config;
 
+    // Validate and trim entity IDs
     const userId = validateAndTrimEntityId(config.userId, "userId");
     const agentId = validateAndTrimEntityId(config.agentId, "agentId");
     const runId = validateAndTrimEntityId(config.runId, "runId");
 
-    const filters = normalizeEntityFilters(rawFilters);
+    // Convert camelCase entity params to snake_case for storage (matches API and search/getAll filters)
     if (userId) filters.user_id = metadata.user_id = userId;
     if (agentId) filters.agent_id = metadata.agent_id = agentId;
     if (runId) filters.run_id = metadata.run_id = runId;
@@ -1203,25 +1199,17 @@ export class Memory {
     // receive `agent_id: undefined` / `run_id: undefined` and fail
     // (Qdrant rejects the malformed match, pgvector binds NULL, Redis
     // emits a literal "undefined" string in TAG filters).
-    const normalizedFilters = config.filters
-      ? normalizeEntityFilters(
-          Object.fromEntries(
-            Object.entries({
-              ...config.filters,
-              user_id: validateAndTrimEntityId(
-                config.filters.user_id || (config.filters as any).userId,
-                "user_id",
-              ),
-              agent_id: validateAndTrimEntityId(
-                config.filters.agent_id || (config.filters as any).agentId,
-                "agent_id",
-              ),
-              run_id: validateAndTrimEntityId(
-                config.filters.run_id || (config.filters as any).runId,
-                "run_id",
-              ),
-            }).filter(([, v]) => v !== undefined),
-          ),
+    const normalizedFilters: Record<string, any> = config.filters
+      ? Object.fromEntries(
+          Object.entries({
+            ...config.filters,
+            user_id: validateAndTrimEntityId(config.filters.user_id, "user_id"),
+            agent_id: validateAndTrimEntityId(
+              config.filters.agent_id,
+              "agent_id",
+            ),
+            run_id: validateAndTrimEntityId(config.filters.run_id, "run_id"),
+          }).filter(([, v]) => v !== undefined),
         )
       : {};
 
@@ -1521,6 +1509,7 @@ export class Memory {
     });
     const { userId, agentId, runId } = config;
 
+    // Convert camelCase entity params to snake_case for filters (matches storage and search/getAll)
     const filters: SearchFilters = {};
     if (userId) filters.user_id = userId;
     if (agentId) filters.agent_id = agentId;
@@ -1624,24 +1613,13 @@ export class Memory {
     // Validate and trim entity IDs in filters. Drop keys that resolve to
     // undefined so downstream vector stores don't receive
     // `agent_id: undefined` / `run_id: undefined` and fail.
-    const filters: Record<string, any> = normalizeEntityFilters(
-      Object.fromEntries(
-        Object.entries({
-          ...(config.filters || {}),
-          user_id: validateAndTrimEntityId(
-            config.filters?.user_id || (config.filters as any)?.userId,
-            "user_id",
-          ),
-          agent_id: validateAndTrimEntityId(
-            config.filters?.agent_id || (config.filters as any)?.agentId,
-            "agent_id",
-          ),
-          run_id: validateAndTrimEntityId(
-            config.filters?.run_id || (config.filters as any)?.runId,
-            "run_id",
-          ),
-        }).filter(([, v]) => v !== undefined),
-      ),
+    const filters: Record<string, any> = Object.fromEntries(
+      Object.entries({
+        ...(config.filters || {}),
+        user_id: validateAndTrimEntityId(config.filters?.user_id, "user_id"),
+        agent_id: validateAndTrimEntityId(config.filters?.agent_id, "agent_id"),
+        run_id: validateAndTrimEntityId(config.filters?.run_id, "run_id"),
+      }).filter(([, v]) => v !== undefined),
     );
 
     await this._captureEvent("get_all", {
@@ -1861,7 +1839,6 @@ export class Memory {
   private _processMetadataFilters(
     metadataFilters: Record<string, any>,
   ): Record<string, any> {
-    const normalizedInput = normalizeAdvancedFilters(metadataFilters);
     const processedFilters: Record<string, any> = {};
 
     const processCondition = (
@@ -1908,7 +1885,7 @@ export class Memory {
       return result;
     };
 
-    for (const [key, value] of Object.entries(normalizedInput)) {
+    for (const [key, value] of Object.entries(metadataFilters)) {
       if (key === "AND") {
         // Logical AND: combine multiple conditions
         if (!Array.isArray(value)) {

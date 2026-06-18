@@ -1,10 +1,6 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import {
-  buildSupabaseEqualityFilter,
-  FilterCapability,
-} from "../utils/filter_utils";
 
 interface VectorData {
   id: string;
@@ -86,7 +82,6 @@ $$;
 */
 
 export class SupabaseDB implements VectorStore {
-  readonly filterCapability: FilterCapability = "equality-only";
   private client: SupabaseClient;
   private readonly tableName: string;
   private readonly embeddingColumnName: string;
@@ -250,10 +245,7 @@ See the SQL migration instructions in the code comments.`,
       };
 
       if (filters) {
-        rpcQuery.filter = buildSupabaseEqualityFilter(
-          filters,
-          this.filterCapability,
-        );
+        rpcQuery.filter = filters;
       }
 
       const { data, error } = await this.client.rpc("match_vectors", rpcQuery);
@@ -356,12 +348,8 @@ See the SQL migration instructions in the code comments.`,
         .select("*", { count: "exact" })
         .limit(topK);
 
-      const normalizedFilters = buildSupabaseEqualityFilter(
-        filters,
-        this.filterCapability,
-      );
-      if (normalizedFilters) {
-        Object.entries(normalizedFilters).forEach(([key, value]) => {
+      if (filters) {
+        Object.entries(filters).forEach(([key, value]) => {
           query = query.eq(`${this.metadataColumnName}->>${key}`, value);
         });
       }

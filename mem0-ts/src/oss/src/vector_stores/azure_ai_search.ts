@@ -16,7 +16,6 @@ import {
 import { DefaultAzureCredential } from "@azure/identity";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { buildAzureODataFilter, FilterCapability } from "../utils/filter_utils";
 
 /**
  * Configuration interface for Azure AI Search vector store
@@ -72,7 +71,6 @@ interface AzureAISearchConfig extends VectorStoreConfig {
  * Supports vector search with hybrid search, compression, and filtering
  */
 export class AzureAISearch implements VectorStore {
-  readonly filterCapability: FilterCapability = "equality-only";
   private searchClient: SearchClient<any>;
   private indexClient: SearchIndexClient;
   private readonly serviceName: string;
@@ -285,6 +283,34 @@ export class AzureAISearch implements VectorStore {
   }
 
   /**
+   * Sanitize filter keys to remove non-alphanumeric characters
+   */
+  private sanitizeKey(key: string): string {
+    return key.replace(/[^\w]/g, "");
+  }
+
+  /**
+   * Build OData filter expression from SearchFilters
+   */
+  private buildFilterExpression(filters: SearchFilters): string {
+    const filterConditions: string[] = [];
+
+    for (const [key, value] of Object.entries(filters)) {
+      const safeKey = this.sanitizeKey(key);
+
+      if (typeof value === "string") {
+        // Escape single quotes in string values
+        const safeValue = value.replace(/'/g, "''");
+        filterConditions.push(`${safeKey} eq '${safeValue}'`);
+      } else {
+        filterConditions.push(`${safeKey} eq ${value}`);
+      }
+    }
+
+    return filterConditions.join(" and ");
+  }
+
+  /**
    * Extract JSON from payload string
    * Handles cases where payload might have extra text
    */
@@ -310,7 +336,7 @@ export class AzureAISearch implements VectorStore {
   ): Promise<VectorStoreResult[] | null> {
     try {
       const filterExpression = filters
-        ? buildAzureODataFilter(filters, this.filterCapability)
+        ? this.buildFilterExpression(filters)
         : undefined;
 
       const searchResults = await this.searchClient.search(query, {
@@ -348,7 +374,7 @@ export class AzureAISearch implements VectorStore {
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
     const filterExpression = filters
-      ? buildAzureODataFilter(filters, this.filterCapability)
+      ? this.buildFilterExpression(filters)
       : undefined;
 
     const vectorQuery: VectorizedQuery<any> = {
@@ -517,7 +543,7 @@ export class AzureAISearch implements VectorStore {
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
     const filterExpression = filters
-      ? buildAzureODataFilter(filters, this.filterCapability)
+      ? this.buildFilterExpression(filters)
       : undefined;
 
     const searchResults = await this.searchClient.search("*", {

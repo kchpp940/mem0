@@ -16,6 +16,7 @@ import {
 import { DefaultAzureCredential } from "@azure/identity";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { buildAzureODataFilter } from "../utils/filter_utils";
 
 /**
  * Configuration interface for Azure AI Search vector store
@@ -283,44 +284,6 @@ export class AzureAISearch implements VectorStore {
   }
 
   /**
-   * Sanitize filter keys to remove non-alphanumeric characters
-   */
-  private sanitizeKey(key: string): string {
-    return key.replace(/[^\w]/g, "");
-  }
-
-  /**
-   * Build OData filter expression from SearchFilters
-   */
-  private buildFilterExpression(filters: SearchFilters): string {
-    const filterConditions: string[] = [];
-
-    for (const [key, value] of Object.entries(filters)) {
-      if (value === undefined || value === null) {
-        continue;
-      }
-
-      const normalizedKey =
-        key === "userId"
-          ? "user_id"
-          : key === "agentId"
-            ? "agent_id"
-            : key === "runId"
-              ? "run_id"
-              : this.sanitizeKey(key);
-
-      if (typeof value === "string") {
-        const safeValue = value.replace(/'/g, "''");
-        filterConditions.push(`${normalizedKey} eq '${safeValue}'`);
-      } else {
-        filterConditions.push(`${normalizedKey} eq ${value}`);
-      }
-    }
-
-    return filterConditions.join(" and ");
-  }
-
-  /**
    * Extract JSON from payload string
    * Handles cases where payload might have extra text
    */
@@ -346,7 +309,7 @@ export class AzureAISearch implements VectorStore {
   ): Promise<VectorStoreResult[] | null> {
     try {
       const filterExpression = filters
-        ? this.buildFilterExpression(filters)
+        ? buildAzureODataFilter(filters)
         : undefined;
 
       const searchResults = await this.searchClient.search(query, {
@@ -384,7 +347,7 @@ export class AzureAISearch implements VectorStore {
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
     const filterExpression = filters
-      ? this.buildFilterExpression(filters)
+      ? buildAzureODataFilter(filters)
       : undefined;
 
     const vectorQuery: VectorizedQuery<any> = {
@@ -553,7 +516,7 @@ export class AzureAISearch implements VectorStore {
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
     const filterExpression = filters
-      ? this.buildFilterExpression(filters)
+      ? buildAzureODataFilter(filters)
       : undefined;
 
     const searchResults = await this.searchClient.search("*", {

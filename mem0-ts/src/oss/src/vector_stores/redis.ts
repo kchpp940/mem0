@@ -8,6 +8,7 @@ import type {
 } from "redis";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { buildRedisFilterExpr } from "../utils/filter_utils";
 
 /**
  * Escape RediSearch TAG filter special characters. Any punctuation in the
@@ -121,7 +122,6 @@ const EXCLUDED_KEYS = new Set([
   "updated_at",
 ]);
 
-// Utility function to convert object keys to snake_case
 const CAMEL_ENTITY_KEYS: Record<string, string> = {
   userId: "user_id",
   agentId: "agent_id",
@@ -394,13 +394,7 @@ export class RedisDB implements VectorStore {
     topK: number = 5,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
-    const snakeFilters = filters ? toSnakeCase(filters) : undefined;
-    const filterExpr = snakeFilters
-      ? Object.entries(snakeFilters)
-          .filter(([_, value]) => value !== null && value !== undefined)
-          .map(([key, value]) => `@${key}:{${escapeRedisTagValue(value)}}`)
-          .join(" ")
-      : "*";
+    const filterExpr = buildRedisFilterExpr(filters, escapeRedisTagValue);
 
     const queryVector = new Float32Array(query).buffer;
 
@@ -640,13 +634,7 @@ export class RedisDB implements VectorStore {
     filters?: SearchFilters,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
-    const snakeFilters = filters ? toSnakeCase(filters) : undefined;
-    const filterExpr = snakeFilters
-      ? Object.entries(snakeFilters)
-          .filter(([_, value]) => value !== null && value !== undefined)
-          .map(([key, value]) => `@${key}:{${escapeRedisTagValue(value)}}`)
-          .join(" ")
-      : "*";
+    const filterExpr = buildRedisFilterExpr(filters, escapeRedisTagValue);
 
     const searchOptions = {
       SORTBY: "created_at",

@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { buildSupabaseEqualityFilter } from "../utils/filter_utils";
 
 interface VectorData {
   id: string;
@@ -80,28 +81,6 @@ begin
 end;
 $$;
 */
-
-const CAMEL_ENTITY_KEYS: Record<string, string> = {
-  userId: "user_id",
-  agentId: "agent_id",
-  runId: "run_id",
-};
-
-function normalizeFilterKey(key: string): string {
-  return CAMEL_ENTITY_KEYS[key] || key;
-}
-
-function normalizeFilters(
-  filters?: SearchFilters,
-): Record<string, any> | undefined {
-  if (!filters) return undefined;
-  const result: Record<string, any> = {};
-  for (const [key, value] of Object.entries(filters)) {
-    if (value === undefined || value === null) continue;
-    result[normalizeFilterKey(key)] = value;
-  }
-  return Object.keys(result).length > 0 ? result : undefined;
-}
 
 export class SupabaseDB implements VectorStore {
   private client: SupabaseClient;
@@ -267,7 +246,7 @@ See the SQL migration instructions in the code comments.`,
       };
 
       if (filters) {
-        rpcQuery.filter = normalizeFilters(filters);
+        rpcQuery.filter = buildSupabaseEqualityFilter(filters);
       }
 
       const { data, error } = await this.client.rpc("match_vectors", rpcQuery);
@@ -370,7 +349,7 @@ See the SQL migration instructions in the code comments.`,
         .select("*", { count: "exact" })
         .limit(topK);
 
-      const normalizedFilters = normalizeFilters(filters);
+      const normalizedFilters = buildSupabaseEqualityFilter(filters);
       if (normalizedFilters) {
         Object.entries(normalizedFilters).forEach(([key, value]) => {
           query = query.eq(`${this.metadataColumnName}->>${key}`, value);

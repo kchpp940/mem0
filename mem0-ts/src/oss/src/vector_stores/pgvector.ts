@@ -3,6 +3,9 @@ import pkg from "pg";
 const { Client, escapeIdentifier } = pkg;
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { buildPGVectorFilter, FilterResult } from "../utils/filter_utils";
+
+export const buildFilterConditions = buildPGVectorFilter;
 
 const SAFE_IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/;
 
@@ -17,169 +20,6 @@ function validateIdentifier(
     );
   }
   return name;
-}
-
-function escapeFilterKey(key: string): string {
-  if (!SAFE_IDENTIFIER_RE.test(key)) {
-    throw new Error(
-      `Invalid filter key '${key}': only letters, digits, and underscores are allowed.`,
-    );
-  }
-  return key;
-}
-
-interface FilterResult {
-  conditions: string[];
-  values: any[];
-  paramIndex: number;
-}
-
-const OPERATOR_SQL_MAP: Record<string, { template: string; numeric: boolean }> =
-  {
-    eq: { template: "payload->>'%KEY%' = $%IDX%", numeric: false },
-    ne: { template: "payload->>'%KEY%' != $%IDX%", numeric: false },
-    gt: { template: "(payload->>'%KEY%')::numeric > $%IDX%", numeric: true },
-    gte: { template: "(payload->>'%KEY%')::numeric >= $%IDX%", numeric: true },
-    lt: { template: "(payload->>'%KEY%')::numeric < $%IDX%", numeric: true },
-    lte: { template: "(payload->>'%KEY%')::numeric <= $%IDX%", numeric: true },
-    in: { template: "payload->>'%KEY%' = ANY($%IDX%::text[])", numeric: false },
-    nin: {
-      template: "NOT (payload->>'%KEY%' = ANY($%IDX%::text[]))",
-      numeric: false,
-    },
-    contains: {
-      template: "payload->>'%KEY%' LIKE $%IDX% ESCAPE '\\'",
-      numeric: false,
-    },
-    icontains: {
-      template: "payload->>'%KEY%' ILIKE $%IDX% ESCAPE '\\'",
-      numeric: false,
-    },
-  };
-
-const CAMEL_ENTITY_KEYS: Record<string, string> = {
-  userId: "user_id",
-  agentId: "agent_id",
-  runId: "run_id",
-};
-
-const LOGICAL_KEY_MAP: Record<string, string> = {
-  $or: "$or",
-  $not: "$not",
-  $and: "$and",
-  OR: "$or",
-  NOT: "$not",
-  AND: "$and",
-};
-
-function normalizeFilterKey(key: string): string {
-  if (key in CAMEL_ENTITY_KEYS) return CAMEL_ENTITY_KEYS[key];
-  if (key in LOGICAL_KEY_MAP) return LOGICAL_KEY_MAP[key];
-  return key;
-}
-
-export function buildFilterConditions(
-  filters: Record<string, any> | undefined,
-  startIndex: number,
-): FilterResult {
-  const conditions: string[] = [];
-  const values: any[] = [];
-  let paramIndex = startIndex;
-
-  if (!filters) {
-    return { conditions, values, paramIndex };
-  }
-
-  for (const [rawKey, value] of Object.entries(filters)) {
-    const key = normalizeFilterKey(rawKey);
-
-    if (value === undefined || value === null) {
-      continue;
-    }
-
-    if (key === "$or") {
-      const orGroups: string[] = [];
-      for (const orFilter of value as Record<string, any>[]) {
-        const sub = buildFilterConditions(orFilter, paramIndex);
-        if (sub.conditions.length > 0) {
-          orGroups.push("(" + sub.conditions.join(" AND ") + ")");
-          values.push(...sub.values);
-          paramIndex = sub.paramIndex;
-        }
-      }
-      if (orGroups.length > 0) {
-        conditions.push("(" + orGroups.join(" OR ") + ")");
-      }
-      continue;
-    }
-
-    if (key === "$not") {
-      const notGroups: string[] = [];
-      for (const notFilter of value as Record<string, any>[]) {
-        const sub = buildFilterConditions(notFilter, paramIndex);
-        if (sub.conditions.length > 0) {
-          notGroups.push("(" + sub.conditions.join(" AND ") + ")");
-          values.push(...sub.values);
-          paramIndex = sub.paramIndex;
-        }
-      }
-      if (notGroups.length > 0) {
-        conditions.push("NOT (" + notGroups.join(" OR ") + ")");
-      }
-      continue;
-    }
-
-    const safeKey = escapeFilterKey(key);
-
-    if (value === "*") {
-      conditions.push(`payload ? $${paramIndex}`);
-      values.push(key);
-      paramIndex++;
-      continue;
-    }
-
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      for (const [op, opValue] of Object.entries(value)) {
-        const mapping = OPERATOR_SQL_MAP[op];
-        if (!mapping) {
-          throw new Error(`Unsupported filter operator: ${op}`);
-        }
-        const clause = mapping.template
-          .replace("%KEY%", safeKey)
-          .replace("%IDX%", String(paramIndex));
-        conditions.push(clause);
-
-        if (op === "in" || op === "nin") {
-          values.push((opValue as any[]).map(String));
-        } else if (op === "contains" || op === "icontains") {
-          const escaped = String(opValue)
-            .replace(/\\/g, "\\\\")
-            .replace(/%/g, "\\%")
-            .replace(/_/g, "\\_");
-          values.push(`%${escaped}%`);
-        } else if (mapping.numeric) {
-          values.push(Number(opValue));
-        } else {
-          values.push(String(opValue));
-        }
-        paramIndex++;
-      }
-    } else if (Array.isArray(value)) {
-      conditions.push(`payload->>'${safeKey}' = ANY($${paramIndex}::text[])`);
-      values.push(value.map(String));
-      paramIndex++;
-    } else {
-      conditions.push(`payload->>'${safeKey}' = $${paramIndex}`);
-      if (typeof value === "boolean") {
-        values.push(JSON.stringify(value));
-      } else {
-        values.push(String(value));
-      }
-      paramIndex++;
-    }
-  }
-
-  return { conditions, values, paramIndex };
 }
 
 interface PGVectorConfig extends VectorStoreConfig {
@@ -361,7 +201,7 @@ export class PGVector implements VectorStore {
         conditions,
         values,
         paramIndex: _,
-      } = buildFilterConditions(filters, 3);
+      } = buildPGVectorFilter(filters, 3);
       const filterValues: any[] = [query, topK, ...values];
 
       const filterClause =
@@ -399,7 +239,7 @@ export class PGVector implements VectorStore {
       conditions,
       values,
       paramIndex: _,
-    } = buildFilterConditions(filters, 3);
+    } = buildPGVectorFilter(filters, 3);
     const filterValues: any[] = [queryVector, topK, ...values];
 
     const filterClause =
@@ -479,7 +319,7 @@ export class PGVector implements VectorStore {
       conditions,
       values: filterValues,
       paramIndex,
-    } = buildFilterConditions(filters, 1);
+    } = buildPGVectorFilter(filters, 1);
 
     const filterClause =
       conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";

@@ -434,3 +434,226 @@ describe("Memory - Profile Merge Priority (unit)", () => {
     expect(mem2.listSearchProfiles()).toEqual(["mem2-only"]);
   });
 });
+
+describe("Memory - Categories in Search Profile", () => {
+  test("profile categories are converted to { category: { in: [...] } } filter", async () => {
+    const mem = createMemory();
+    const userId = `profile_categories_${Date.now()}`;
+    await mem.add("User ordered veggie pizza", {
+      userId,
+      metadata: { category: "food" },
+    });
+    await mem.add("User is 30 years old", {
+      userId,
+      metadata: { category: "fact" },
+    });
+
+    mem.registerSearchProfile("food-only", {
+      categories: ["food", "preference"],
+    });
+
+    const result = (await mem.search("什么", {
+      profile: "food-only",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.categories).toBeDefined();
+    expect(result.explain.categories.resolved.sort()).toEqual(
+      ["food", "preference"].sort(),
+    );
+    expect(result.explain.categories.filterApplied).toEqual({
+      category: { in: expect.arrayContaining(["food", "preference"]) },
+    });
+  });
+
+  test("call-time categories union with profile categories (deduplicated)", async () => {
+    const mem = createMemory();
+    const userId = `union_cats_${Date.now()}`;
+    await mem.add("test", { userId, metadata: { category: "fact" } });
+
+    mem.registerSearchProfile("base-cats", { categories: ["fact", "food"] });
+
+    const result = (await mem.search("query", {
+      profile: "base-cats",
+      categories: ["food", "order", "  fact  "],
+      filters: { user_id: userId },
+    })) as any;
+
+    const resolved = result.explain.categories.resolved as string[];
+    expect(resolved.sort()).toEqual(["fact", "food", "order"].sort());
+    expect(resolved.length).toBe(3);
+  });
+
+  test("categories and explicit filters.category coexist — call-time filter wins", async () => {
+    const mem = createMemory();
+    const userId = `conflict_cats_${Date.now()}`;
+    await mem.add("t1", { userId, metadata: { category: "fact" } });
+
+    mem.registerSearchProfile("cats", { categories: ["food", "fact"] });
+
+    const result = (await mem.search("q", {
+      profile: "cats",
+      filters: { user_id: userId, category: "explicit_fact" },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.filters.category).toBe(
+      "explicit_fact",
+    );
+  });
+});
+
+describe("Memory - Hybrid Weights & Rerank in Profile", () => {
+  test("profile.hybridWeights is an alias for scoreWeights", async () => {
+    const mem = createMemory();
+    const userId = `hybrid_${Date.now()}`;
+    await mem.add("test", { userId, metadata: { category: "fact" } });
+
+    mem.registerSearchProfile("hybrid-test", {
+      hybridWeights: { semanticWeight: 0.6, bm25Weight: 1.4 },
+    });
+
+    const result = (await mem.search("query", {
+      profile: "hybrid-test",
+      filters: { user_id: userId },
+    })) as any;
+
+    expect(result.explain.hybridWeights.semanticWeight).toBe(0.6);
+    expect(result.explain.hybridWeights.bm25Weight).toBe(1.4);
+    expect(result.explain.profile.appliedConfig.hybridWeights).toEqual({
+      semanticWeight: 0.6,
+      bm25Weight: 1.4,
+    });
+    expect(result.explain.profile.appliedConfig.scoreWeights).toEqual({
+      semanticWeight: 0.6,
+      bm25Weight: 1.4,
+    });
+  });
+
+  test("scoreWeights takes precedence over hybridWeights when both are present", () => {
+    const mem = createMemory();
+    mem.registerSearchProfile("pw", {
+      hybridWeights: { semanticWeight: 0.5 },
+      scoreWeights: { semanticWeight: 0.9 },
+    });
+    const p = mem.getSearchProfile("pw");
+    expect(p?.hybridWeights?.semanticWeight).toBe(0.5);
+    expect(p?.scoreWeights?.semanticWeight).toBe(0.9);
+  });
+});
+
+describe("Memory - Rerank Execution & Explain", () => {
+  test("rerank: true from profile is applied with default score strategy", async () => {
+    const mem = createMemory();
+    const userId = `rerank_bool_${Date.now()}`;
+    for (let i = 0; i < 5; i++) {
+      await mem.add(`memory item ${i}`, { userId });
+    }
+
+    mem.registerSearchProfile("with-rerank", { rerank: true });
+
+    const result = (await mem.search("item", {
+      profile: "with-rerank",
+      filters: { user_id: userId },
+      topK: 3,
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank).toBeDefined();
+    expect(result.explain.rerank.applied).toBe(true);
+    expect(result.explain.rerank.strategy).toBe("score");
+    expect(result.explain.rerank.config.enabled).toBe(true);
+    expect(typeof result.explain.rerank.preCount).toBe("number");
+    expect(typeof result.explain.rerank.postCount).toBe("number");
+  });
+
+  test("rerank with object config — timestamp_decay strategy", async () => {
+    const mem = createMemory();
+    const userId = `rerank_decay_${Date.now()}`;
+    await mem.add("recent memory", { userId });
+
+    mem.registerSearchProfile("fresh", {
+      rerank: { strategy: "timestamp_decay", decayHalfLifeHours: 12 },
+    });
+
+    const result = (await mem.search("memory", {
+      profile: "fresh",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank.applied).toBe(true);
+    expect(result.explain.rerank.strategy).toBe("timestamp_decay");
+    expect(result.explain.rerank.config.decayHalfLifeHours).toBe(12);
+    expect(result.explain.profile.appliedConfig.rerank).toMatchObject({
+      strategy: "timestamp_decay",
+    });
+  });
+
+  test("rerank with diversity strategy uses diversityField from config", async () => {
+    const mem = createMemory();
+    const userId = `rerank_div_${Date.now()}`;
+    for (const c of ["A", "A", "B", "C"]) {
+      await mem.add(`m-${c}`, { userId, metadata: { category: c } });
+    }
+
+    const result = (await mem.search("m", {
+      profile: {
+        rerank: {
+          strategy: "diversity",
+          diversityField: "category",
+          limit: 3,
+        },
+      },
+      filters: { user_id: userId },
+      topK: 5,
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank.applied).toBe(true);
+    expect(result.explain.rerank.strategy).toBe("diversity");
+    expect(result.explain.rerank.config.diversityField).toBe("category");
+    expect(result.explain.rerank.config.limit).toBe(3);
+    expect(result.results.length).toBeLessThanOrEqual(3);
+  });
+
+  test("call-time rerank fully overrides profile rerank (bool > object)", async () => {
+    const mem = createMemory();
+    const userId = `rerank_override_${Date.now()}`;
+    await mem.add("t", { userId });
+
+    mem.registerSearchProfile("decay-profile", {
+      rerank: { strategy: "timestamp_decay", decayHalfLifeHours: 48 },
+    });
+
+    const result = (await mem.search("t", {
+      profile: "decay-profile",
+      rerank: false,
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank.applied).toBe(false);
+    expect(result.explain.rerank.strategy).toBe("score");
+    expect(result.explain.overriddenFields).toContain("rerank");
+  });
+
+  test("explain always includes hybridWeights defaults even without profile", async () => {
+    const mem = createMemory();
+    const userId = `hw_defaults_${Date.now()}`;
+    await mem.add("t", { userId });
+
+    const result = (await mem.search("t", {
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.hybridWeights).toBeDefined();
+    expect(typeof result.explain.hybridWeights.semanticWeight).toBe("number");
+    expect(typeof result.explain.hybridWeights.bm25Weight).toBe("number");
+    expect(typeof result.explain.hybridWeights.entityBoostWeight).toBe(
+      "number",
+    );
+  });
+});

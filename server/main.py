@@ -16,7 +16,7 @@ from errors import (
     upstream_error,
     upstream_error_handler,
 )
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from models import RequestLog, User
@@ -136,6 +136,9 @@ DEFAULT_CONFIG = {
     "history_db_path": HISTORY_DB_PATH,
     "lifecycle_policies": {
         "default": {"default_ttl_days": None, "enabled": True},
+        "users": {},
+        "agents": {},
+        "categories": {},
     },
 }
 
@@ -195,6 +198,10 @@ class MemoryCreate(BaseModel):
         None,
         description="Explicit TTL in days. Takes precedence over default policies but lower than `expires`.",
     )
+    category: Optional[str] = Field(
+        None,
+        description="Optional category name for per-category lifecycle policy resolution.",
+    )
 
 
 class MemoryUpdate(BaseModel):
@@ -208,6 +215,10 @@ class MemoryUpdate(BaseModel):
         None,
         description="New TTL in days (relative to now).",
     )
+    category: Optional[str] = Field(
+        None,
+        description="Re-resolve per-category lifecycle policy on update.",
+    )
 
 
 class SearchRequest(BaseModel):
@@ -219,6 +230,10 @@ class SearchRequest(BaseModel):
     top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
     explain: Optional[bool] = Field(None, description="Include score details for each search result.")
+    ttl_state: Optional[str] = Field(
+        None,
+        description='Filter by TTL state: "active", "expiring_soon", "expired", "permanent".',
+    )
 
 
 class GenerateInstructionsRequest(BaseModel):
@@ -416,6 +431,27 @@ def _serialize_memory(row: Any) -> Dict[str, Any]:
     return item
 
 
+def _filter_by_ttl_state(
+    items: list[dict] | dict,
+    ttl_state: Optional[str],
+) -> list[dict] | dict:
+    if not ttl_state:
+        return items
+    valid = {"active", "expiring_soon", "expired", "permanent"}
+    if ttl_state not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid ttl_state. Must be one of: {sorted(valid)}.",
+        )
+    # Support both list-of-items and {"results": [...]} envelopes used by SDK get_all/search
+    if isinstance(items, dict) and "results" in items and isinstance(items["results"], list):
+        items["results"] = [it for it in items["results"] if it.get("ttl_state") == ttl_state]
+        return items
+    if isinstance(items, list):
+        return [it for it in items if it.get("ttl_state") == ttl_state]
+    return items
+
+
 def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:
     results = get_memory_instance().vector_store.list(top_k=limit)
     rows = results[0] if results and isinstance(results, list) and isinstance(results[0], list) else results or []
@@ -428,6 +464,10 @@ def get_all_memories(
     user_id: Optional[str] = None,
     run_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    ttl_state: Optional[str] = Query(
+        None,
+        description='Filter by TTL state: "active", "expiring_soon", "expired", "permanent".',
+    ),
     _auth=Depends(verify_auth),
 ):
     """Retrieve stored memories. Lists all memories when no identifier is provided (admin only)."""
@@ -436,11 +476,13 @@ def get_all_memories(
             auth_type = getattr(request.state, "auth_type", "none")
             if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
                 raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
-            return _list_all_memories()
-        filters = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
-        }
-        return get_memory_instance().get_all(filters=filters)
+            result = _list_all_memories()
+        else:
+            filters = {
+                k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
+            }
+            result = get_memory_instance().get_all(filters=filters)
+        return _filter_by_ttl_state(result, ttl_state)
     except HTTPException:
         raise
     except Exception:
@@ -480,7 +522,8 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["threshold"] = search_req.threshold
         if search_req.explain is not None:
             params["explain"] = search_req.explain
-        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
+        result = get_memory_instance().search(query=search_req.query, filters=filters, **params)
+        return _filter_by_ttl_state(result, search_req.ttl_state)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -499,9 +542,100 @@ def update_memory(memory_id: str, updated_memory: MemoryUpdate, _auth=Depends(ve
             metadata=updated_memory.metadata,
             expires=updated_memory.expires,
             ttl_days=updated_memory.ttl_days,
+            category=updated_memory.category,
         )
     except Exception:
         raise upstream_error()
+
+
+@app.get("/lifecycle-policies", summary="Get current lifecycle retention policies")
+def get_lifecycle_policies(_auth=Depends(verify_auth)):
+    """Return the full lifecycle policy hierarchy (default/workspace + per-user/agent/category maps)."""
+    cfg = get_current_config()
+    policies = cfg.get("lifecycle_policies", {})
+    return {
+        "default": policies.get("default") or {"default_ttl_days": None, "enabled": True},
+        "workspace": policies.get("workspace"),
+        "users": policies.get("users") or {},
+        "agents": policies.get("agents") or {},
+        "categories": policies.get("categories") or {},
+    }
+
+
+class LifecyclePolicyUpdateRequest(BaseModel):
+    """Request to set a lifecycle policy at a specific scope.
+
+    scope: "default" | "workspace" | "user" | "agent" | "category"
+    scope_id: required when scope is "user" | "agent" | "category".
+    policy: the policy to set. Use {"default_ttl_days": null, "enabled": false} to disable.
+    """
+
+    scope: str = Field(..., description='Policy scope: "default", "workspace", "user", "agent", or "category".')
+    scope_id: Optional[str] = Field(
+        None, description="Required for per-entity scopes: user_id, agent_id, or category name."
+    )
+    policy: Dict[str, Any] = Field(
+        ...,
+        description='Policy object with keys "default_ttl_days" (int or null) and "enabled" (bool).',
+    )
+    remove: Optional[bool] = Field(
+        False,
+        description="If true, remove a per-user/agent/category policy entry (ignored for default/workspace).",
+    )
+
+
+@app.put("/lifecycle-policies", summary="Upsert or remove a lifecycle policy")
+def set_lifecycle_policy(req: LifecyclePolicyUpdateRequest, _auth=Depends(require_admin)):
+    """Update the lifecycle policy at a given scope. Admin role required."""
+    VALID_SCOPES = {"default", "workspace", "user", "agent", "category"}
+    ENTITY_SCOPES = {"user", "agent", "category"}
+    scope = req.scope.lower()
+    if scope not in VALID_SCOPES:
+        raise HTTPException(status_code=400, detail=f"Invalid scope. Must be one of: {sorted(VALID_SCOPES)}.")
+    if scope in ENTITY_SCOPES and not req.scope_id:
+        raise HTTPException(status_code=400, detail=f"scope_id is required for scope '{scope}'.")
+
+    current_cfg = get_current_config()
+    policies = dict(current_cfg.get("lifecycle_policies", {}) or {})
+    # Ensure all required keys are present
+    policies.setdefault("default", {"default_ttl_days": None, "enabled": True})
+    policies.setdefault("users", {})
+    policies.setdefault("agents", {})
+    policies.setdefault("categories", {})
+
+    # Validate policy shape
+    if not req.remove and scope not in {"default", "workspace"} or not req.remove:
+        pol = req.policy or {}
+        if "enabled" in pol and not isinstance(pol["enabled"], bool):
+            raise HTTPException(status_code=400, detail="policy.enabled must be a boolean.")
+        if "default_ttl_days" in pol and pol["default_ttl_days"] is not None:
+            if not isinstance(pol["default_ttl_days"], int) or pol["default_ttl_days"] <= 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="policy.default_ttl_days must be a positive integer or null.",
+                )
+
+    if scope == "default":
+        existing = dict(policies["default"])
+        existing.update(req.policy or {})
+        policies["default"] = existing
+    elif scope == "workspace":
+        existing = dict(policies.get("workspace") or {})
+        existing.update(req.policy or {})
+        policies["workspace"] = existing
+    else:
+        key_map = {"user": "users", "agent": "agents", "category": "categories"}
+        bucket = key_map[scope]
+        if req.remove:
+            if req.scope_id in policies[bucket]:
+                del policies[bucket][req.scope_id]
+        else:
+            existing = dict(policies[bucket].get(req.scope_id) or {})
+            existing.update(req.policy or {})
+            policies[bucket][req.scope_id] = existing
+
+    update_config({"lifecycle_policies": policies})
+    return {"message": "Lifecycle policy updated successfully", "lifecycle_policies": policies}
 
 
 @app.get("/memories/{memory_id}/history", summary="Get memory history")

@@ -53,7 +53,14 @@ event_app = typer.Typer(
     no_args_is_help=True,
     rich_markup_mode="rich",
 )
-# entity_app and event_app registered after Memory commands to control panel ordering
+
+policy_app = typer.Typer(
+    name="policy",
+    help="Inspect and manage memory lifecycle/retention policies.",
+    no_args_is_help=True,
+    rich_markup_mode="rich",
+)
+# entity_app / event_app / policy_app registered after Memory commands to control panel ordering
 
 
 # ── Validated user identity (set by _get_backend_and_config) ──────────────
@@ -871,8 +878,123 @@ def event_status(
     cmd_event_status(backend, event_id, output=output)
 
 
+# ── Policy: show current lifecycle policies ──
+@policy_app.command("show")
+def policy_show(
+    output: str = typer.Option(
+        "table", "--output", "-o", help="Output: table, json, quiet.", rich_help_panel="Output"
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="Override API key.",
+        envvar="MEM0_API_KEY",
+        rich_help_panel="Connection",
+    ),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
+    ),
+) -> None:
+    """Display the current memory lifecycle retention policy hierarchy.
+
+    Examples:
+      mem0 policy show
+      mem0 policy show -o json
+    """
+    from mem0_cli.commands.policy import cmd_policy_show
+
+    backend = _get_backend(api_key, base_url)
+    cmd_policy_show(backend, output=output)
+
+
+# ── Policy: set/upsert/remove a lifecycle policy at a specific scope ──
+@policy_app.command("set")
+def policy_set(
+    scope: str = typer.Argument(
+        ..., help="Scope: default, workspace, user, agent, category."
+    ),
+    scope_id: str | None = typer.Argument(
+        None, help="Entity ID: required when scope is user, agent, or category."
+    ),
+    ttl_days: int | None = typer.Option(
+        None,
+        "--ttl-days",
+        help="Default retention in days for this scope. Omit to leave unchanged.",
+    ),
+    permanent: bool = typer.Option(
+        False,
+        "--permanent",
+        help="Set default_ttl_days to None (memories permanent at this scope).",
+    ),
+    enabled: bool | None = typer.Option(
+        None, "--enabled/--disabled", help="Enable or disable the policy at this scope."
+    ),
+    remove: bool = typer.Option(
+        False,
+        "--remove",
+        help="Remove a per-user/agent/category policy entry (falls back to lower scopes).",
+    ),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="Override API key.",
+        envvar="MEM0_API_KEY",
+        rich_help_panel="Connection",
+    ),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
+    ),
+) -> None:
+    """Configure a memory lifecycle retention policy for a given scope.
+
+    Policy precedence (highest → lowest):
+      request → category → user → agent → workspace → default → permanent
+
+    Examples:
+      mem0 policy set default --ttl-days 90
+      mem0 policy set workspace --ttl-days 60
+      mem0 policy set user alice --ttl-days 30
+      mem0 policy set category sensitive --ttl-days 7
+      mem0 policy set user alice --remove
+      mem0 policy set default --permanent
+    """
+    from mem0_cli.commands.policy import cmd_policy_set
+
+    VALID = {"default", "workspace", "user", "agent", "category"}
+    if scope.lower() not in VALID:
+        err_console.print(f"[bold red]✗[/bold red] Invalid scope '{scope}'. Must be one of: {sorted(VALID)}")
+        raise typer.Exit(1)
+
+    if scope.lower() in {"user", "agent", "category"} and not scope_id and not remove:
+        err_console.print(
+            f"[bold red]✗[/bold red] Scope '{scope}' requires an entity ID (second argument)."
+        )
+        raise typer.Exit(1)
+
+    # Distinguish "user didn't pass ttl_days" from "user passed --permanent"
+    effective_ttl = None if (permanent or ttl_days is None) else ttl_days
+    ttl_was_provided = permanent or ttl_days is not None
+
+    backend = _get_backend(api_key, base_url)
+    cmd_policy_set(
+        backend,
+        scope=scope.lower(),
+        scope_id=scope_id,
+        default_ttl_days=effective_ttl if ttl_was_provided else None,
+        enabled=enabled,
+        remove=remove,
+        permanent=permanent,
+        ttl_was_provided=ttl_was_provided,
+        output=output,
+    )
+
+
 # ── Event subgroup ──
 app.add_typer(event_app, name="event", rich_help_panel="Management")
+app.add_typer(policy_app, name="policy", rich_help_panel="Management")
 
 
 # ── Management commands ───────────────────────────────────────────────────

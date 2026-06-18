@@ -260,6 +260,7 @@ class PlatformBackend(Backend):
         *,
         expires: str | None = None,
         ttl_days: int | None = None,
+        category: str | None = None,
     ) -> dict:
         payload: dict[str, Any] = {}
         if content:
@@ -270,6 +271,8 @@ class PlatformBackend(Backend):
             payload["expiration_date"] = expires
         if ttl_days is not None:
             payload["ttl_days"] = ttl_days
+        if category:
+            payload["category"] = category
         payload["source"] = "CLI"
         return self._request("PUT", f"/v1/memories/{memory_id}/", json=payload)
 
@@ -368,6 +371,28 @@ class PlatformBackend(Backend):
 
     def get_event(self, event_id: str) -> dict:
         return self._request("GET", f"/v1/event/{event_id}/")
+
+    def get_lifecycle_policies(self) -> dict:
+        return self._request("GET", "/lifecycle-policies/")
+
+    def set_lifecycle_policy(
+        self,
+        *,
+        scope: str,
+        scope_id: str | None = None,
+        default_ttl_days: int | None = None,
+        enabled: bool | None = None,
+        remove: bool = False,
+    ) -> dict:
+        policy: dict[str, Any] = {}
+        if default_ttl_days is not None:
+            policy["default_ttl_days"] = default_ttl_days
+        if enabled is not None:
+            policy["enabled"] = enabled
+        payload: dict[str, Any] = {"scope": scope, "policy": policy, "remove": remove}
+        if scope_id is not None:
+            payload["scope_id"] = scope_id
+        return self._request("PUT", "/lifecycle-policies/", json=payload)
 
 
 class AuthError(Exception):

@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Clock, Trash2 } from "lucide-react";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
@@ -82,7 +82,9 @@ function ttlSourceLabel(source: string | null | undefined): string {
 
 export default function MemoriesPage() {
   const [userId, setUserId] = useState("");
+  const [appliedUserId, setAppliedUserId] = useState("");
   const [ttlFilter, setTtlFilter] = useState<TtlFilter>("all");
+  const [appliedTtlFilter, setAppliedTtlFilter] = useState<TtlFilter>("all");
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
   const [memoryToDelete, setMemoryToDelete] = useState<Memory | null>(null);
   const [page, setPage] = useState(0);
@@ -94,7 +96,9 @@ export default function MemoriesPage() {
     refetch,
   } = useApiQuery<Memory[]>(
     async () => {
-      const params = userId.trim() ? { user_id: userId.trim() } : undefined;
+      const params: Record<string, string> = {};
+      if (appliedUserId.trim()) params.user_id = appliedUserId.trim();
+      if (appliedTtlFilter !== "all") params.ttl_state = appliedTtlFilter;
       const res = await api.get(MEMORY_ENDPOINTS.BASE, { params });
       const raw = res.data?.results ?? res.data ?? [];
       return Array.isArray(raw) ? raw : [];
@@ -102,13 +106,13 @@ export default function MemoriesPage() {
     { errorToast: "Failed to load memories", initialData: [] },
   );
 
-  const filteredMemories = useMemo(() => {
-    if (ttlFilter === "all") return memories;
-    return memories.filter((m) => m.ttl_state === ttlFilter);
-  }, [memories, ttlFilter]);
+  // Re-fetch whenever applied filters change
+  useEffect(() => {
+    void refetch();
+  }, [appliedUserId, appliedTtlFilter, refetch]);
 
-  const totalPages = Math.ceil(filteredMemories.length / PAGE_SIZE);
-  const paginatedMemories = filteredMemories.slice(
+  const totalPages = Math.ceil(memories.length / PAGE_SIZE);
+  const paginatedMemories = memories.slice(
     page * PAGE_SIZE,
     (page + 1) * PAGE_SIZE,
   );
@@ -186,7 +190,7 @@ export default function MemoriesPage() {
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               setPage(0);
-              refetch();
+              setAppliedUserId(userId);
             }
           }}
           className="w-64"
@@ -194,7 +198,9 @@ export default function MemoriesPage() {
         <Select
           value={ttlFilter}
           onValueChange={(v) => {
-            setTtlFilter(v as TtlFilter);
+            const nv = v as TtlFilter;
+            setTtlFilter(nv);
+            setAppliedTtlFilter(nv);
             setPage(0);
           }}
         >
@@ -213,11 +219,11 @@ export default function MemoriesPage() {
 
       {isLoading ? (
         <TableSkeleton rows={5} columns={5} />
-      ) : filteredMemories.length === 0 ? (
+      ) : memories.length === 0 ? (
         <EmptyState
           title={
-            ttlFilter !== "all"
-              ? `No ${ttlFilter} memories`
+            appliedTtlFilter !== "all"
+              ? `No ${appliedTtlFilter} memories`
               : "No memories yet"
           }
           description="Create your first memory by sending a POST /memories request."
@@ -256,8 +262,8 @@ export default function MemoriesPage() {
             <div className="flex items-center justify-between text-sm text-onSurface-default-tertiary">
               <span>
                 {page * PAGE_SIZE + 1}–
-                {Math.min((page + 1) * PAGE_SIZE, filteredMemories.length)} of{" "}
-                {filteredMemories.length}
+                {Math.min((page + 1) * PAGE_SIZE, memories.length)} of{" "}
+                {memories.length}
               </span>
               <div className="flex gap-2">
                 <Button

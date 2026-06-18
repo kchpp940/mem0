@@ -669,6 +669,7 @@ class Memory(MemoryBase):
         prompt: Optional[str] = None,
         expires: Optional[Any] = None,
         ttl_days: Optional[int] = None,
+        category: Optional[str] = None,
     ):
         """
         Create a new memory.
@@ -696,6 +697,8 @@ class Memory(MemoryBase):
                 or datetime). Takes highest precedence over any policy.
             ttl_days (int, optional): Explicit TTL in days. Takes precedence over policies
                 but lower than `expires`.
+            category (str, optional): Category name for lifecycle policy resolution
+                (per-category policies take precedence over user/agent/workspace/default).
 
         Returns:
             dict: A dictionary containing the result of the memory addition operation, typically
@@ -732,14 +735,34 @@ class Memory(MemoryBase):
             if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
             else None
         )
+        user_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.users[user_id].model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "users", None) and user_id and user_id in lifecycle_cfg.users
+            else None
+        )
+        agent_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.agents[agent_id].model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "agents", None) and agent_id and agent_id in lifecycle_cfg.agents
+            else None
+        )
+        category_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.categories[category].model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "categories", None) and category and category in lifecycle_cfg.categories
+            else None
+        )
         effective_expires_at, effective_ttl_source = resolve_expiration(
             request_expires=expires,
             request_ttl_days=ttl_days,
+            category_policy=category_policy,
+            user_policy=user_policy,
+            agent_policy=agent_policy,
             workspace_policy=workspace_policy,
             default_policy=default_policy,
         )
         if effective_expires_at is not None:
             processed_metadata["expires_at"] = effective_expires_at
+            processed_metadata["ttl_source"] = effective_ttl_source.value
+        elif category_policy or user_policy or agent_policy or workspace_policy or default_policy:
             processed_metadata["ttl_source"] = effective_ttl_source.value
 
         if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
@@ -1727,6 +1750,7 @@ class Memory(MemoryBase):
         metadata: Optional[Dict[str, Any]] = None,
         expires: Optional[Any] = None,
         ttl_days: Optional[int] = None,
+        category: Optional[str] = None,
     ):
         """
         Update a memory by ID.
@@ -1738,6 +1762,8 @@ class Memory(MemoryBase):
             expires (str | datetime, optional): New explicit expiration date (ISO 8601
                 string or datetime). Pass a falsy value other than None to make permanent.
             ttl_days (int, optional): New TTL in days (relative to now).
+            category (str, optional): Re-resolve per-category lifecycle policy for this
+                memory (if no explicit request-level override is provided).
 
         Returns:
             dict: Success message indicating the memory was updated.
@@ -1748,8 +1774,17 @@ class Memory(MemoryBase):
         """
         capture_event("mem0.update", self, {"memory_id": memory_id, "sync_type": "sync"})
 
+        _existing_user_id = None
+        _existing_agent_id = None
         if expires is not None or ttl_days is not None:
             from mem0.memory.lifecycle import resolve_expiration
+
+            existing = self.vector_store.get(vector_id=memory_id)
+            existing_payload = getattr(existing, "payload", None) or {} if existing else {}
+            _existing_user_id = existing_payload.get("user_id")
+            _existing_agent_id = existing_payload.get("agent_id")
+            if not category:
+                category = existing_payload.get("category")
 
             lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
             default_policy = (
@@ -1762,7 +1797,24 @@ class Memory(MemoryBase):
                 if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
                 else None
             )
-            # If expires is explicitly falsy (e.g. empty string) but not None → make permanent
+            user_policy = (
+                LifecyclePolicy.from_dict(lifecycle_cfg.users[_existing_user_id].model_dump())
+                if lifecycle_cfg and getattr(lifecycle_cfg, "users", None)
+                   and _existing_user_id and _existing_user_id in lifecycle_cfg.users
+                else None
+            )
+            agent_policy = (
+                LifecyclePolicy.from_dict(lifecycle_cfg.agents[_existing_agent_id].model_dump())
+                if lifecycle_cfg and getattr(lifecycle_cfg, "agents", None)
+                   and _existing_agent_id and _existing_agent_id in lifecycle_cfg.agents
+                else None
+            )
+            category_policy = (
+                LifecyclePolicy.from_dict(lifecycle_cfg.categories[category].model_dump())
+                if lifecycle_cfg and getattr(lifecycle_cfg, "categories", None)
+                   and category and category in lifecycle_cfg.categories
+                else None
+            )
             if expires is not None and not expires:
                 effective_expires_at = None
                 effective_ttl_source_value = "default"
@@ -1770,6 +1822,9 @@ class Memory(MemoryBase):
                 effective_expires_at, effective_ttl_source = resolve_expiration(
                     request_expires=expires,
                     request_ttl_days=ttl_days,
+                    category_policy=category_policy,
+                    user_policy=user_policy,
+                    agent_policy=agent_policy,
                     workspace_policy=workspace_policy,
                     default_policy=default_policy,
                 )

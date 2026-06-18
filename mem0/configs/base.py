@@ -25,7 +25,15 @@ class LifecyclePolicyConfig(BaseModel):
 
 
 class LifecyclePoliciesConfig(BaseModel):
-    """Hierarchy of lifecycle policies (workspace > category > user > agent > default)."""
+    """Hierarchy of lifecycle policies.
+
+    Scope precedence (highest → lowest):
+      request > category > user > agent > workspace > default
+
+    - `default`, `workspace`: singleton policy dicts (single policy per scope).
+    - `users`, `agents`, `categories`: keyed by entity/category ID to the
+      per-entity policy. Omitted keys fall back to the next lower scope.
+    """
 
     default: LifecyclePolicyConfig = Field(
         default_factory=LifecyclePolicyConfig,
@@ -34,6 +42,18 @@ class LifecyclePoliciesConfig(BaseModel):
     workspace: Optional[LifecyclePolicyConfig] = Field(
         None,
         description="Workspace-wide default policy (if applicable).",
+    )
+    users: Dict[str, LifecyclePolicyConfig] = Field(
+        default_factory=dict,
+        description="Per-user policies keyed by user_id.",
+    )
+    agents: Dict[str, LifecyclePolicyConfig] = Field(
+        default_factory=dict,
+        description="Per-agent policies keyed by agent_id.",
+    )
+    categories: Dict[str, LifecyclePolicyConfig] = Field(
+        default_factory=dict,
+        description="Per-category policies keyed by category name.",
     )
 
 # Set up the directory path

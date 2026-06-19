@@ -61,6 +61,7 @@ export interface BatchImportOptions {
 	cursor?: number;
 	batchSize?: number;
 	infer?: boolean;
+	batchId?: string;
 }
 
 export interface BatchImportResponse {

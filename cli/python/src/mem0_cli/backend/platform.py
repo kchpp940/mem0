@@ -352,16 +352,20 @@ class PlatformBackend(Backend):
         self,
         memories: list[dict],
         *,
+        batch_id: str | None = None,
         cursor: int = 0,
         batch_size: int = 100,
         infer: bool = True,
     ) -> dict:
-        payload = {
+        payload: dict[str, Any] = {
             "memories": memories,
             "cursor": cursor,
             "batch_size": batch_size,
             "infer": infer,
+            "source": "CLI",
         }
+        if batch_id:
+            payload["batch_id"] = batch_id
         return self._request("POST", "/v1/memories/batch/import", json=payload)
 
     def export_memories(

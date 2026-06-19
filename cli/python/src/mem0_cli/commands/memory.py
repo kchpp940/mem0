@@ -677,6 +677,68 @@ def cmd_delete_all(
             print_success(console, f"All matching memories deleted ({_elapsed:.2f}s)")
 
 
+# ── Batch state local cache (for resumption across runs) ───────────────────
+
+
+def _get_batch_cache_dir() -> Path:
+    """Return the directory for storing local batch metadata."""
+    default = Path.home() / ".mem0"
+    mem0_dir = Path(os.environ.get("MEM0_DIR", default))
+    mem0_dir.mkdir(parents=True, exist_ok=True)
+    return mem0_dir
+
+
+def _get_last_batch_file() -> Path:
+    """Return the path to the last-import batch cache file."""
+    return _get_batch_cache_dir() / "last_import_batch.json"
+
+
+def _save_last_batch(
+    *,
+    batch_id: str,
+    cursor: int,
+    total: int,
+    file_path: str,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    app_id: str | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Persist the latest batch_id + cursor to a local cache file for easy resumption."""
+    try:
+        payload: dict[str, Any] = {
+            "batch_id": batch_id,
+            "cursor": cursor,
+            "total": total,
+            "file_path": file_path,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "app_id": app_id,
+            "run_id": run_id,
+            "saved_at": _utcnow_iso(),
+        }
+        _get_last_batch_file().write_text(json.dumps(payload, indent=2))
+    except Exception:  # pragma: no cover - best effort only
+        pass
+
+
+def _load_last_batch() -> dict[str, Any] | None:
+    """Load the last-saved batch metadata if it exists, else None."""
+    path = _get_last_batch_file()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return None
+
+
+def _utcnow_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ── Import / Export helpers ────────────────────────────────────────────────
 
 
@@ -828,6 +890,7 @@ def cmd_import(
     batch_size: int = 100,
     infer: bool = True,
     cursor: int = 0,
+    batch_id: str | None = None,
     resume: bool = False,
     dry_run: bool = False,
     output: str = "text",
@@ -835,7 +898,7 @@ def cmd_import(
     """Import memories from JSONL, JSON, or CSV files.
 
     Supports field mapping, category assignment, user/agent/run scope,
-    batch processing with resumable cursor, and dry-run preview.
+    batch processing with resumable batch_id + cursor, and dry-run preview.
     """
     from mem0_cli.state import is_agent_mode, set_current_command
 
@@ -901,6 +964,7 @@ def cmd_import(
                 "total": total,
                 "batch_size": batch_size,
                 "cursor": cursor,
+                "batch_id": batch_id,
                 "infer": infer,
                 "field_map": mapping,
                 "items": items[:10],
@@ -930,21 +994,39 @@ def cmd_import(
         console.print()
         print_info(console, f"Total items: {total}")
         print_info(console, f"Batch size: {batch_size}")
+        if batch_id:
+            print_info(console, f"Existing batch ID: {batch_id}")
         if mapping:
             print_info(console, f"Field mapping: {mapping}")
         print_info(console, "No changes made (dry run).")
         return
 
-    # Resume from cursor
-    if resume and cursor > 0:
-        print_info(console, f"Resuming from cursor: {cursor}")
+    # Resume: load cached batch metadata when --resume is set and IDs not explicitly provided
+    cached = _load_last_batch() if resume else None
+    effective_batch_id = batch_id
+    effective_cursor = cursor
+
+    if resume:
+        if not effective_batch_id and cached and cached.get("batch_id"):
+            effective_batch_id = cached["batch_id"]
+        if not effective_cursor and cached and cached.get("cursor"):
+            effective_cursor = int(cached["cursor"])
+
+    if effective_batch_id or effective_cursor:
+        parts = []
+        if effective_batch_id:
+            parts.append(f"batch_id={effective_batch_id}")
+        if effective_cursor:
+            parts.append(f"cursor={effective_cursor}")
+        print_info(console, f"Resuming import ({', '.join(parts)})")
 
     _start = _time.perf_counter()
     total_success = 0
     total_failed = 0
     all_successful: list[dict[str, Any]] = []
     all_failed: list[dict[str, Any]] = []
-    current_cursor = cursor
+    current_cursor = effective_cursor
+    final_batch_id = effective_batch_id
 
     with Progress(
         SpinnerColumn(),
@@ -954,7 +1036,11 @@ def cmd_import(
         TimeElapsedColumn(),
         console=err_console,
     ) as progress:
-        task = progress.add_task(f"Importing {total} memories...", total=total, completed=cursor)
+        task = progress.add_task(
+            f"Importing {total} memories...",
+            total=total,
+            completed=current_cursor,
+        )
 
         while current_cursor < total:
             batch_end = min(current_cursor + batch_size, total)
@@ -963,13 +1049,32 @@ def cmd_import(
             try:
                 result = backend.batch_import(
                     batch_items,
+                    batch_id=final_batch_id,
                     cursor=current_cursor,
                     batch_size=batch_size,
                     infer=infer,
                 )
             except Exception as e:
+                # Save cached state before exiting so user can resume easily
+                if final_batch_id:
+                    _save_last_batch(
+                        batch_id=final_batch_id,
+                        cursor=current_cursor,
+                        total=total,
+                        file_path=str(file_path),
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        app_id=app_id,
+                        run_id=run_id,
+                    )
                 print_error(err_console, f"Batch import failed at cursor {current_cursor}: {e}")
-                print_info(console, f"To resume, run with --resume --cursor {current_cursor}")
+                if final_batch_id:
+                    print_info(
+                        console,
+                        f"To resume, run with --resume (last batch_id={final_batch_id}, cursor={current_cursor})",
+                    )
+                else:
+                    print_info(console, f"To resume, run with --resume --cursor {current_cursor}")
                 raise typer.Exit(1) from None
 
             batch_success = result.get("success_count", 0)
@@ -979,6 +1084,7 @@ def cmd_import(
             all_successful.extend(result.get("successful", []))
             all_failed.extend(result.get("failed", []))
             current_cursor = result.get("cursor", batch_end)
+            final_batch_id = result.get("batch_id") or final_batch_id
 
             progress.update(task, completed=current_cursor)
 
@@ -989,9 +1095,22 @@ def cmd_import(
 
     _elapsed = _time.perf_counter() - _start
 
+    # Persist batch metadata for easy resumption
+    if final_batch_id:
+        _save_last_batch(
+            batch_id=final_batch_id,
+            cursor=current_cursor,
+            total=total,
+            file_path=str(file_path),
+            user_id=user_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            run_id=run_id,
+        )
+
     if output in ("json", "agent"):
         data = {
-            "batch_id": result.get("batch_id") if "result" in locals() else None,
+            "batch_id": final_batch_id,
             "total": total,
             "processed": current_cursor,
             "success_count": total_success,
@@ -1023,12 +1142,24 @@ def cmd_import(
 
     console.print()
     print_scope(console, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    print_success(
-        console,
-        f"Import complete — {total_success} succeeded, {total_failed} failed ({_elapsed:.2f}s)",
-    )
+    if final_batch_id:
+        print_success(
+            console,
+            f"Import complete — {total_success} succeeded, {total_failed} failed ({_elapsed:.2f}s)",
+        )
+        print_info(console, f"Batch ID: {final_batch_id}")
+    else:
+        print_success(
+            console,
+            f"Import complete — {total_success} succeeded, {total_failed} failed ({_elapsed:.2f}s)",
+        )
 
-    if current_cursor < total:
+    if current_cursor < total and final_batch_id:
+        print_info(
+            console,
+            f"To resume, run with --resume (batch_id={final_batch_id}, cursor={current_cursor})",
+        )
+    elif current_cursor < total:
         print_info(console, f"To resume, run with --resume --cursor {current_cursor}")
 
     if all_failed and output == "text":
@@ -1041,6 +1172,78 @@ def cmd_import(
             console.print(f"  [{DIM_COLOR}]#{idx}:[/] {err} — {mem}...")
         if len(all_failed) > 10:
             console.print(f"  [{DIM_COLOR}]... and {len(all_failed) - 10} more[/]")
+
+
+# ── Import status command ──────────────────────────────────────────────────
+
+
+def cmd_import_status(
+    backend: Backend,
+    batch_id: str | None = None,
+    *,
+    output: str = "text",
+) -> None:
+    """Query the persisted status of a batch import.
+
+    If no batch_id is given, the last cached import batch is used.
+    """
+    from mem0_cli.state import is_agent_mode, set_current_command
+
+    set_current_command("import-status")
+    if is_agent_mode():
+        output = "agent"
+
+    effective_batch_id = batch_id
+    if not effective_batch_id:
+        cached = _load_last_batch()
+        if cached and cached.get("batch_id"):
+            effective_batch_id = cached["batch_id"]
+            if output == "text":
+                print_info(console, f"Using last cached batch_id: {effective_batch_id}")
+        else:
+            print_error(err_console, "No batch_id provided and no cached import batch found.")
+            raise typer.Exit(1) from None
+
+    try:
+        result = backend.get_batch_status(effective_batch_id)
+    except Exception as e:
+        print_error(err_console, f"Failed to fetch batch status: {e}")
+        raise typer.Exit(1) from None
+
+    if output in ("json", "agent"):
+        format_agent_envelope(
+            console,
+            command="import-status",
+            data=result,
+            scope={"batch_id": effective_batch_id},
+        )
+        return
+
+    console.print()
+    from rich.table import Table as RichTable
+
+    table = RichTable(title=f"Batch Import Status — {effective_batch_id}", show_header=True)
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Total items", str(result.get("total", 0)))
+    table.add_row("Processed", str(result.get("processed", 0)))
+    table.add_row("Succeeded", str(result.get("success_count", 0)))
+    table.add_row("Failed", str(result.get("failed_count", 0)))
+    table.add_row("Completed", "✓ Yes" if result.get("completed") else "✗ No")
+    table.add_row("Cursor", str(result.get("cursor", 0)))
+    if result.get("created_at"):
+        table.add_row("Created at", str(result["created_at"]))
+    if result.get("updated_at"):
+        table.add_row("Updated at", str(result["updated_at"]))
+    console.print(table)
+
+    if not result.get("completed"):
+        cursor = result.get("cursor", 0)
+        console.print()
+        print_info(
+            console,
+            f"To resume this batch: mem0 import <file> --resume --batch-id {effective_batch_id} --cursor {cursor}",
+        )
 
 
 # ── Export command ────────────────────────────────────────────────────────

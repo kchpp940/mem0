@@ -404,6 +404,7 @@ export class PlatformBackend implements Backend {
 			infer: opts.infer ?? true,
 			source: "CLI",
 		};
+		if (opts.batchId) payload.batch_id = opts.batchId;
 
 		const result = (await this._request("POST", "/v1/memories/batch/import", {
 			json: payload,

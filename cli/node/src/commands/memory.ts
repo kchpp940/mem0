@@ -3,6 +3,7 @@
  */
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import Table from "cli-table3";
 import ora from "ora";
@@ -708,6 +709,52 @@ export async function cmdDeleteAll(
 	}
 }
 
+// ── Batch cache helpers ────────────────────────────────────────────────────
+
+interface LastBatchCache {
+	batch_id: string;
+	cursor: number;
+	total: number;
+	file_path: string;
+	user_id?: string;
+	agent_id?: string;
+	app_id?: string;
+	run_id?: string;
+	saved_at: string;
+}
+
+function _getBatchCacheDir(): string {
+	return path.join(os.homedir(), ".mem0");
+}
+
+function _getLastBatchFile(): string {
+	return path.join(_getBatchCacheDir(), "last_import_batch.json");
+}
+
+function _utcNowIso(): string {
+	return new Date().toISOString();
+}
+
+function _saveLastBatch(cache: LastBatchCache): void {
+	try {
+		const dir = _getBatchCacheDir();
+		if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(_getLastBatchFile(), JSON.stringify(cache, null, 2), "utf-8");
+	} catch {
+		/* ignore write failures */
+	}
+}
+
+function _loadLastBatch(): LastBatchCache | undefined {
+	try {
+		const file = _getLastBatchFile();
+		if (!fs.existsSync(file)) return undefined;
+		return JSON.parse(fs.readFileSync(file, "utf-8")) as LastBatchCache;
+	} catch {
+		return undefined;
+	}
+}
+
 // ── Import / Export helpers ────────────────────────────────────────────────
 
 function _parseFieldMap(fieldMapStr: string): Record<string, string> {
@@ -904,6 +951,7 @@ export async function cmdImport(
 		batchSize?: number;
 		infer?: boolean;
 		cursor?: number;
+		batchId?: string;
 		resume?: boolean;
 		dryRun?: boolean;
 		output: string;
@@ -1010,10 +1058,24 @@ export async function cmdImport(
 		return;
 	}
 
-	// Resume from cursor
-	const startCursor = opts.resume ? (opts.cursor ?? 0) : 0;
-	if (opts.resume && startCursor > 0) {
-		printInfo(`Resuming from cursor: ${startCursor}`);
+	// ── Resume logic: load from cache when --resume and no explicit cursor/batchId ──
+	let effectiveCursor = opts.cursor ?? 0;
+	let effectiveBatchId: string | undefined = opts.batchId;
+
+	if (opts.resume) {
+		const cached = _loadLastBatch();
+		if (!opts.batchId && cached?.batch_id) {
+			effectiveBatchId = cached.batch_id;
+		}
+		// Only fall back to cached cursor when user didn't pass --cursor explicitly
+		if ((opts.cursor ?? 0) === 0 && cached) {
+			effectiveCursor = cached.cursor ?? 0;
+		}
+		if (effectiveBatchId) {
+			printInfo(`Resuming batch ${effectiveBatchId} from cursor ${effectiveCursor}`);
+		} else if (effectiveCursor > 0) {
+			printInfo(`Resuming from cursor: ${effectiveCursor}`);
+		}
 	}
 
 	const start = performance.now();
@@ -1021,8 +1083,9 @@ export async function cmdImport(
 	let totalFailed = 0;
 	const allSuccessful: BatchImportResponse["successful"] = [];
 	const allFailed: BatchImportResponse["failed"] = [];
-	let currentCursor = startCursor;
+	let currentCursor = effectiveCursor;
 	const batchSize = opts.batchSize ?? 100;
+	let finalBatchId: string | undefined = effectiveBatchId;
 	let lastResult: BatchImportResponse | undefined;
 
 	const spinner = ora({
@@ -1031,17 +1094,19 @@ export async function cmdImport(
 		stream: process.stderr,
 	}).start();
 
-	while (currentCursor < total) {
-		const batchEnd = Math.min(currentCursor + batchSize, total);
-		const batchItems = items.slice(currentCursor, batchEnd);
+	try {
+		while (currentCursor < total) {
+			const batchEnd = Math.min(currentCursor + batchSize, total);
+			const batchItems = items.slice(currentCursor, batchEnd);
 
-		try {
 			const result = await backend.batchImport(batchItems, {
 				cursor: currentCursor,
 				batchSize,
 				infer: opts.infer,
+				batchId: finalBatchId,
 			});
 			lastResult = result;
+			if (!finalBatchId) finalBatchId = result.batchId;
 
 			totalSuccess += result.successCount;
 			totalFailed += result.failedCount;
@@ -1049,18 +1114,50 @@ export async function cmdImport(
 			allFailed.push(...result.failed);
 			currentCursor = result.cursor;
 
+			// Save cache after every successful batch for crash resumability
+			_saveLastBatch({
+				batch_id: finalBatchId,
+				cursor: currentCursor,
+				total,
+				file_path: filePath,
+				user_id: opts.userId,
+				agent_id: opts.agentId,
+				app_id: opts.appId,
+				run_id: opts.runId,
+				saved_at: _utcNowIso(),
+			});
+
 			const progress = Math.round((currentCursor / total) * 100);
 			spinner.text = dim(
 				`Importing... ${currentCursor}/${total} (${progress}%) · ${totalSuccess} ok · ${totalFailed} failed`,
 			);
-		} catch (e) {
-			spinner.stop();
-			printError(
-				`Batch import failed at cursor ${currentCursor}: ${e instanceof Error ? e.message : String(e)}`,
-			);
-			printInfo(`To resume, run with --resume --cursor ${currentCursor}`);
-			process.exit(1);
 		}
+	} catch (e) {
+		spinner.stop();
+		const msg = e instanceof Error ? e.message : String(e);
+		printError(
+			`Batch import failed at cursor ${currentCursor}${finalBatchId ? ` (batch ${finalBatchId})` : ""}: ${msg}`,
+		);
+		// Save cache so --resume can pick this up even after an exception
+		if (finalBatchId) {
+			_saveLastBatch({
+				batch_id: finalBatchId,
+				cursor: currentCursor,
+				total,
+				file_path: filePath,
+				user_id: opts.userId,
+				agent_id: opts.agentId,
+				app_id: opts.appId,
+				run_id: opts.runId,
+				saved_at: _utcNowIso(),
+			});
+			printInfo(
+				`To resume the SAME batch, run: mem0 import ${filePath} --resume --batch-id ${finalBatchId}`,
+			);
+		} else {
+			printInfo(`To resume, run with --resume --cursor ${currentCursor}`);
+		}
+		process.exit(1);
 	}
 
 	spinner.stop();
@@ -1068,7 +1165,7 @@ export async function cmdImport(
 
 	if (opts.output === "agent" || opts.output === "json") {
 		const data: Record<string, unknown> = {
-			batch_id: lastResult?.batchId,
+			batch_id: finalBatchId,
 			total,
 			processed: currentCursor,
 			success_count: totalSuccess,
@@ -1101,12 +1198,19 @@ export async function cmdImport(
 		app_id: opts.appId,
 		run_id: opts.runId,
 	});
+	if (finalBatchId) printInfo(`Batch ID: ${finalBatchId}`);
 	printSuccess(
 		`Import complete — ${totalSuccess} succeeded, ${totalFailed} failed (${elapsed.toFixed(2)}s)`,
 	);
 
 	if (currentCursor < total) {
-		printInfo(`To resume, run with --resume --cursor ${currentCursor}`);
+		if (finalBatchId) {
+			printInfo(
+				`To resume the SAME batch, run: mem0 import ${filePath} --resume --batch-id ${finalBatchId}`,
+			);
+		} else {
+			printInfo(`To resume, run with --resume --cursor ${currentCursor}`);
+		}
 	}
 
 	if (allFailed.length > 0) {
@@ -1223,4 +1327,123 @@ export async function cmdExport(
 	printSuccess(
 		`Exported ${count} memories to ${outputFile} (${elapsed.toFixed(2)}s)`,
 	);
+}
+
+// ── Import status command ─────────────────────────────────────────────────
+
+export async function cmdImportStatus(
+	backend: Backend,
+	batchIdArg: string | undefined,
+	opts: { output: string },
+): Promise<void> {
+	setCurrentCommand("import-status");
+
+	let effectiveBatchId = batchIdArg;
+	if (!effectiveBatchId) {
+		const cached = _loadLastBatch();
+		if (cached?.batch_id) {
+			effectiveBatchId = cached.batch_id;
+		} else {
+			printError(
+				"No batch_id provided and no cached import found.",
+				"Pass a batch_id as argument, or run a batch import first.",
+			);
+			process.exit(1);
+		}
+	}
+
+	let status: BatchImportResponse;
+	try {
+		status = await timedStatus(`Fetching status for ${effectiveBatchId}...`, async () =>
+			backend.getBatchStatus(effectiveBatchId!),
+		);
+	} catch (e) {
+		printError(
+			`Failed to fetch batch status: ${e instanceof Error ? e.message : String(e)}`,
+		);
+		process.exit(1);
+	}
+
+	if (opts.output === "agent" || opts.output === "json") {
+		formatAgentEnvelope({
+			command: "import-status",
+			data: {
+				batch_id: status.batchId,
+				total: status.total,
+				processed: status.processed,
+				success_count: status.successCount,
+				failed_count: status.failedCount,
+				cursor: status.cursor,
+				completed: status.completed,
+				successful: status.successful,
+				failed: status.failed,
+			},
+		});
+		return;
+	}
+
+	const cached = _loadLastBatch();
+
+	console.log();
+	console.log(brand(`Batch Import Status: ${status.batchId}`));
+	console.log();
+
+	const statusTable = new Table({
+		head: [accent("Field"), accent("Value")],
+		style: { head: [], border: [] },
+		wordWrap: true,
+	});
+	statusTable.push(["Batch ID", status.batchId]);
+	statusTable.push(["Total", String(status.total)]);
+	statusTable.push(["Processed", String(status.processed)]);
+	statusTable.push([
+		success("Succeeded"),
+		success(String(status.successCount)),
+	]);
+	statusTable.push([
+		errorColor("Failed"),
+		errorColor(String(status.failedCount)),
+	]);
+	statusTable.push(["Cursor", String(status.cursor)]);
+	const pct = status.total > 0 ? Math.round((status.processed / status.total) * 100) : 0;
+	statusTable.push(["Progress", `${status.processed}/${status.total} (${pct}%)`]);
+	statusTable.push([
+		"Completed",
+		status.completed ? success("Yes") : accent("No (in progress)"),
+	]);
+	if (cached?.saved_at) statusTable.push(["Cached at", cached.saved_at]);
+	if (cached?.file_path) statusTable.push(["Source file", cached.file_path]);
+
+	console.log(statusTable.toString());
+
+	if (!status.completed) {
+		const fileHint = cached?.file_path ? ` ${cached.file_path}` : "";
+		console.log();
+		printInfo(
+			`To resume this batch: mem0 import${fileHint} --resume --batch-id ${status.batchId}`,
+		);
+	}
+
+	if (status.failed.length > 0) {
+		console.log();
+		console.log(`${errorColor("Failed Items:")}`);
+		console.log();
+		const failTable = new Table({
+			head: [accent("#"), accent("Error"), accent("Preview")],
+			colWidths: [6, 40, 50],
+			style: { head: [], border: [] },
+			wordWrap: true,
+		});
+		for (let i = 0; i < Math.min(status.failed.length, 10); i++) {
+			const f = status.failed[i];
+			const mem = (f.data?.memory ?? f.data?.text ?? "") as string;
+			const preview = mem.length > 47 ? `${mem.slice(0, 47)}...` : mem;
+			failTable.push([dim(String(f.index)), f.error, preview]);
+		}
+		console.log(failTable.toString());
+		if (status.failed.length > 10) {
+			console.log(dim(`  ... and ${status.failed.length - 10} more failures`));
+		}
+	}
+	console.log();
 }

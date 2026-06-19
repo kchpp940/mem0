@@ -1051,8 +1051,11 @@ def import_cmd(
     cursor: int = typer.Option(
         0, "--cursor", help="Start index for resuming a failed import.", rich_help_panel="Processing"
     ),
+    batch_id: str | None = typer.Option(
+        None, "--batch-id", help="Existing batch ID for resuming an import.", rich_help_panel="Processing"
+    ),
     resume: bool = typer.Option(
-        False, "--resume", help="Resume from cursor position.", rich_help_panel="Processing"
+        False, "--resume", help="Resume from cached/specified batch_id and cursor.", rich_help_panel="Processing"
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview import without making changes."
@@ -1074,13 +1077,15 @@ def import_cmd(
     """Import memories from JSONL, JSON, or CSV with field mapping and batch processing.
 
     Supports field mapping, category assignment, user/agent/run scope,
-    batch processing with resumable cursor, and dry-run preview.
+    batch processing with resumable batch_id + cursor, and dry-run preview.
+    The last batch_id and cursor are cached locally so --resume works across restarts.
 
     Examples:
       mem0 import data.jsonl --user-id alice
       mem0 import data.csv --field-map content=memory,owner=user_id -u alice
       mem0 import data.json --category preference --dry-run
-      mem0 import data.jsonl --resume --cursor 150
+      mem0 import data.jsonl --resume
+      mem0 import data.jsonl --resume --batch-id batch_abc123 --cursor 150
     """
     from mem0_cli.commands.memory import cmd_import
 
@@ -1098,10 +1103,44 @@ def import_cmd(
         batch_size=batch_size,
         infer=infer,
         cursor=cursor,
+        batch_id=batch_id,
         resume=resume,
         dry_run=dry_run,
         output=output,
     )
+
+
+@app.command("import-status", rich_help_panel="Memory")
+def import_status_cmd(
+    batch_id: str | None = typer.Argument(None, help="Batch ID to query. If omitted, the last cached import is used."),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output: text, json.", rich_help_panel="Output"
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="Override API key.",
+        envvar="MEM0_API_KEY",
+        rich_help_panel="Connection",
+    ),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
+    ),
+) -> None:
+    """Query the persisted status of a batch import.
+
+    When no batch_id is given, the batch metadata cached from your last
+    `mem0 import` invocation is used automatically.
+
+    Examples:
+      mem0 import-status
+      mem0 import-status batch_abc123
+      mem0 import-status batch_abc123 -o json
+    """
+    from mem0_cli.commands.memory import cmd_import_status
+
+    backend, _ = _get_backend_and_config(api_key, base_url)
+    cmd_import_status(backend, batch_id, output=output)
 
 
 @app.command("export", rich_help_panel="Memory")
@@ -1301,9 +1340,23 @@ def _build_help_json() -> dict:
                 "--batch-size": "Batch size for processing (default: 100).",
                 "--infer/--no-infer": "Infer facts from memory content (default: true).",
                 "--cursor": "Start index for resuming a failed import.",
-                "--resume": "Resume from cursor position.",
+                "--batch-id": "Existing batch ID for resuming an import (persisted on server).",
+                "--resume": "Resume from cached/specified batch_id and cursor (works across restarts).",
                 "--dry-run": "Preview import without making changes.",
                 "--output, -o": "Output format: text, json, quiet.",
+            },
+        },
+        "import-status": {
+            "description": "Query the persisted status of a batch import (no arg = last cached).",
+            "usage": "mem0 import-status [batch_id] [OPTIONS]",
+            "arguments": {
+                "batch_id": {
+                    "description": "Batch ID to query. If omitted, the last cached import is used.",
+                    "required": False,
+                }
+            },
+            "options": {
+                "--output, -o": "Output: text, json.",
             },
         },
         "export": {
@@ -1452,7 +1505,9 @@ def help(
         console.print("  list             List memories with optional filters")
         console.print("  update           Update a memory's text or metadata")
         console.print("  delete           Delete a memory, all memories, or an entity")
-        console.print("  import           Import memories from a JSON file")
+        console.print("  import           Import memories from JSONL/JSON/CSV (batch, field mapping, dry-run)")
+        console.print("  import-status    Query persisted status of a batch import (or last cached)")
+        console.print("  export           Export memories to JSONL with filters")
         console.print("  config           Manage configuration (show, get, set)")
         console.print("  entity           Manage entities (list, delete)")
         console.print("  event            Inspect background events (list, status)")

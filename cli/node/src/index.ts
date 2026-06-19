@@ -801,7 +801,8 @@ program
 		(v) => Number.parseInt(v),
 		0,
 	)
-	.option("--resume", "Resume from cursor position.", false)
+	.option("--batch-id <id>", "Existing batch ID for resuming an import (persisted on server).")
+	.option("--resume", "Resume from cached/specified batch_id and cursor (works across restarts).", false)
 	.option("--dry-run", "Preview import without making changes.", false)
 	.option("-o, --output <format>", "Output: text, json, quiet.", "text")
 	.option("--api-key <key>", "Override API key.")
@@ -813,7 +814,8 @@ program
 			"  $ mem0 import data.jsonl --user-id alice",
 			"  $ mem0 import data.csv --field-map content=memory,owner=user_id",
 			"  $ mem0 import data.json --dry-run",
-			"  $ mem0 import data.jsonl --resume --cursor 500",
+			"  $ mem0 import data.jsonl --resume                           # resume last cached batch",
+			"  $ mem0 import data.jsonl --resume --batch-id batch_abc123",
 		].join("\n"),
 	)
 	.action(async (filePath, opts) => {
@@ -835,10 +837,36 @@ program
 			batchSize: opts.batchSize,
 			infer: opts.infer,
 			cursor: opts.cursor,
+			batchId: opts.batchId,
 			resume: opts.resume,
 			dryRun: opts.dryRun,
 			output,
 		});
+	});
+
+program
+	.command("import-status [batchId]")
+	.description(
+		"Query the persisted status of a batch import. No arg = use last cached batch.",
+	)
+	.option("-o, --output <format>", "Output: text, json.", "text")
+	.option("--api-key <key>", "Override API key.")
+	.option("--base-url <url>", "Override API base URL.")
+	.addHelpText(
+		"after",
+		[
+			"\nExamples:",
+			"  $ mem0 import-status                                    # last cached batch",
+			"  $ mem0 import-status batch_abc123",
+			"  $ mem0 import-status batch_abc123 -o json",
+		].join("\n"),
+	)
+	.action(async (batchId, opts) => {
+		const { cmdImportStatus } = await import("./commands/memory.js");
+		const isAgent = checkAgentMode();
+		const backend = await getBackendOnly(opts.apiKey, opts.baseUrl);
+		const output = isAgent ? "agent" : opts.output;
+		await cmdImportStatus(backend, batchId, { output });
 	});
 
 program
@@ -941,8 +969,9 @@ program
 				"  delete           Delete a memory, all memories, or an entity",
 			);
 			console.log(
-				"  import           Import memories from JSONL/JSON/CSV (batch, field mapping, dry-run)",
+				"  import           Import memories from JSONL/JSON/CSV (batch, field mapping, dry-run, resume by batch_id)",
 			);
+			console.log("  import-status    Query persisted status of a batch import (or last cached)");
 			console.log("  export           Export memories to JSONL with filters");
 			console.log("  config           Manage configuration (show, get, set)");
 			console.log("  entity           Manage entities (list, delete)");

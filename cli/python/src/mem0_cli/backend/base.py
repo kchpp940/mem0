@@ -112,6 +112,7 @@ class Backend(ABC):
         self,
         memories: list[dict],
         *,
+        batch_id: str | None = None,
         cursor: int = 0,
         batch_size: int = 100,
         infer: bool = True,

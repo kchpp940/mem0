@@ -692,10 +692,7 @@ export class Memory {
     categories: string[] | undefined,
   ): Record<string, any> {
     if (!categories || categories.length === 0) return {};
-    if (categories.length === 1) {
-      return { category: categories[0] };
-    }
-    return { category: { in: categories } };
+    return { categories };
   }
 
   private _normalizeRerankConfig(

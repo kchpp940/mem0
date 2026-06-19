@@ -106,8 +106,13 @@ export class MemoryVectorStore implements VectorStore {
       return payloadValue === value;
     }
 
-    // Handle array shorthand: {"field": ["a", "b"]} treated as "in" operator
+    // Handle array shorthand: {"field": ["a", "b"]}
+    // If payload value is also an array, check for intersection (any match)
+    // Otherwise, treat as "in" operator
     if (Array.isArray(value)) {
+      if (Array.isArray(payloadValue)) {
+        return value.some((v) => payloadValue.includes(v));
+      }
       return value.includes(payloadValue);
     }
 
@@ -131,18 +136,36 @@ export class MemoryVectorStore implements VectorStore {
       return payloadValue <= value.lte;
     }
     if ("in" in value) {
-      return Array.isArray(value.in) && value.in.includes(payloadValue);
+      if (!Array.isArray(value.in)) return false;
+      if (Array.isArray(payloadValue)) {
+        return value.in.some((v: any) => payloadValue.includes(v));
+      }
+      return value.in.includes(payloadValue);
     }
     if ("nin" in value) {
-      return !Array.isArray(value.nin) || !value.nin.includes(payloadValue);
+      if (!Array.isArray(value.nin)) return true;
+      if (Array.isArray(payloadValue)) {
+        return !value.nin.some((v: any) => payloadValue.includes(v));
+      }
+      return !value.nin.includes(payloadValue);
     }
     if ("contains" in value) {
+      if (Array.isArray(payloadValue)) {
+        return payloadValue.includes(value.contains);
+      }
       return (
         typeof payloadValue === "string" &&
         payloadValue.includes(value.contains)
       );
     }
     if ("icontains" in value) {
+      if (Array.isArray(payloadValue)) {
+        return payloadValue.some(
+          (v) =>
+            typeof v === "string" &&
+            v.toLowerCase().includes(value.icontains.toLowerCase()),
+        );
+      }
       return (
         typeof payloadValue === "string" &&
         payloadValue.toLowerCase().includes(value.icontains.toLowerCase())

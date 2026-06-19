@@ -1013,12 +1013,12 @@ def cmd_import(
             effective_cursor = int(cached["cursor"])
 
     if effective_batch_id or effective_cursor:
-        parts = []
-        if effective_batch_id:
-            parts.append(f"batch_id={effective_batch_id}")
-        if effective_cursor:
-            parts.append(f"cursor={effective_cursor}")
-        print_info(console, f"Resuming import ({', '.join(parts)})")
+        if effective_batch_id and effective_cursor:
+            print_info(console, f"Resuming batch {effective_batch_id} from cursor {effective_cursor}")
+        elif effective_batch_id:
+            print_info(console, f"Resuming batch {effective_batch_id}")
+        elif effective_cursor:
+            print_info(console, f"Resuming from cursor: {effective_cursor}")
 
     _start = _time.perf_counter()
     total_success = 0
@@ -1067,11 +1067,11 @@ def cmd_import(
                         app_id=app_id,
                         run_id=run_id,
                     )
-                print_error(err_console, f"Batch import failed at cursor {current_cursor}: {e}")
+                print_error(err_console, f"Batch import failed at cursor {current_cursor} (batch {final_batch_id}): {e}")
                 if final_batch_id:
                     print_info(
                         console,
-                        f"To resume, run with --resume (last batch_id={final_batch_id}, cursor={current_cursor})",
+                        f"To resume the SAME batch, run: mem0 import {file_path} --resume --batch-id {final_batch_id}",
                     )
                 else:
                     print_info(console, f"To resume, run with --resume --cursor {current_cursor}")
@@ -1157,7 +1157,7 @@ def cmd_import(
     if current_cursor < total and final_batch_id:
         print_info(
             console,
-            f"To resume, run with --resume (batch_id={final_batch_id}, cursor={current_cursor})",
+            f"To resume the SAME batch, run: mem0 import {file_path} --resume --batch-id {final_batch_id}",
         )
     elif current_cursor < total:
         print_info(console, f"To resume, run with --resume --cursor {current_cursor}")
@@ -1205,45 +1205,106 @@ def cmd_import_status(
             raise typer.Exit(1) from None
 
     try:
-        result = backend.get_batch_status(effective_batch_id)
+        status = backend.get_batch_status(effective_batch_id)
     except Exception as e:
         print_error(err_console, f"Failed to fetch batch status: {e}")
         raise typer.Exit(1) from None
 
     if output in ("json", "agent"):
+        data = {
+            "batch_id": status.get("batch_id") or status.get("batchId") or effective_batch_id,
+            "total": status.get("total", 0),
+            "processed": status.get("processed", 0),
+            "success_count": status.get("success_count", 0),
+            "failed_count": status.get("failed_count", 0),
+            "cursor": status.get("cursor", 0),
+            "completed": status.get("completed", False),
+            "successful": status.get("successful", []),
+            "failed": status.get("failed", []),
+        }
         format_agent_envelope(
             console,
             command="import-status",
-            data=result,
+            data=data,
             scope={"batch_id": effective_batch_id},
         )
         return
 
+    cached = _load_last_batch()
+    total = status.get("total", 0)
+    processed = status.get("processed", 0)
+    success_count = status.get("success_count", 0)
+    failed_count = status.get("failed_count", 0)
+    cursor = status.get("cursor", 0)
+    completed = status.get("completed", False)
+    failed_items = status.get("failed", [])
+
     console.print()
     from rich.table import Table as RichTable
+    from rich.text import Text
 
-    table = RichTable(title=f"Batch Import Status — {effective_batch_id}", show_header=True)
-    table.add_column("Field")
-    table.add_column("Value")
-    table.add_row("Total items", str(result.get("total", 0)))
-    table.add_row("Processed", str(result.get("processed", 0)))
-    table.add_row("Succeeded", str(result.get("success_count", 0)))
-    table.add_row("Failed", str(result.get("failed_count", 0)))
-    table.add_row("Completed", "✓ Yes" if result.get("completed") else "✗ No")
-    table.add_row("Cursor", str(result.get("cursor", 0)))
-    if result.get("created_at"):
-        table.add_row("Created at", str(result["created_at"]))
-    if result.get("updated_at"):
-        table.add_row("Updated at", str(result["updated_at"]))
-    console.print(table)
+    # ── Status summary table ──
+    status_table = RichTable(
+        title=f"Batch Import Status — {effective_batch_id}",
+        show_header=True,
+        header_style="bold",
+    )
+    status_table.add_column("Field", style="cyan")
+    status_table.add_column("Value")
 
-    if not result.get("completed"):
-        cursor = result.get("cursor", 0)
+    status_table.add_row("Batch ID", effective_batch_id)
+    status_table.add_row("Total", str(total))
+    status_table.add_row("Processed", str(processed))
+    status_table.add_row("Succeeded", Text(str(success_count), style="green"))
+    status_table.add_row("Failed", Text(str(failed_count), style="red"))
+    status_table.add_row("Cursor", str(cursor))
+    pct = round((processed / total) * 100) if total > 0 else 0
+    status_table.add_row("Progress", f"{processed}/{total} ({pct}%)")
+    status_table.add_row(
+        "Completed",
+        Text("Yes", style="green") if completed else Text("No (in progress)", style="yellow"),
+    )
+    if cached and cached.get("saved_at"):
+        status_table.add_row("Cached at", cached["saved_at"])
+    if cached and cached.get("file_path"):
+        status_table.add_row("Source file", cached["file_path"])
+
+    console.print(status_table)
+
+    # ── Resume hint when not completed ──
+    if not completed:
+        file_hint = f" {cached['file_path']}" if cached and cached.get("file_path") else ""
         console.print()
         print_info(
             console,
-            f"To resume this batch: mem0 import <file> --resume --batch-id {effective_batch_id} --cursor {cursor}",
+            f"To resume this batch: mem0 import{file_hint} --resume --batch-id {effective_batch_id}",
         )
+
+    # ── Failed items table ──
+    if failed_items:
+        console.print()
+        console.print(Text("Failed Items:", style="red bold"))
+        console.print()
+
+        fail_table = RichTable(show_header=True, header_style="bold")
+        fail_table.add_column("#", style="dim", width=6)
+        fail_table.add_column("Error", max_width=40)
+        fail_table.add_column("Preview", max_width=50)
+
+        for f in failed_items[:10]:
+            idx = f.get("index", "?")
+            err = f.get("error", "unknown error")
+            data = f.get("data") or {}
+            mem = data.get("memory") or data.get("text") or ""
+            preview = f"{mem[:47]}..." if len(mem) > 47 else mem
+            fail_table.add_row(str(idx), err, preview)
+
+        console.print(fail_table)
+
+        if len(failed_items) > 10:
+            console.print(Text(f"  ... and {len(failed_items) - 10} more failures", style="dim"))
+
+    console.print()
 
 
 # ── Export command ────────────────────────────────────────────────────────

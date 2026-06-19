@@ -1052,10 +1052,16 @@ def import_cmd(
         0, "--cursor", help="Start index for resuming a failed import.", rich_help_panel="Processing"
     ),
     batch_id: str | None = typer.Option(
-        None, "--batch-id", help="Existing batch ID for resuming an import.", rich_help_panel="Processing"
+        None,
+        "--batch-id",
+        help="Existing batch ID for resuming an import (persisted on server).",
+        rich_help_panel="Processing",
     ),
     resume: bool = typer.Option(
-        False, "--resume", help="Resume from cached/specified batch_id and cursor.", rich_help_panel="Processing"
+        False,
+        "--resume",
+        help="Resume from cached/specified batch_id and cursor (works across restarts).",
+        rich_help_panel="Processing",
     ),
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Preview import without making changes."
@@ -1082,10 +1088,10 @@ def import_cmd(
 
     Examples:
       mem0 import data.jsonl --user-id alice
-      mem0 import data.csv --field-map content=memory,owner=user_id -u alice
-      mem0 import data.json --category preference --dry-run
-      mem0 import data.jsonl --resume
-      mem0 import data.jsonl --resume --batch-id batch_abc123 --cursor 150
+      mem0 import data.csv --field-map content=memory,owner=user_id
+      mem0 import data.json --dry-run
+      mem0 import data.jsonl --resume                           # resume last cached batch
+      mem0 import data.jsonl --resume --batch-id batch_abc123
     """
     from mem0_cli.commands.memory import cmd_import
 

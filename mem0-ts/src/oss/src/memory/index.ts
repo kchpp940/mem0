@@ -84,6 +84,10 @@ import {
   normalizeCategoriesFilter,
   extractCategoriesFromFilters,
   normalizeFilterStructure,
+  transformCategoriesForQdrant,
+  transformCategoriesForPgvector,
+  transformCategoriesForRedis,
+  transformCategoriesForSupabase,
 } from "../utils/filter_normalizer";
 
 // Entity params that must be passed via filters - check both snake_case and camelCase
@@ -1504,6 +1508,62 @@ export class Memory {
 
     const searchStartMs = Date.now();
 
+    const vectorStoreProvider = this.config.vectorStore.provider;
+    let adapterTransformedFilters: Record<string, any> | null = null;
+    if (explain) {
+      switch (vectorStoreProvider.toLowerCase()) {
+        case "qdrant": {
+          const result = transformCategoriesForQdrant(effectiveFilters);
+          adapterTransformedFilters = {
+            filters: result.filters,
+            categoryValues: result.categoryValues,
+            queryType: "filter with $or conditions for categories",
+          };
+          break;
+        }
+        case "pgvector": {
+          const result = transformCategoriesForPgvector(effectiveFilters);
+          adapterTransformedFilters = {
+            filters: result.filters,
+            categoryValues: result.categoryValues,
+            categorySqlClause: result.categorySqlClause,
+            queryType: "JSONB ? operator for array, = for string",
+          };
+          break;
+        }
+        case "redis": {
+          const result = transformCategoriesForRedis(effectiveFilters);
+          adapterTransformedFilters = {
+            filters: result.filters,
+            categoryValues: result.categoryValues,
+            categoryTagExpr: result.categoryTagExpr,
+            queryType: "TAG filter with | OR syntax",
+          };
+          break;
+        }
+        case "supabase": {
+          const result = transformCategoriesForSupabase(effectiveFilters);
+          adapterTransformedFilters = {
+            filters: result.filters,
+            categoryValues: result.categoryValues,
+            categoryExactValue: result.categoryExactValue,
+            categoryOverlapValues: result.categoryOverlapValues,
+            queryType:
+              "JSONB ?/?| operators for array, = for string (via RPC params)",
+          };
+          break;
+        }
+        case "memory":
+        default: {
+          adapterTransformedFilters = {
+            filters: effectiveFilters,
+            queryType: "in-memory SQLite with JSON filter",
+          };
+          break;
+        }
+      }
+    }
+
     // Step 1: Preprocess query
     const queryLemmatized = lemmatizeForBm25(query);
     const queryEntities = extractEntities(query);
@@ -1757,6 +1817,12 @@ export class Memory {
           normalized: normalizeFilterStructure(mergedFilters),
           categories: categories ?? undefined,
         };
+        if (adapterTransformedFilters) {
+          result.explain.filters.adapter = {
+            provider: vectorStoreProvider,
+            transformed: adapterTransformedFilters,
+          };
+        }
       }
     }
     const searchElapsedMs = Date.now() - searchStartMs;

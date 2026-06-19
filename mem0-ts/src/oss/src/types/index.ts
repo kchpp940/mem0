@@ -45,6 +45,10 @@ export interface SearchExplainInfo {
   filters?: {
     normalized: Record<string, any>;
     categories?: string[];
+    adapter?: {
+      provider: string;
+      transformed: Record<string, any>;
+    };
   };
 }
 

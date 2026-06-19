@@ -23,6 +23,14 @@ interface VectorSearchResult {
   [key: string]: any;
 }
 
+interface VectorSearchRpcParams {
+  query_embedding: number[];
+  match_count: number;
+  filter?: SearchFilters;
+  category_exact_value?: string;
+  category_overlap_values?: string[];
+}
+
 interface SupabaseConfig extends VectorStoreConfig {
   supabaseUrl: string;
   supabaseKey: string;
@@ -56,7 +64,9 @@ create table if not exists memory_migrations (
 create or replace function match_vectors(
   query_embedding vector(1536),
   match_count int,
-  filter jsonb default '{}'::jsonb
+  filter jsonb default '{}'::jsonb,
+  category_exact_value text default null,
+  category_overlap_values text[] default null
 )
 returns table (
   id text,
@@ -75,6 +85,15 @@ begin
   where case
     when filter::text = '{}'::text then true
     else t.metadata @> filter
+  end
+  and case
+    when category_exact_value is not null then
+      (t.metadata->'categories' ? category_exact_value)
+      or (t.metadata->>'categories' = category_exact_value)
+    when category_overlap_values is not null then
+      (t.metadata->'categories' ?| category_overlap_values)
+      or (t.metadata->>'categories' = any(category_overlap_values))
+    else true
   end
   order by t.embedding <=> query_embedding
   limit match_count;
@@ -163,7 +182,9 @@ create table if not exists memory_migrations (
 create or replace function match_vectors(
   query_embedding vector(1536),
   match_count int,
-  filter jsonb default '{}'::jsonb
+  filter jsonb default '{}'::jsonb,
+  category_exact_value text default null,
+  category_overlap_values text[] default null
 )
 returns table (
   id text,
@@ -182,6 +203,15 @@ begin
   where case
     when filter::text = '{}'::text then true
     else t.metadata @> filter
+  end
+  and case
+    when category_exact_value is not null then
+      (t.metadata->'categories' ? category_exact_value)
+      or (t.metadata->>'categories' = category_exact_value)
+    when category_overlap_values is not null then
+      (t.metadata->'categories' ?| category_overlap_values)
+      or (t.metadata->>'categories' = any(category_overlap_values))
+    else true
   end
   order by t.embedding <=> query_embedding
   limit match_count;
@@ -240,17 +270,25 @@ See the SQL migration instructions in the code comments.`,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
     try {
-      const { filters: adaptedFilters, categoryMatchFilter } =
-        transformCategoriesForSupabase(filters);
+      const {
+        filters: adaptedFilters,
+        categoryExactValue,
+        categoryOverlapValues,
+      } = transformCategoriesForSupabase(filters);
 
-      const rpcQuery: VectorQueryParams = {
+      const rpcQuery: VectorSearchRpcParams = {
         query_embedding: query,
         match_count: topK,
       };
 
-      const mergedFilters = { ...adaptedFilters, ...categoryMatchFilter };
-      if (Object.keys(mergedFilters).length > 0) {
-        rpcQuery.filter = mergedFilters;
+      if (Object.keys(adaptedFilters).length > 0) {
+        rpcQuery.filter = adaptedFilters;
+      }
+      if (categoryExactValue !== undefined) {
+        rpcQuery.category_exact_value = categoryExactValue;
+      }
+      if (categoryOverlapValues !== undefined) {
+        rpcQuery.category_overlap_values = categoryOverlapValues;
       }
 
       const { data, error } = await this.client.rpc("match_vectors", rpcQuery);
@@ -348,31 +386,53 @@ See the SQL migration instructions in the code comments.`,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
     try {
-      const { filters: adaptedFilters, categoryMatchFilter } =
-        transformCategoriesForSupabase(filters);
-
-      const mergedFilters = { ...adaptedFilters, ...categoryMatchFilter };
+      const {
+        filters: adaptedFilters,
+        categoryExactValue,
+        categoryOverlapValues,
+      } = transformCategoriesForSupabase(filters);
 
       let query = this.client
         .from(this.tableName)
         .select("*", { count: "exact" })
         .limit(topK);
 
-      if (mergedFilters) {
-        Object.entries(mergedFilters).forEach(([key, value]) => {
-          if (
-            typeof value === "object" &&
-            value !== null &&
-            "overlaps" in value
-          ) {
-            query = query.overlaps(
-              `${this.metadataColumnName}->>${key}`,
-              value.overlaps,
-            );
+      Object.entries(adaptedFilters).forEach(([key, value]) => {
+        if (
+          typeof value === "object" &&
+          value !== null &&
+          !Array.isArray(value)
+        ) {
+          const op = Object.keys(value)[0];
+          const opValue = (value as Record<string, any>)[op];
+          if (op === "in" && Array.isArray(opValue)) {
+            query = query.in(`${this.metadataColumnName}->>${key}`, opValue);
           } else {
-            query = query.eq(`${this.metadataColumnName}->>${key}`, value);
+            query = query.filter(
+              `${this.metadataColumnName}->>${key}`,
+              op as any,
+              opValue,
+            );
           }
-        });
+        } else {
+          query = query.eq(`${this.metadataColumnName}->>${key}`, value);
+        }
+      });
+
+      if (categoryExactValue !== undefined) {
+        query = query.or(
+          `${this.metadataColumnName}->categories.cs.{${categoryExactValue}},${this.metadataColumnName}->>categories.eq.${categoryExactValue}`,
+        );
+      } else if (
+        categoryOverlapValues !== undefined &&
+        categoryOverlapValues.length > 0
+      ) {
+        const overlapCsv = categoryOverlapValues.join(",");
+        const jsonbOverlap = `${this.metadataColumnName}->categories.ov.{${overlapCsv}}`;
+        const eqConditions = categoryOverlapValues
+          .map((v) => `${this.metadataColumnName}->>categories.eq.${v}`)
+          .join(",");
+        query = query.or(`${jsonbOverlap},${eqConditions}`);
       }
 
       const { data, error, count } = await query;

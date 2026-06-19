@@ -16,6 +16,7 @@ import {
 import { SimpleReranker } from "../src/reranker/simple";
 import { LLMReranker } from "../src/reranker/llm";
 import { RerankerFactory } from "../src/utils/reranker_factory";
+import { Memory } from "../src/memory";
 
 describe("Categories Filter Transform - Multi-Backend Consistency", () => {
   const testCases: Array<{
@@ -195,30 +196,76 @@ describe("Categories Filter Transform - Multi-Backend Consistency", () => {
   });
 
   describe("Supabase transform specifics", () => {
-    test("single category generates simple match filter", () => {
+    test("single category returns exact value for SQL", () => {
       const result = transformCategoriesForSupabase({
         user_id: "u1",
         categories: { in: ["food"] },
       });
 
-      expect(result.categoryMatchFilter).toEqual({ categories: "food" });
+      expect(result.categoryExactValue).toBe("food");
+      expect(result.categoryOverlapValues).toBeUndefined();
+      expect(result.categoryValues).toEqual(["food"]);
     });
 
-    test("multiple categories generate overlaps filter", () => {
+    test("multiple categories returns overlap array for SQL", () => {
       const result = transformCategoriesForSupabase({
         user_id: "u1",
         categories: { in: ["food", "pet"] },
       });
 
-      expect(result.categoryMatchFilter).toEqual({
-        categories: { overlaps: ["food", "pet"] },
-      });
+      expect(result.categoryOverlapValues).toEqual(["food", "pet"]);
+      expect(result.categoryExactValue).toBeUndefined();
     });
 
-    test("no categories returns no match filter", () => {
+    test("no categories returns neither exact nor overlap", () => {
       const result = transformCategoriesForSupabase({ user_id: "u1" });
 
-      expect(result.categoryMatchFilter).toBeUndefined();
+      expect(result.categoryExactValue).toBeUndefined();
+      expect(result.categoryOverlapValues).toBeUndefined();
+    });
+
+    test("single category string format for SQL exact match", () => {
+      const result = transformCategoriesForSupabase({
+        user_id: "u1",
+        categories: "science",
+      });
+
+      expect(result.categoryExactValue).toBe("science");
+    });
+  });
+
+  describe("Supabase SQL semantics", () => {
+    test("single category uses JSONB ? operator (array contains) or = (string)", () => {
+      const result = transformCategoriesForSupabase({
+        user_id: "u1",
+        categories: { in: ["food"] },
+      });
+
+      expect(result.categoryExactValue).toBe("food");
+      expect(result.filters).toEqual({ user_id: "u1" });
+    });
+
+    test("multiple categories uses JSONB ?| operator (array overlap) or ANY (string)", () => {
+      const result = transformCategoriesForSupabase({
+        user_id: "u1",
+        categories: { in: ["food", "pet"] },
+      });
+
+      expect(result.categoryOverlapValues).toEqual(["food", "pet"]);
+      expect(result.filters).toEqual({ user_id: "u1" });
+    });
+
+    test("search() and list() share same transform logic", () => {
+      const filters = {
+        user_id: "u1",
+        categories: { in: ["food", "pet"] },
+      };
+
+      const searchTransform = transformCategoriesForSupabase(filters);
+      const listTransform = transformCategoriesForSupabase(filters);
+
+      expect(searchTransform).toEqual(listTransform);
+      expect(searchTransform.categoryOverlapValues).toEqual(["food", "pet"]);
     });
   });
 
@@ -632,5 +679,220 @@ describe("Reranker topK Truncation", () => {
     expect(results.length).toBe(2);
     expect(results[0].id).toBe("1");
     expect(results[1].id).toBe("2");
+  });
+});
+
+describe("Explain Adapter Filters", () => {
+  test("memory provider shows adapter filter structure", async () => {
+    const mem = new Memory({
+      embedder: {
+        provider: "openai",
+        config: {
+          apiKey: "test-key",
+          model: "text-embedding-3-small",
+          embeddingDims: 256,
+        },
+      },
+      vectorStore: {
+        provider: "memory",
+        config: {
+          dimension: 256,
+        },
+      },
+      llm: {
+        provider: "openai",
+        config: {
+          apiKey: "test-key",
+          model: "gpt-4o-mini",
+        },
+      },
+      disableHistory: true,
+    });
+
+    mem.registerSearchProfile("test-profile", {
+      filters: { user_id: "u1" },
+      categories: ["food", "pet"],
+      topK: 5,
+      explain: true,
+    });
+
+    const mockEmbed = jest.fn().mockResolvedValue(new Array(256).fill(0.1));
+    (mem as any).embedder.embed = mockEmbed;
+    (mem as any).vectorStore.search = jest.fn().mockResolvedValue([]);
+
+    const result = await mem.search("test query", {
+      profile: "test-profile",
+    });
+
+    expect(result.explain).toBeDefined();
+    expect(result.explain!.filters!.adapter).toBeDefined();
+    expect(result.explain!.filters!.adapter!.provider).toBe("memory");
+    expect(result.explain!.filters!.adapter!.transformed.queryType).toBe(
+      "in-memory SQLite with JSON filter",
+    );
+    expect(result.explain!.filters!.adapter!.transformed.filters.user_id).toBe(
+      "u1",
+    );
+  });
+
+  test("adapter filters show backend-specific transformation for qdrant", () => {
+    const effectiveFilters = {
+      user_id: "u1",
+      categories: { in: ["food", "pet"] },
+    };
+
+    const result = transformCategoriesForQdrant(effectiveFilters);
+    const adapterTransformed = {
+      filters: result.filters,
+      categoryValues: result.categoryValues,
+      queryType: "filter with $or conditions for categories",
+    };
+
+    expect(adapterTransformed.queryType).toContain("$or");
+    expect(
+      (adapterTransformed.filters as Record<string, any>).$or,
+    ).toBeDefined();
+    expect(adapterTransformed.categoryValues).toEqual(["food", "pet"]);
+  });
+
+  test("adapter filters show backend-specific transformation for supabase", () => {
+    const effectiveFilters = {
+      user_id: "u1",
+      categories: { in: ["food", "pet"] },
+    };
+
+    const result = transformCategoriesForSupabase(effectiveFilters);
+    const adapterTransformed = {
+      filters: result.filters,
+      categoryValues: result.categoryValues,
+      categoryExactValue: result.categoryExactValue,
+      categoryOverlapValues: result.categoryOverlapValues,
+      queryType:
+        "JSONB ?/?| operators for array, = for string (via RPC params)",
+    };
+
+    expect(adapterTransformed.queryType).toContain("JSONB");
+    expect(adapterTransformed.categoryOverlapValues).toEqual(["food", "pet"]);
+    expect(adapterTransformed.categoryExactValue).toBeUndefined();
+    expect(
+      (adapterTransformed.filters as Record<string, any>).categories,
+    ).toBeUndefined();
+  });
+
+  test("adapter filters show backend-specific transformation for pgvector", () => {
+    const effectiveFilters = {
+      user_id: "u1",
+      categories: { in: ["food"] },
+    };
+
+    const result = transformCategoriesForPgvector(effectiveFilters);
+    const adapterTransformed = {
+      filters: result.filters,
+      categoryValues: result.categoryValues,
+      categorySqlClause: result.categorySqlClause,
+      queryType: "JSONB ? operator for array, = for string",
+    };
+
+    expect(adapterTransformed.queryType).toContain("JSONB");
+    expect(adapterTransformed.categorySqlClause).toContain(
+      "payload->'categories'",
+    );
+    expect(adapterTransformed.categoryValues).toEqual(["food"]);
+  });
+
+  test("adapter filters show backend-specific transformation for redis", () => {
+    const effectiveFilters = {
+      user_id: "u1",
+      categories: { in: ["food", "pet"] },
+    };
+
+    const result = transformCategoriesForRedis(effectiveFilters);
+    const adapterTransformed = {
+      filters: result.filters,
+      categoryValues: result.categoryValues,
+      categoryTagExpr: result.categoryTagExpr,
+      queryType: "TAG filter with | OR syntax",
+    };
+
+    expect(adapterTransformed.queryType).toContain("TAG");
+    expect(adapterTransformed.categoryTagExpr).toContain("@categories");
+    expect(adapterTransformed.categoryTagExpr).toContain("|");
+  });
+
+  test("cross-backend adapter filters show consistent category extraction but different queryType", () => {
+    const effectiveFilters = {
+      user_id: "u1",
+      categories: { in: ["food", "pet"] },
+    };
+
+    const backends = [
+      { name: "qdrant", transform: transformCategoriesForQdrant },
+      { name: "pgvector", transform: transformCategoriesForPgvector },
+      { name: "redis", transform: transformCategoriesForRedis },
+      { name: "supabase", transform: transformCategoriesForSupabase },
+    ];
+
+    const results = backends.map(({ name, transform }) => ({
+      name,
+      result: transform(effectiveFilters),
+    }));
+
+    for (const { name, result } of results) {
+      expect(result.categoryValues.sort()).toEqual(["food", "pet"]);
+      expect(
+        (result.filters as Record<string, any>).categories,
+      ).toBeUndefined();
+    }
+
+    const queryTypes = results.map(
+      (r) =>
+        ({
+          qdrant: "filter with $or conditions for categories",
+          pgvector: "JSONB ? operator for array, = for string",
+          redis: "TAG filter with | OR syntax",
+          supabase:
+            "JSONB ?/?| operators for array, = for string (via RPC params)",
+        })[r.name],
+    );
+
+    expect(new Set(queryTypes).size).toBe(4);
+  });
+
+  test("no explain flag skips adapter filter computation", async () => {
+    const mem = new Memory({
+      embedder: {
+        provider: "openai",
+        config: {
+          apiKey: "test-key",
+          model: "text-embedding-3-small",
+          embeddingDims: 256,
+        },
+      },
+      vectorStore: {
+        provider: "memory",
+        config: {
+          dimension: 256,
+        },
+      },
+      llm: {
+        provider: "openai",
+        config: {
+          apiKey: "test-key",
+          model: "gpt-4o-mini",
+        },
+      },
+      disableHistory: true,
+    });
+
+    const mockEmbed = jest.fn().mockResolvedValue(new Array(256).fill(0.1));
+    (mem as any).embedder.embed = mockEmbed;
+    (mem as any).vectorStore.search = jest.fn().mockResolvedValue([]);
+
+    const result = await mem.search("test query", {
+      filters: { user_id: "u1" },
+      explain: false,
+    });
+
+    expect(result.explain).toBeUndefined();
   });
 });

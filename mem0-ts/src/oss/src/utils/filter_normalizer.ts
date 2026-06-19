@@ -276,7 +276,8 @@ export function transformCategoriesForSupabase(
 ): {
   filters: SearchFilters;
   categoryValues: string[];
-  categoryMatchFilter?: Record<string, any>;
+  categoryExactValue?: string;
+  categoryOverlapValues?: string[];
 } {
   const categories = extractCategoriesFromFilters(filters);
   const withoutCategories = removeCategoriesFromFilters(filters);
@@ -285,17 +286,18 @@ export function transformCategoriesForSupabase(
     return { filters: withoutCategories, categoryValues: [] };
   }
 
-  const matchFilter: Record<string, any> = {};
   if (categories.length === 1) {
-    matchFilter.categories = categories[0];
-  } else {
-    matchFilter.categories = { overlaps: categories };
+    return {
+      filters: withoutCategories,
+      categoryValues: categories,
+      categoryExactValue: categories[0],
+    };
   }
 
   return {
     filters: withoutCategories,
     categoryValues: categories,
-    categoryMatchFilter: matchFilter,
+    categoryOverlapValues: categories,
   };
 }
 

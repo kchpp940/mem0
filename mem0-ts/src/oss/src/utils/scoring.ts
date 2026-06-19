@@ -13,8 +13,6 @@ export interface ScoreWeights {
   semanticWeight?: number;
   bm25Weight?: number;
   entityBoostWeight?: number;
-  vectorWeight?: number;
-  keywordWeight?: number;
 }
 
 export interface ScoreDetails {
@@ -118,9 +116,8 @@ export function scoreAndRank(
   const hasBm25 = Object.keys(bm25Scores).length > 0;
   const hasEntity = Object.keys(entityBoosts).length > 0;
 
-  // vectorWeight is an alias for semanticWeight; keywordWeight is an alias for bm25Weight
-  const semanticWeight = weights.vectorWeight ?? weights.semanticWeight ?? 1.0;
-  const bm25Weight = weights.keywordWeight ?? weights.bm25Weight ?? 1.0;
+  const semanticWeight = weights.semanticWeight ?? 1.0;
+  const bm25Weight = weights.bm25Weight ?? 1.0;
   const entityBoostWeight = weights.entityBoostWeight ?? ENTITY_BOOST_WEIGHT;
 
   let maxPossible = semanticWeight;
@@ -135,8 +132,6 @@ export function scoreAndRank(
     semanticWeight,
     bm25Weight,
     entityBoostWeight,
-    vectorWeight: weights.vectorWeight ?? semanticWeight,
-    keywordWeight: weights.keywordWeight ?? bm25Weight,
   };
 
   const scored: ScoredResult[] = [];

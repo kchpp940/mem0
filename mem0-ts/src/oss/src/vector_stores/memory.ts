@@ -7,7 +7,6 @@ import {
   ensureSQLiteDirectory,
   getDefaultVectorStoreDbPath,
 } from "../utils/sqlite";
-import { buildInMemoryFilters } from "../utils/filter_normalizer";
 
 interface MemoryVector {
   id: string;
@@ -107,13 +106,8 @@ export class MemoryVectorStore implements VectorStore {
       return payloadValue === value;
     }
 
-    // Handle array shorthand: {"field": ["a", "b"]}
-    // If payload value is also an array, check for intersection (any match)
-    // Otherwise, treat as "in" operator
+    // Handle array shorthand: {"field": ["a", "b"]} treated as "in" operator
     if (Array.isArray(value)) {
-      if (Array.isArray(payloadValue)) {
-        return value.some((v) => payloadValue.includes(v));
-      }
       return value.includes(payloadValue);
     }
 
@@ -137,36 +131,18 @@ export class MemoryVectorStore implements VectorStore {
       return payloadValue <= value.lte;
     }
     if ("in" in value) {
-      if (!Array.isArray(value.in)) return false;
-      if (Array.isArray(payloadValue)) {
-        return value.in.some((v: any) => payloadValue.includes(v));
-      }
-      return value.in.includes(payloadValue);
+      return Array.isArray(value.in) && value.in.includes(payloadValue);
     }
     if ("nin" in value) {
-      if (!Array.isArray(value.nin)) return true;
-      if (Array.isArray(payloadValue)) {
-        return !value.nin.some((v: any) => payloadValue.includes(v));
-      }
-      return !value.nin.includes(payloadValue);
+      return !Array.isArray(value.nin) || !value.nin.includes(payloadValue);
     }
     if ("contains" in value) {
-      if (Array.isArray(payloadValue)) {
-        return payloadValue.includes(value.contains);
-      }
       return (
         typeof payloadValue === "string" &&
         payloadValue.includes(value.contains)
       );
     }
     if ("icontains" in value) {
-      if (Array.isArray(payloadValue)) {
-        return payloadValue.some(
-          (v) =>
-            typeof v === "string" &&
-            v.toLowerCase().includes(value.icontains.toLowerCase()),
-        );
-      }
       return (
         typeof payloadValue === "string" &&
         payloadValue.toLowerCase().includes(value.icontains.toLowerCase())
@@ -182,9 +158,7 @@ export class MemoryVectorStore implements VectorStore {
    * Supports logical operators (AND, OR, NOT) and comparison operators.
    */
   private filterVector(vector: MemoryVector, filters?: SearchFilters): boolean {
-    // Apply shared filter normalization (categories, entity aliases, etc.)
-    const normalized = buildInMemoryFilters(filters);
-    if (!normalized || Object.keys(normalized).length === 0) return true;
+    if (!filters || Object.keys(filters).length === 0) return true;
 
     // Normalize $or/$not/$and → OR/NOT/AND
     const keyMap: Record<string, string> = {
@@ -192,15 +166,15 @@ export class MemoryVectorStore implements VectorStore {
       $or: "OR",
       $not: "NOT",
     };
-    const remapped: Record<string, any> = {};
-    for (const [key, value] of Object.entries(normalized)) {
+    const normalized: Record<string, any> = {};
+    for (const [key, value] of Object.entries(filters)) {
       const normKey = keyMap[key] || key;
-      if (!(normKey in remapped)) {
-        remapped[normKey] = value;
+      if (!(normKey in normalized)) {
+        normalized[normKey] = value;
       }
     }
 
-    for (const [key, value] of Object.entries(remapped)) {
+    for (const [key, value] of Object.entries(normalized)) {
       // Handle logical operators
       if (key === "AND") {
         if (!Array.isArray(value)) {

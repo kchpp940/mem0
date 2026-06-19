@@ -8,7 +8,6 @@ import type {
 } from "redis";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { buildRedisFilters } from "../utils/filter_normalizer";
 
 /**
  * Escape RediSearch TAG filter special characters. Any punctuation in the
@@ -388,7 +387,13 @@ export class RedisDB implements VectorStore {
     topK: number = 5,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
-    const filterExpr = buildRedisFilters(filters).expression;
+    const snakeFilters = filters ? toSnakeCase(filters) : undefined;
+    const filterExpr = snakeFilters
+      ? Object.entries(snakeFilters)
+          .filter(([_, value]) => value !== null && value !== undefined)
+          .map(([key, value]) => `@${key}:{${escapeRedisTagValue(value)}}`)
+          .join(" ")
+      : "*";
 
     const queryVector = new Float32Array(query).buffer;
 
@@ -620,7 +625,13 @@ export class RedisDB implements VectorStore {
     filters?: SearchFilters,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
-    const filterExpr = buildRedisFilters(filters).expression;
+    const snakeFilters = filters ? toSnakeCase(filters) : undefined;
+    const filterExpr = snakeFilters
+      ? Object.entries(snakeFilters)
+          .filter(([_, value]) => value !== null && value !== undefined)
+          .map(([key, value]) => `@${key}:{${escapeRedisTagValue(value)}}`)
+          .join(" ")
+      : "*";
 
     const searchOptions = {
       SORTBY: "created_at",

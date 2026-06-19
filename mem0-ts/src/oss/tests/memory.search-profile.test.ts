@@ -434,3 +434,185 @@ describe("Memory - Profile Merge Priority (unit)", () => {
     expect(mem2.listSearchProfiles()).toEqual(["mem2-only"]);
   });
 });
+
+describe("Memory - Search Profile Categories", () => {
+  test("search profile supports categories field", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        categorized: {
+          name: "categorized",
+          topK: 10,
+          categories: ["fact", "preference"],
+        },
+      },
+    });
+    const userId = `cat_profile_${Date.now()}`;
+    await mem.add("User likes pizza", {
+      userId,
+      metadata: { categories: ["preference"] },
+    });
+
+    const result = (await mem.search("What does user like", {
+      profile: "categorized",
+      filters: { user_id: userId },
+    })) as any;
+
+    expect(result.explain).toBeDefined();
+    expect(result.explain.profile).toBeDefined();
+    expect(result.explain.profile.name).toBe("categorized");
+    expect(result.explain.profile.appliedConfig.categories).toEqual([
+      "fact",
+      "preference",
+    ]);
+    expect(result.explain.profile.appliedConfig.filters.categories).toEqual({
+      in: ["fact", "preference"],
+    });
+  });
+
+  test("search call-time categories merge with profile categories", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "base-cats": {
+          name: "base-cats",
+          categories: ["fact"],
+        },
+      },
+    });
+    const userId = `cat_merge_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "base-cats",
+      filters: { user_id: userId },
+      categories: ["preference"],
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.categories).toEqual([
+      "fact",
+      "preference",
+    ]);
+    expect(result.explain.profile.appliedConfig.filters.categories).toEqual({
+      in: ["fact", "preference"],
+    });
+    expect(result.explain.overriddenFields).toContain("categories");
+  });
+
+  test("categories dedupe duplicates between profile and call-time", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "dup-cats": {
+          name: "dup-cats",
+          categories: ["fact", "preference"],
+        },
+      },
+    });
+    const userId = `cat_dedupe_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "dup-cats",
+      filters: { user_id: userId },
+      categories: ["preference", "fact"],
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.categories).toEqual([
+      "fact",
+      "preference",
+    ]);
+  });
+
+  test("registerSearchProfile accepts categories", () => {
+    const mem = createMemory();
+    mem.registerSearchProfile("with-cats", {
+      topK: 5,
+      categories: ["support", "bug"],
+    });
+    const stored = mem.getSearchProfile("with-cats");
+    expect(stored).toBeDefined();
+    expect(stored?.categories).toEqual(["support", "bug"]);
+  });
+
+  test("search with only call-time categories (no profile)", async () => {
+    const mem = createMemory();
+    const userId = `cat_callonly_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      filters: { user_id: userId },
+      categories: ["food"],
+      explain: true,
+    })) as any;
+
+    expect(result.explain).toBeDefined();
+    expect(result.results).toBeDefined();
+  });
+});
+
+describe("Memory - Profile Deep Filter Merge", () => {
+  test("nested operator filters merge deeply", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "operator-merge": {
+          name: "operator-merge",
+          filters: { importance: { gte: 3 }, category: "fact" },
+        },
+      },
+    });
+    const userId = `deep_merge_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "operator-merge",
+      filters: { user_id: userId, importance: { lte: 9 } },
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.filters).toEqual({
+      category: "fact",
+      importance: { gte: 3, lte: 9 },
+      user_id: userId,
+    });
+  });
+
+  test("call-time simple value overrides profile operator for same key", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "op-override": {
+          name: "op-override",
+          filters: { status: { in: ["active", "pending"] } },
+        },
+      },
+    });
+    const userId = `op_override_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "op-override",
+      filters: { user_id: userId, status: "active" },
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.filters.status).toBe("active");
+  });
+
+  test("$or arrays concatenate from profile and call-time", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "or-merge": {
+          name: "or-merge",
+          filters: { $or: [{ type: "A" }] },
+        },
+      },
+    });
+    const userId = `or_merge_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "or-merge",
+      filters: { user_id: userId, $or: [{ type: "B" }] },
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.filters.$or).toEqual([
+      { type: "A" },
+      { type: "B" },
+    ]);
+  });
+});

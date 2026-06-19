@@ -163,7 +163,6 @@ export class ConfigManager {
           },
         };
       })(),
-      reranker: userConfig.reranker ?? undefined,
       disableHistory:
         userConfig.disableHistory || DEFAULT_MEMORY_CONFIG.disableHistory,
       searchProfiles: userConfig.searchProfiles ?? undefined,

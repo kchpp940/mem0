@@ -2,11 +2,6 @@ import { QdrantClient } from "@qdrant/js-client-rest";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
 import * as fs from "fs";
-import {
-  buildQdrantFilters,
-  QdrantFilter,
-  QdrantCondition,
-} from "../utils/filter_normalizer";
 
 interface QdrantConfig extends VectorStoreConfig {
   /**
@@ -35,7 +30,24 @@ interface QdrantConfig extends VectorStoreConfig {
   dimension?: number;
 }
 
-// Normalize $and/$or/$not to AND/OR/NOT — retained for legacy local helpers
+interface QdrantFilter {
+  must?: (QdrantCondition | QdrantFilter)[];
+  must_not?: (QdrantCondition | QdrantFilter)[];
+  should?: (QdrantCondition | QdrantFilter)[];
+}
+
+interface QdrantCondition {
+  key: string;
+  match?: { value?: any; any?: any[]; except?: any[]; text?: string };
+  range?: {
+    gte?: number | string;
+    gt?: number | string;
+    lte?: number | string;
+    lt?: number | string;
+  };
+}
+
+// Normalize $and/$or/$not to AND/OR/NOT
 const KEY_MAP: Record<string, string> = {
   $and: "AND",
   $or: "OR",
@@ -278,7 +290,7 @@ export class Qdrant implements VectorStore {
     topK: number = 5,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
-    const queryFilter = buildQdrantFilters(filters);
+    const queryFilter = this.createFilter(filters);
     const results = await this.client.search(this.collectionName, {
       vector: query,
       filter: queryFilter,
@@ -338,7 +350,7 @@ export class Qdrant implements VectorStore {
   ): Promise<[VectorStoreResult[], number]> {
     const scrollRequest = {
       limit: topK,
-      filter: buildQdrantFilters(filters),
+      filter: this.createFilter(filters),
       with_payload: true,
       with_vectors: false,
     };

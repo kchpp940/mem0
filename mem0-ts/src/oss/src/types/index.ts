@@ -28,6 +28,24 @@ export interface SearchExplainInfo {
     appliedConfig: Omit<SearchProfile, "name" | "description">;
   };
   overriddenFields?: string[];
+  scoring?: {
+    semanticCount: number;
+    bm25Count: number;
+    entityCount: number;
+    threshold: number;
+    topK: number;
+    weights?: Required<ScoreWeights>;
+  };
+  rerank?: {
+    enabled: boolean;
+    provider?: string;
+    inputCount?: number;
+    outputCount?: number;
+  };
+  filters?: {
+    normalized: Record<string, any>;
+    categories?: string[];
+  };
 }
 
 export interface MultiModalMessages {
@@ -99,6 +117,10 @@ export interface MemoryConfig {
     config: LLMConfig;
   };
   historyStore?: HistoryStoreConfig;
+  reranker?: {
+    provider: string;
+    config?: Record<string, any>;
+  };
   disableHistory?: boolean;
   historyDbPath?: string;
   customInstructions?: string;
@@ -200,4 +222,10 @@ export const MemoryConfigSchema = z.object({
     .optional(),
   disableHistory: z.boolean().optional(),
   searchProfiles: SearchProfileStoreSchema.optional(),
+  reranker: z
+    .object({
+      provider: z.string(),
+      config: z.record(z.string(), z.any()).optional(),
+    })
+    .optional(),
 });

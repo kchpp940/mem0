@@ -78,6 +78,13 @@ import {
 } from "../utils/scoring";
 import { getDefaultVectorStoreDbPath } from "../utils/sqlite";
 import { getOrCreateMem0UserId } from "../../../client/config";
+import { BaseReranker } from "../reranker/base";
+import { RerankerFactory } from "../utils/reranker_factory";
+import {
+  normalizeCategoriesFilter,
+  extractCategoriesFromFilters,
+  normalizeFilterStructure,
+} from "../utils/filter_normalizer";
 
 // Entity params that must be passed via filters - check both snake_case and camelCase
 const ENTITY_PARAMS = [
@@ -174,6 +181,7 @@ export class Memory {
   private _initError?: Error;
   private _entityStore?: VectorStore;
   private _searchProfiles: SearchProfileStore;
+  private _reranker?: BaseReranker;
 
   constructor(config: Partial<MemoryConfig> = {}) {
     // Merge and validate config
@@ -204,6 +212,18 @@ export class Memory {
     this.apiVersion = this.config.version || "v1.0";
     this.telemetryId = "anonymous";
     this._searchProfiles = this.config.searchProfiles ?? {};
+
+    if (this.config.reranker?.provider) {
+      try {
+        this._reranker = RerankerFactory.create(
+          this.config.reranker.provider,
+          this.config.reranker.config ?? {},
+          { llm: this.llm },
+        );
+      } catch (e) {
+        console.warn("Failed to initialize reranker:", e);
+      }
+    }
 
     // Auto-detect embedding dimension (if needed), create vector store,
     // and initialize it. All public methods await this before proceeding.
@@ -1633,6 +1653,39 @@ export class Memory {
       scoringWeights,
     );
 
+    // Step 8b: Rerank if enabled
+    let finalResults = scoredResults;
+    let rerankInputCount = 0;
+    let rerankOutputCount = 0;
+    const shouldRerank = !!(merged.rerank && this._reranker);
+    if (shouldRerank) {
+      rerankInputCount = scoredResults.length;
+      const rerankDocs = scoredResults.map((r) => ({
+        id: r.id,
+        memory: r.payload?.data || "",
+        score: r.score,
+        metadata: r.payload,
+      }));
+      try {
+        const reranked = await this._reranker!.rerank(query, rerankDocs, topK);
+        finalResults = reranked.map((rr) => {
+          const original = scoredResults.find((s) => s.id === rr.id);
+          return {
+            id: rr.id,
+            score: rr.rerankScore,
+            payload: original?.payload ?? {},
+            scoreDetails: original?.scoreDetails
+              ? { ...original.scoreDetails, rerankScore: rr.rerankScore }
+              : undefined,
+          };
+        });
+        rerankOutputCount = finalResults.length;
+      } catch (e) {
+        console.warn("Reranking failed, using original results:", e);
+        finalResults = scoredResults;
+      }
+    }
+
     // Step 9: Format results
     const excludedKeys = new Set([
       "user_id",
@@ -1646,7 +1699,7 @@ export class Memory {
       "attributedTo",
     ]);
 
-    const results = scoredResults
+    const results = finalResults
       .filter((scored) => scored.payload?.data)
       .map((scored) => {
         const payload = scored.payload || {};
@@ -1678,6 +1731,32 @@ export class Memory {
       }
       if (overriddenFields.length > 0) {
         result.explain.overriddenFields = overriddenFields;
+      }
+      if (explain) {
+        const categories = extractCategoriesFromFilters(mergedFilters);
+        result.explain.scoring = {
+          semanticCount: candidates.length,
+          bm25Count: Object.keys(bm25Scores).length,
+          entityCount: Object.keys(entityBoosts).length,
+          threshold,
+          topK,
+          weights: {
+            semanticWeight: scoreWeights.semanticWeight ?? 1.0,
+            bm25Weight: scoreWeights.bm25Weight ?? 1.0,
+            entityBoostWeight:
+              scoreWeights.entityBoostWeight ?? ENTITY_BOOST_WEIGHT,
+          },
+        };
+        result.explain.rerank = {
+          enabled: shouldRerank,
+          provider: this.config.reranker?.provider,
+          inputCount: rerankInputCount,
+          outputCount: rerankOutputCount,
+        };
+        result.explain.filters = {
+          normalized: normalizeFilterStructure(mergedFilters),
+          categories: categories ?? undefined,
+        };
       }
     }
     const searchElapsedMs = Date.now() - searchStartMs;

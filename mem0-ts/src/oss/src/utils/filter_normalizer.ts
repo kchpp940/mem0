@@ -1,0 +1,177 @@
+import type { SearchFilters } from "../types";
+
+export interface NormalizedFilter {
+  field: string;
+  operator: string;
+  value: any;
+}
+
+export const LOGICAL_OPERATORS = new Set([
+  "$and",
+  "$or",
+  "$not",
+  "AND",
+  "OR",
+  "NOT",
+]);
+
+const STANDARD_OP_MAP: Record<string, string> = {
+  eq: "eq",
+  ne: "ne",
+  gt: "gt",
+  gte: "gte",
+  lt: "lt",
+  lte: "lte",
+  in: "in",
+  nin: "nin",
+  contains: "contains",
+  icontains: "icontains",
+  $eq: "eq",
+  $ne: "ne",
+  $gt: "gt",
+  $gte: "gte",
+  $lt: "lt",
+  $lte: "lte",
+  $in: "in",
+  $nin: "nin",
+};
+
+function isLogicalOp(key: string): boolean {
+  return LOGICAL_OPERATORS.has(key) || LOGICAL_OPERATORS.has(key.toUpperCase());
+}
+
+function normalizeLogicalOp(op: string): string {
+  const upper = op.toUpperCase();
+  if (upper === "$AND") return "AND";
+  if (upper === "$OR") return "OR";
+  if (upper === "$NOT") return "NOT";
+  return upper;
+}
+
+export function normalizeCategoriesFilter(
+  filters: SearchFilters | undefined,
+  categories?: string[],
+): SearchFilters {
+  const result: Record<string, any> = { ...(filters ?? {}) };
+
+  if (categories && categories.length > 0) {
+    if (result.categories) {
+      const existing = result.categories;
+      if (typeof existing === "object" && !Array.isArray(existing)) {
+        const existingIn = existing.in ?? [];
+        const combined = Array.from(
+          new Set([
+            ...(Array.isArray(existingIn) ? existingIn : [existingIn]),
+            ...categories,
+          ]),
+        );
+        result.categories = { ...existing, in: combined };
+      } else if (Array.isArray(existing)) {
+        result.categories = {
+          in: Array.from(new Set([...existing, ...categories])),
+        };
+      } else {
+        result.categories = {
+          in: Array.from(new Set([String(existing), ...categories])),
+        };
+      }
+    } else {
+      result.categories = { in: [...categories] };
+    }
+  }
+
+  return result;
+}
+
+export function extractCategoriesFromFilters(
+  filters: SearchFilters | undefined,
+): string[] | undefined {
+  if (!filters) return undefined;
+
+  const cats = filters.categories;
+  if (!cats) return undefined;
+
+  if (Array.isArray(cats)) {
+    return [...cats];
+  }
+
+  if (typeof cats === "object" && cats !== null) {
+    if (Array.isArray(cats.in)) {
+      return [...cats.in];
+    }
+    if (cats.eq !== undefined) {
+      return [String(cats.eq)];
+    }
+  }
+
+  return [String(cats)];
+}
+
+export function normalizeFilterStructure(
+  filters: SearchFilters | undefined,
+): SearchFilters {
+  if (!filters) return {};
+
+  const result: Record<string, any> = {};
+
+  for (const [key, value] of Object.entries(filters)) {
+    if (isLogicalOp(key)) {
+      const normKey = normalizeLogicalOp(key);
+      if (Array.isArray(value)) {
+        result[normKey] = value.map((item) => normalizeFilterStructure(item));
+      } else {
+        result[normKey] = value;
+      }
+      continue;
+    }
+
+    if (value === undefined || value === null) continue;
+
+    if (typeof value === "object" && !Array.isArray(value)) {
+      const normalizedOps: Record<string, any> = {};
+      for (const [op, opVal] of Object.entries(value)) {
+        const standardOp = STANDARD_OP_MAP[op] ?? op;
+        normalizedOps[standardOp] = opVal;
+      }
+      result[key] = normalizedOps;
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+export function flattenSimpleFilters(
+  filters: SearchFilters | undefined,
+): Record<string, any> {
+  const result: Record<string, any> = {};
+  if (!filters) return result;
+
+  for (const [key, value] of Object.entries(filters)) {
+    if (isLogicalOp(key)) continue;
+
+    if (typeof value === "object" && !Array.isArray(value)) {
+      if ("eq" in value) {
+        result[key] = value.eq;
+      } else if (
+        "in" in value &&
+        Array.isArray(value.in) &&
+        value.in.length === 1
+      ) {
+        result[key] = value.in[0];
+      }
+    } else {
+      result[key] = value;
+    }
+  }
+
+  return result;
+}
+
+export function getFilterCategories(
+  filters: SearchFilters | undefined,
+): string[] {
+  const cats = extractCategoriesFromFilters(filters);
+  return cats ?? [];
+}

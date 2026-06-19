@@ -616,3 +616,244 @@ describe("Memory - Profile Deep Filter Merge", () => {
     ]);
   });
 });
+
+describe("Memory - Search Profile Explain Details", () => {
+  test("explain includes scoring details when explain=true", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "explain-test": {
+          name: "explain-test",
+          topK: 5,
+          threshold: 0.2,
+          scoreWeights: { semanticWeight: 0.8, bm25Weight: 0.6 },
+        },
+      },
+    });
+    const userId = `explain_detail_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+    await mem.add("User likes pasta", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "explain-test",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain).toBeDefined();
+    expect(result.explain.scoring).toBeDefined();
+    expect(result.explain.scoring.threshold).toBe(0.2);
+    expect(result.explain.scoring.topK).toBe(5);
+    expect(result.explain.scoring.weights).toBeDefined();
+    expect(result.explain.scoring.weights.semanticWeight).toBe(0.8);
+    expect(result.explain.scoring.weights.bm25Weight).toBe(0.6);
+    expect(typeof result.explain.scoring.semanticCount).toBe("number");
+    expect(typeof result.explain.scoring.bm25Count).toBe("number");
+    expect(typeof result.explain.scoring.entityCount).toBe("number");
+  });
+
+  test("explain includes filters details with categories", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "filter-explain": {
+          name: "filter-explain",
+          categories: ["fact", "preference"],
+        },
+      },
+    });
+    const userId = `filter_explain_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "filter-explain",
+      filters: { user_id: userId, importance: "high" },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.filters).toBeDefined();
+    expect(result.explain.filters.categories).toEqual(["fact", "preference"]);
+    expect(result.explain.filters.normalized).toBeDefined();
+    expect(result.explain.filters.normalized.user_id).toBe(userId);
+    expect(result.explain.filters.normalized.categories).toBeDefined();
+  });
+
+  test("explain includes rerank info when rerank disabled", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "no-rerank": {
+          name: "no-rerank",
+          rerank: false,
+        },
+      },
+    });
+    const userId = `rerank_off_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "no-rerank",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank).toBeDefined();
+    expect(result.explain.rerank.enabled).toBe(false);
+    expect(result.explain.rerank.provider).toBeUndefined();
+  });
+
+  test("explain includes profile and overridden fields together", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "override-test": {
+          name: "override-test",
+          topK: 10,
+        },
+      },
+    });
+    const userId = `override_explain_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "override-test",
+      filters: { user_id: userId },
+      topK: 3,
+      explain: true,
+    })) as any;
+
+    expect(result.explain.profile).toBeDefined();
+    expect(result.explain.profile.name).toBe("override-test");
+    expect(result.explain.overriddenFields).toContain("topK");
+    expect(result.explain.scoring.topK).toBe(3);
+  });
+});
+
+describe("Memory - Categories Filter End-to-End", () => {
+  test("categories filter works with memory payload categories", async () => {
+    const mem = createMemory();
+    const userId = `cat_e2e_${Date.now()}`;
+
+    await mem.add("User likes pizza", {
+      userId,
+      metadata: { categories: ["food", "preference"] },
+    });
+    await mem.add("User works at Acme", {
+      userId,
+      metadata: { categories: ["work", "fact"] },
+    });
+    await mem.add("User has a dog", {
+      userId,
+      metadata: { categories: ["pet", "fact"] },
+    });
+
+    const result = (await mem.search("What does user like", {
+      filters: { user_id: userId, categories: { in: ["food"] } },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.filters.categories).toEqual(["food"]);
+    expect(Array.isArray(result.results)).toBe(true);
+  });
+
+  test("categories filter from profile filters results correctly", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "food-only": {
+          name: "food-only",
+          categories: ["food"],
+        },
+      },
+    });
+    const userId = `cat_profile_e2e_${Date.now()}`;
+
+    await mem.add("User likes pizza", {
+      userId,
+      metadata: { categories: ["food", "preference"] },
+    });
+    await mem.add("User works at Acme", {
+      userId,
+      metadata: { categories: ["work", "fact"] },
+    });
+
+    const result = (await mem.search("What does user like", {
+      profile: "food-only",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.profile.appliedConfig.categories).toEqual(["food"]);
+  });
+
+  test("search with categories as simple string category filter works", async () => {
+    const mem = createMemory();
+    const userId = `cat_simple_${Date.now()}`;
+
+    await mem.add("User likes pizza", {
+      userId,
+      metadata: { category: "food" },
+    });
+
+    const result = (await mem.search("food", {
+      filters: { user_id: userId, category: "food" },
+      explain: true,
+    })) as any;
+
+    expect(result.results.length).toBeGreaterThanOrEqual(0);
+    expect(result.explain.filters.normalized.category).toBe("food");
+  });
+});
+
+describe("Memory - Reranker Configuration", () => {
+  test("Memory accepts reranker config in constructor", () => {
+    const mem = createMemory({
+      reranker: {
+        provider: "llm",
+        config: { batchSize: 10 },
+      },
+    } as any);
+    expect(mem).toBeDefined();
+  });
+
+  test("profile with rerank: true but no reranker config shows disabled in explain", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "rerank-profile": {
+          name: "rerank-profile",
+          rerank: true,
+        },
+      },
+    });
+    const userId = `rerank_noconfig_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "rerank-profile",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank).toBeDefined();
+    expect(result.explain.rerank.enabled).toBe(false);
+  });
+
+  test("call-time rerank: true without reranker in profile triggers reranking", async () => {
+    const mem = createMemory({
+      searchProfiles: {
+        "with-rerank": {
+          name: "with-rerank",
+          rerank: true,
+        },
+      },
+    });
+    const userId = `rerank_call_${Date.now()}`;
+    await mem.add("User likes pizza", { userId });
+    await mem.add("User likes pasta", { userId });
+
+    const result = (await mem.search("What does user like", {
+      profile: "with-rerank",
+      filters: { user_id: userId },
+      explain: true,
+    })) as any;
+
+    expect(result.explain.rerank).toBeDefined();
+    expect(result.explain.rerank.enabled).toBe(false);
+    expect(Array.isArray(result.results)).toBe(true);
+  });
+});

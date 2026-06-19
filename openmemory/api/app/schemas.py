@@ -100,3 +100,19 @@ class FeedbackByStatusRequest(BaseModel):
     user_id: str
     status: str
     app_id: Optional[UUID] = None
+
+
+class MemoryHistoryResponse(BaseModel):
+    id: UUID
+    memory_id: UUID
+    event: str
+    old_memory: Optional[str] = None
+    new_memory: Optional[str] = None
+    metadata_: Optional[dict] = None
+    created_at: int
+
+    @validator('created_at', pre=True)
+    def convert_history_created_at(cls, v):
+        if isinstance(v, datetime):
+            return int(v.timestamp())
+        return v

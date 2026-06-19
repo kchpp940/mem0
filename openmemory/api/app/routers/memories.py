@@ -12,6 +12,7 @@ from app.models import (
     Memory,
     MemoryAccessLog,
     MemoryFeedback,
+    MemoryHistory,
     MemoryState,
     MemoryStatusHistory,
     User,
@@ -21,6 +22,7 @@ from app.schemas import (
     FeedbackListResponse,
     FeedbackRecordResponse,
     FeedbackSubmitRequest,
+    MemoryHistoryResponse,
     MemoryResponse,
 )
 from app.utils.memory import get_memory_client
@@ -36,6 +38,8 @@ router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
 
 
 def _batch_feedback_statuses(db: Session, memory_ids: list) -> dict:
+    if not memory_ids:
+        return {}
     latest_sub = db.query(
         MemoryFeedback.memory_id,
         func.max(MemoryFeedback.created_at).label("max_created_at"),
@@ -52,7 +56,12 @@ def _batch_feedback_statuses(db: Session, memory_ids: list) -> dict:
         & (MemoryFeedback.created_at == latest_sub.c.max_created_at),
     ).all()
 
-    return {str(row.memory_id): row.status.value for row in rows}
+    result = {str(row.memory_id): row.status.value for row in rows}
+    for mid in memory_ids:
+        key = str(mid)
+        if key not in result:
+            result[key] = "unreviewed"
+    return result
 
 
 def get_memory_or_404(db: Session, memory_id: UUID) -> Memory:
@@ -72,6 +81,13 @@ def update_memory_state(db: Session, memory_id: UUID, new_state: MemoryState, us
         memory.archived_at = datetime.now(UTC)
     elif new_state == MemoryState.deleted:
         memory.deleted_at = datetime.now(UTC)
+        # Record a DELETE content history event for traceability
+        db.add(MemoryHistory(
+            memory_id=memory_id,
+            event="DELETE",
+            old_memory=memory.content,
+            new_memory=None,
+        ))
 
     # Record state change
     history = MemoryStatusHistory(
@@ -311,12 +327,15 @@ async def create_memory(
                     
                     # Check if memory already exists
                     existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
+                    old_content = None
                     
                     if existing_memory:
                         # Update existing memory
+                        old_content = existing_memory.content
                         existing_memory.state = MemoryState.active
                         existing_memory.content = result['memory']
                         memory = existing_memory
+                        content_event = "UPDATE"
                     else:
                         # Create memory with the EXACT SAME ID from Qdrant
                         memory = Memory(
@@ -328,8 +347,17 @@ async def create_memory(
                             state=MemoryState.active
                         )
                         db.add(memory)
+                        content_event = "ADD"
                     
-                    # Create history entry
+                    # Create content change history
+                    db.add(MemoryHistory(
+                        memory_id=memory_id,
+                        event=content_event,
+                        old_memory=old_content,
+                        new_memory=result['memory'],
+                    ))
+                    
+                    # Create status history entry
                     history = MemoryStatusHistory(
                         memory_id=memory_id,
                         changed_by=user.id,
@@ -555,7 +583,14 @@ async def update_memory(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     memory = get_memory_or_404(db, memory_id)
+    old_content = memory.content
     memory.content = request.memory_content
+    db.add(MemoryHistory(
+        memory_id=memory_id,
+        event="UPDATE",
+        old_memory=old_content,
+        new_memory=request.memory_content,
+    ))
     db.commit()
     db.refresh(memory)
     return memory
@@ -620,19 +655,30 @@ async def filter_memories(
         query = query.filter(Memory.created_at <= to_datetime)
 
     if request.feedback_statuses:
-        valid = [FeedbackStatus(s) for s in request.feedback_statuses]
+        has_unreviewed = any(s == "unreviewed" for s in request.feedback_statuses)
+        valid = [FeedbackStatus(s) for s in request.feedback_statuses if s != "unreviewed"]
+
         latest_sub = db.query(
             MemoryFeedback.memory_id,
             func.max(MemoryFeedback.created_at).label("max_created_at"),
         ).group_by(MemoryFeedback.memory_id).subquery()
-        matching_ids = db.query(MemoryFeedback.memory_id).join(
+
+        memory_ids_with_feedback = [r[0] for r in db.query(MemoryFeedback.memory_id).join(
             latest_sub,
             (MemoryFeedback.memory_id == latest_sub.c.memory_id)
             & (MemoryFeedback.created_at == latest_sub.c.max_created_at),
         ).filter(
-            MemoryFeedback.status.in_(valid)
-        ).subquery()
-        query = query.filter(Memory.id.in_(db.query(matching_ids.c.memory_id)))
+            MemoryFeedback.status.in_(valid) if valid else False
+        ).all()]
+
+        if has_unreviewed:
+            all_fb_memory_ids = {r[0] for r in db.query(MemoryFeedback.memory_id).distinct().all()}
+            query = query.filter(
+                (Memory.id.in_(memory_ids_with_feedback))
+                | (~Memory.id.in_(list(all_fb_memory_ids)))
+            )
+        else:
+            query = query.filter(Memory.id.in_(memory_ids_with_feedback))
 
     # Apply sorting
     if request.sort_column and request.sort_direction:
@@ -871,6 +917,42 @@ async def get_memory_feedback(
     ]
 
     return FeedbackListResponse(memory_id=memory_id, feedback=feedback_list)
+
+
+# Get all content history records for a memory (ADD / UPDATE / DELETE)
+@router.get("/{memory_id}/history")
+async def get_memory_history(
+    memory_id: UUID,
+    user_id: str,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    memory = get_memory_or_404(db, memory_id)
+
+    records = (
+        db.query(MemoryHistory)
+        .filter(MemoryHistory.memory_id == memory_id)
+        .order_by(MemoryHistory.created_at.asc())
+        .all()
+    )
+
+    return {
+        "memory_id": str(memory_id),
+        "history": [
+            MemoryHistoryResponse(
+                id=r.id,
+                memory_id=r.memory_id,
+                event=r.event,
+                old_memory=r.old_memory,
+                new_memory=r.new_memory,
+                metadata_=r.metadata_,
+                created_at=r.created_at,
+            )
+            for r in records
+        ],
+    }
 
 
 # List memory IDs filtered by feedback status — for the review queue in the dashboard

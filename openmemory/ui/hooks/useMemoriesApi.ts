@@ -16,6 +16,16 @@ export interface SimpleMemory {
   feedback_status?: string;
 }
 
+export interface MemoryHistoryRecord {
+  id: string;
+  memory_id: string;
+  event: "ADD" | "UPDATE" | "DELETE";
+  old_memory: string | null;
+  new_memory: string | null;
+  metadata_?: Record<string, any>;
+  created_at: number;
+}
+
 // Define the shape of the API response item
 interface ApiMemoryItem {
   id: string;
@@ -87,6 +97,7 @@ interface UseMemoriesApiReturn {
   fetchMemoryById: (memoryId: string) => Promise<void>;
   fetchAccessLogs: (memoryId: string, page?: number, pageSize?: number) => Promise<void>;
   fetchRelatedMemories: (memoryId: string) => Promise<void>;
+  fetchMemoryHistory: (memoryId: string) => Promise<MemoryHistoryRecord[]>;
   createMemory: (text: string) => Promise<void>;
   deleteMemories: (memoryIds: string[]) => Promise<void>;
   updateMemory: (memoryId: string, content: string) => Promise<void>;
@@ -270,6 +281,22 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
     }
   };
 
+  const fetchMemoryHistory = async (memoryId: string): Promise<MemoryHistoryRecord[]> => {
+    if (memoryId === "") {
+      return [];
+    }
+    try {
+      const response = await axios.get<{ history: MemoryHistoryRecord[] }>(
+        `${URL}/api/v1/memories/${memoryId}/history?user_id=${user_id}`
+      );
+      return response.data.history;
+    } catch (err: any) {
+      const errorMessage = err.message || 'Failed to fetch memory history';
+      setError(errorMessage);
+      throw new Error(errorMessage);
+    }
+  };
+
   const updateMemory = async (memoryId: string, content: string): Promise<void> => {
     if (memoryId === "") {
       return;
@@ -337,6 +364,7 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
     fetchMemoryById,
     fetchAccessLogs,
     fetchRelatedMemories,
+    fetchMemoryHistory,
     createMemory,
     deleteMemories,
     updateMemory,

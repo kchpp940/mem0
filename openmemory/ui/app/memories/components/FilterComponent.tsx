@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Filter, X, ChevronDown, SortAsc, SortDesc, AlertTriangle, XCircle, Clock, CheckCircle2 } from "lucide-react";
+import { Filter, X, ChevronDown, SortAsc, SortDesc, AlertTriangle, XCircle, Clock, CheckCircle2, Eye } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
 
 import {
@@ -344,6 +344,7 @@ export default function FilterComponent() {
             <TabsContent value="feedback" className="mt-4">
               <div className="space-y-3">
                 {[
+                  { value: "unreviewed", label: "Unreviewed", icon: <Eye className="h-3.5 w-3.5 text-zinc-400" /> },
                   { value: "needs_review", label: "Needs Review", icon: <AlertTriangle className="h-3.5 w-3.5 text-amber-400" /> },
                   { value: "incorrect", label: "Incorrect", icon: <XCircle className="h-3.5 w-3.5 text-red-400" /> },
                   { value: "outdated", label: "Outdated", icon: <Clock className="h-3.5 w-3.5 text-orange-400" /> },

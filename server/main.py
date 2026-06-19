@@ -22,7 +22,7 @@ from errors import (
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from models import RequestLog, User
+from models import BatchImport, BatchImportItem, RequestLog, User
 from pydantic import BaseModel, Field
 from rate_limit import limiter
 from routers import api_keys as api_keys_router
@@ -379,7 +379,35 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at"}
+_RESERVED_PAYLOAD_KEYS = {
+    "data",
+    "user_id",
+    "agent_id",
+    "app_id",
+    "run_id",
+    "hash",
+    "created_at",
+    "updated_at",
+    "categories",
+    "expires_at",
+    "ttl_source",
+    "ttl_state",
+    "feedback",
+    "feedback_reason",
+    "immutable",
+}
+
+try:
+    from mem0.memory.lifecycle import annotate_memory_result
+except Exception:  # pragma: no cover
+    def annotate_memory_result(item, now=None):
+        """Fallback shim when lifecycle module is not available."""
+        if item.get("expires_at") is None:
+            item["ttl_state"] = "permanent"
+        else:
+            item.setdefault("ttl_state", "active")
+        item.setdefault("ttl_source", "default")
+        return item
 
 
 def _serialize_memory(row: Any) -> Dict[str, Any]:
@@ -530,9 +558,6 @@ def reset_memory(_auth=Depends(require_admin)):
         raise upstream_error()
 
 
-_batch_store: Dict[str, Dict[str, Any]] = {}
-
-
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -566,13 +591,13 @@ def _normalize_memory_for_import(item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_memory_for_export(row: Any) -> Dict[str, Any]:
-    """Normalize a memory row from storage to export format."""
+    """Normalize a memory row from storage to export format with full lifecycle fields."""
     payload = getattr(row, "payload", None) or {}
-    memory_id = getattr(row, "id", None)
+    memory_id = getattr(row, "id", None) or payload.get("id")
 
-    exported: Dict[str, Any] = {
+    raw = {
         "id": memory_id,
-        "memory": payload.get("data", ""),
+        "memory": payload.get("data") or payload.get("memory") or "",
         "user_id": payload.get("user_id"),
         "agent_id": payload.get("agent_id"),
         "run_id": payload.get("run_id"),
@@ -581,11 +606,14 @@ def _normalize_memory_for_export(row: Any) -> Dict[str, Any]:
         "categories": payload.get("categories", []),
         "created_at": payload.get("created_at"),
         "updated_at": payload.get("updated_at"),
+        "expires_at": payload.get("expires_at"),
+        "ttl_source": payload.get("ttl_source"),
         "feedback": payload.get("feedback"),
         "feedback_reason": payload.get("feedback_reason"),
+        "immutable": payload.get("immutable", False),
     }
-
-    return exported
+    annotated = annotate_memory_result(raw)
+    return annotated
 
 
 @app.post(
@@ -595,16 +623,16 @@ def _normalize_memory_for_export(row: Any) -> Dict[str, Any]:
 )
 def batch_import(req: BatchImportRequest, _auth=Depends(verify_auth)):
     """
-    Batch import memories with resumable cursor support.
+    Batch import memories with resumable cursor support (persistent storage).
 
     - Send memories in batches, use `cursor` to resume from a previous position
-    - Returns batch_id, success/failure counts, and next cursor position
-    - Use `batch_id` to check status and resume failed imports
+    - Pass an existing `batch_id` when resuming to append to history
+    - State is persisted to PostgreSQL so imports survive server restarts
     """
-    batch_id = f"batch_{uuid.uuid4().hex[:12]}"
     total = len(req.memories)
     cursor = req.cursor or 0
     batch_size = req.batch_size or 100
+    source = req.source or "API"
 
     end_idx = min(cursor + batch_size, total)
     batch_items = req.memories[cursor:end_idx]
@@ -613,26 +641,37 @@ def batch_import(req: BatchImportRequest, _auth=Depends(verify_auth)):
     failed: list[ImportResultItem] = []
     success_count = 0
     failed_count = 0
+    item_rows: list[BatchImportItem] = []
 
     mem_instance = get_memory_instance()
 
     for i, item in enumerate(batch_items):
         global_idx = cursor + i
         content = item.get_content()
+        raw_data = item.model_dump(exclude_none=True)
 
         if not content:
-            failed.append(
-                ImportResultItem(
+            result_item = ImportResultItem(
+                index=global_idx,
+                success=False,
+                error="Missing memory content (memory/text/content field)",
+            )
+            failed.append(result_item)
+            failed_count += 1
+            item_rows.append(
+                BatchImportItem(
+                    batch_id="",  # filled in later
                     index=global_idx,
                     success=False,
-                    error="Missing memory content (memory/text/content field)",
+                    memory=None,
+                    error=result_item.error,
+                    raw_data=raw_data,
                 )
             )
-            failed_count += 1
             continue
 
         try:
-            normalized = _normalize_memory_for_import(item.model_dump(exclude_none=True))
+            normalized = _normalize_memory_for_import(raw_data)
 
             if not any(normalized.get(k) for k in ("user_id", "agent_id", "run_id", "app_id")):
                 normalized["user_id"] = "imported"
@@ -648,42 +687,85 @@ def batch_import(req: BatchImportRequest, _auth=Depends(verify_auth)):
             elif isinstance(result, dict):
                 memory_id = result.get("id")
 
-            successful.append(
-                ImportResultItem(
+            result_item = ImportResultItem(
+                index=global_idx,
+                success=True,
+                memory_id=memory_id,
+                memory=content[:200],
+            )
+            successful.append(result_item)
+            success_count += 1
+            item_rows.append(
+                BatchImportItem(
+                    batch_id="",  # filled in later
                     index=global_idx,
                     success=True,
                     memory_id=memory_id,
                     memory=content[:200],
+                    error=None,
+                    raw_data=None,
                 )
             )
-            success_count += 1
 
         except Exception as e:
-            failed.append(
-                ImportResultItem(
+            result_item = ImportResultItem(
+                index=global_idx,
+                success=False,
+                memory=content[:200],
+                error=str(e),
+            )
+            failed.append(result_item)
+            failed_count += 1
+            item_rows.append(
+                BatchImportItem(
+                    batch_id="",  # filled in later
                     index=global_idx,
                     success=False,
                     memory=content[:200],
                     error=str(e),
+                    raw_data=raw_data,
                 )
             )
-            failed_count += 1
 
     processed = end_idx
     completed = processed >= total
 
-    batch_data = {
-        "batch_id": batch_id,
-        "total": total,
-        "processed": processed,
-        "success_count": success_count,
-        "failed_count": failed_count,
-        "cursor": end_idx,
-        "completed": completed,
-        "created_at": _utcnow(),
-        "updated_at": _utcnow(),
-    }
-    _batch_store[batch_id] = batch_data
+    # Persist to database
+    batch_id = req.batch_id or f"batch_{uuid.uuid4().hex[:12]}"
+    try:
+        with SessionLocal() as db:
+            batch = db.execute(
+                select(BatchImport).where(BatchImport.batch_id == batch_id)
+            ).scalar_one_or_none()
+
+            if batch is None:
+                batch = BatchImport(
+                    batch_id=batch_id,
+                    total=total,
+                    processed=processed,
+                    success_count=success_count,
+                    failed_count=failed_count,
+                    cursor=end_idx,
+                    completed=completed,
+                    source=source,
+                )
+                db.add(batch)
+            else:
+                batch.total = max(batch.total, total)
+                batch.processed = processed
+                batch.success_count += success_count
+                batch.failed_count += failed_count
+                batch.cursor = end_idx
+                batch.completed = completed
+                batch.updated_at = _utcnow()
+            db.flush()
+
+            for row in item_rows:
+                row.batch_id = batch_id
+            db.bulk_save_objects(item_rows)
+            db.commit()
+    except Exception as e:  # pragma: no cover - persistence failure should not break the response
+        logging.warning(f"Failed to persist batch {batch_id} state: {e}")
 
     return BatchImportResponse(
         batch_id=batch_id,
@@ -704,12 +786,25 @@ def batch_import(req: BatchImportRequest, _auth=Depends(verify_auth)):
     response_model=BatchStatusResponse,
 )
 def get_batch_status(batch_id: str, _auth=Depends(verify_auth)):
-    """Get the status of a batch import by batch_id."""
-    batch = _batch_store.get(batch_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+    """Get the status of a batch import by batch_id (persistent lookup)."""
+    with SessionLocal() as db:
+        batch = db.execute(
+            select(BatchImport).where(BatchImport.batch_id == batch_id)
+        ).scalar_one_or_none()
 
-    return BatchStatusResponse(**batch)
+        if batch is None:
+            raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+
+        return BatchStatusResponse(
+            batch_id=batch.batch_id,
+            total=batch.total,
+            processed=batch.processed,
+            success_count=batch.success_count,
+            failed_count=batch.failed_count,
+            completed=batch.completed,
+            created_at=batch.created_at,
+            updated_at=batch.updated_at,
+        )
 
 
 @app.post("/v1/memories/export", summary="Export memories (POST with filters)")

@@ -31,9 +31,11 @@ class ImportMemoryItem(BaseModel):
 
 class BatchImportRequest(BaseModel):
     memories: List[ImportMemoryItem] = Field(..., description="List of memory items to import")
+    batch_id: Optional[str] = Field(None, description="Existing batch ID for resuming a previous import")
     cursor: Optional[int] = Field(0, description="Starting index for batch processing (for resumption)")
     batch_size: Optional[int] = Field(100, description="Number of items to process in this batch")
     infer: Optional[bool] = Field(True, description="Whether to infer facts from memory content")
+    source: Optional[str] = Field(None, description="Source identifier, e.g. 'CLI', 'API'")
 
 
 class ImportResultItem(BaseModel):
@@ -78,8 +80,12 @@ class ExportMemoryItem(BaseModel):
     categories: List[str] = Field(default_factory=list)
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = Field(None, description="ISO 8601 UTC expiration timestamp (None = permanent)")
+    ttl_state: Optional[str] = Field(None, description='TTL state: "active" | "expiring_soon" | "expired" | "permanent"')
+    ttl_source: Optional[str] = Field(None, description='Which policy produced expires_at, e.g. "default", "request"')
     feedback: Optional[str] = None
     feedback_reason: Optional[str] = None
+    immutable: Optional[bool] = False
 
 
 class ExportRequest(BaseModel):

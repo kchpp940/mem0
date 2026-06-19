@@ -30,4 +30,5 @@ export * from "./vector_stores/pgvector";
 export * from "./utils/factory";
 export * from "./reranker/base";
 export * from "./reranker/llm";
+export * from "./reranker/simple";
 export * from "./utils/filter_normalizer";

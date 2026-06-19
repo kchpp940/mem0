@@ -1,6 +1,7 @@
 import { QdrantClient } from "@qdrant/js-client-rest";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { transformCategoriesForQdrant } from "../utils/filter_normalizer";
 import * as fs from "fs";
 
 interface QdrantConfig extends VectorStoreConfig {
@@ -290,7 +291,8 @@ export class Qdrant implements VectorStore {
     topK: number = 5,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
-    const queryFilter = this.createFilter(filters);
+    const { filters: adaptedFilters } = transformCategoriesForQdrant(filters);
+    const queryFilter = this.createFilter(adaptedFilters);
     const results = await this.client.search(this.collectionName, {
       vector: query,
       filter: queryFilter,
@@ -348,9 +350,10 @@ export class Qdrant implements VectorStore {
     filters?: SearchFilters,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
+    const { filters: adaptedFilters } = transformCategoriesForQdrant(filters);
     const scrollRequest = {
       limit: topK,
-      filter: this.createFilter(filters),
+      filter: this.createFilter(adaptedFilters),
       with_payload: true,
       with_vectors: false,
     };

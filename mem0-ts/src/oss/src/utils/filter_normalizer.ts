@@ -175,3 +175,133 @@ export function getFilterCategories(
   const cats = extractCategoriesFromFilters(filters);
   return cats ?? [];
 }
+
+export function removeCategoriesFromFilters(
+  filters: SearchFilters | undefined,
+): SearchFilters {
+  if (!filters) return {};
+  const result: Record<string, any> = { ...filters };
+  delete result.categories;
+  return result;
+}
+
+export function transformCategoriesForQdrant(
+  filters: SearchFilters | undefined,
+): { filters: SearchFilters; categoryValues: string[] } {
+  const categories = extractCategoriesFromFilters(filters);
+  const withoutCategories = removeCategoriesFromFilters(filters);
+
+  if (!categories || categories.length === 0) {
+    return { filters: withoutCategories, categoryValues: [] };
+  }
+
+  const orConditions = categories.map((cat) => ({ categories: cat }));
+  const existingOr = (withoutCategories as Record<string, any>).$or;
+  if (Array.isArray(existingOr)) {
+    (withoutCategories as Record<string, any>).$or = [
+      ...existingOr,
+      ...orConditions,
+    ];
+  } else {
+    (withoutCategories as Record<string, any>).$or = orConditions;
+  }
+
+  return { filters: withoutCategories, categoryValues: categories };
+}
+
+export function transformCategoriesForPgvector(
+  filters: SearchFilters | undefined,
+): {
+  filters: SearchFilters;
+  categoryValues: string[];
+  categorySqlClause?: string;
+  categorySqlParams?: string[];
+} {
+  const categories = extractCategoriesFromFilters(filters);
+  const withoutCategories = removeCategoriesFromFilters(filters);
+
+  if (!categories || categories.length === 0) {
+    return { filters: withoutCategories, categoryValues: [] };
+  }
+
+  const conditions: string[] = [];
+  const params: string[] = [];
+  for (const cat of categories) {
+    conditions.push(
+      `(payload->'categories' ? $%PGV_PARAM% OR payload->>'categories' = $%PGV_PARAM%)`,
+    );
+    params.push(cat);
+  }
+  const clause =
+    conditions.length === 1
+      ? conditions[0]
+      : "(" + conditions.join(" OR ") + ")";
+
+  return {
+    filters: withoutCategories,
+    categoryValues: categories,
+    categorySqlClause: clause,
+    categorySqlParams: params,
+  };
+}
+
+export function transformCategoriesForRedis(
+  filters: SearchFilters | undefined,
+): {
+  filters: SearchFilters;
+  categoryValues: string[];
+  categoryTagExpr?: string;
+} {
+  const categories = extractCategoriesFromFilters(filters);
+  const withoutCategories = removeCategoriesFromFilters(filters);
+
+  if (!categories || categories.length === 0) {
+    return { filters: withoutCategories, categoryValues: [] };
+  }
+
+  const tagExpr =
+    categories.length === 1
+      ? `@categories:{${_escapeRedisTagValue(categories[0])}}`
+      : `(${categories.map((c) => `@categories:{${_escapeRedisTagValue(c)}}`).join("|")})`;
+
+  return {
+    filters: withoutCategories,
+    categoryValues: categories,
+    categoryTagExpr: tagExpr,
+  };
+}
+
+export function transformCategoriesForSupabase(
+  filters: SearchFilters | undefined,
+): {
+  filters: SearchFilters;
+  categoryValues: string[];
+  categoryMatchFilter?: Record<string, any>;
+} {
+  const categories = extractCategoriesFromFilters(filters);
+  const withoutCategories = removeCategoriesFromFilters(filters);
+
+  if (!categories || categories.length === 0) {
+    return { filters: withoutCategories, categoryValues: [] };
+  }
+
+  const matchFilter: Record<string, any> = {};
+  if (categories.length === 1) {
+    matchFilter.categories = categories[0];
+  } else {
+    matchFilter.categories = { overlaps: categories };
+  }
+
+  return {
+    filters: withoutCategories,
+    categoryValues: categories,
+    categoryMatchFilter: matchFilter,
+  };
+}
+
+function _escapeRedisTagValue(value: unknown): string {
+  return String(value).replace(
+    /([,.<>{}\[\]"':;!@#$%^&*()\-+=~|/\\\s])/g,
+    "\\$1",
+  );
+}

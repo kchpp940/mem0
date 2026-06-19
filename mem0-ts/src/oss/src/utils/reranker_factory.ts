@@ -1,5 +1,6 @@
 import { BaseReranker } from "../reranker/base";
 import { LLMReranker } from "../reranker/llm";
+import { SimpleReranker } from "../reranker/simple";
 import { LLM } from "../llms/base";
 
 export class RerankerFactory {
@@ -19,9 +20,13 @@ export class RerankerFactory {
           llm: dependencies.llm,
           batchSize: config.batchSize,
         });
+      case "simple":
+        return new SimpleReranker({
+          minScore: config.minScore ?? config.scoreThreshold,
+        });
       default:
         throw new Error(
-          `Unsupported reranker provider: ${provider}. Supported: llm`,
+          `Unsupported reranker provider: ${provider}. Supported: llm, simple`,
         );
     }
   }

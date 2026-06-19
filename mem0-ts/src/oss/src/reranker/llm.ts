@@ -53,13 +53,7 @@ export class LLMReranker extends BaseReranker {
       }
     }
 
-    results.sort((a, b) => b.rerankScore - a.rerankScore);
-
-    if (topK !== undefined && topK > 0) {
-      return results.slice(0, topK);
-    }
-
-    return results;
+    return this.applyTopK(results, topK);
   }
 
   private async _rerankBatch(
@@ -81,7 +75,22 @@ export class LLMReranker extends BaseReranker {
       ]);
 
       const text = typeof response === "string" ? response : response?.content;
-      const parsed = extractJson(text);
+      let parsed: any = null;
+
+      if (text) {
+        try {
+          parsed = JSON.parse(text);
+        } catch {
+          try {
+            const jsonStr = extractJson(text);
+            if (jsonStr) {
+              parsed = JSON.parse(jsonStr);
+            }
+          } catch {
+            parsed = null;
+          }
+        }
+      }
 
       if (Array.isArray(parsed)) {
         const scores: number[] = new Array(documents.length).fill(0);
@@ -98,6 +107,6 @@ export class LLMReranker extends BaseReranker {
       console.warn("LLM reranking failed, falling back to original order:", e);
     }
 
-    return documents.map((_, idx) => 1 - idx / documents.length);
+    return documents.map((d) => d.score ?? 0);
   }
 }

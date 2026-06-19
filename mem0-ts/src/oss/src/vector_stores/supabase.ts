@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { transformCategoriesForSupabase } from "../utils/filter_normalizer";
 
 interface VectorData {
   id: string;
@@ -239,13 +240,17 @@ See the SQL migration instructions in the code comments.`,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
     try {
+      const { filters: adaptedFilters, categoryMatchFilter } =
+        transformCategoriesForSupabase(filters);
+
       const rpcQuery: VectorQueryParams = {
         query_embedding: query,
         match_count: topK,
       };
 
-      if (filters) {
-        rpcQuery.filter = filters;
+      const mergedFilters = { ...adaptedFilters, ...categoryMatchFilter };
+      if (Object.keys(mergedFilters).length > 0) {
+        rpcQuery.filter = mergedFilters;
       }
 
       const { data, error } = await this.client.rpc("match_vectors", rpcQuery);
@@ -343,14 +348,30 @@ See the SQL migration instructions in the code comments.`,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
     try {
+      const { filters: adaptedFilters, categoryMatchFilter } =
+        transformCategoriesForSupabase(filters);
+
+      const mergedFilters = { ...adaptedFilters, ...categoryMatchFilter };
+
       let query = this.client
         .from(this.tableName)
         .select("*", { count: "exact" })
         .limit(topK);
 
-      if (filters) {
-        Object.entries(filters).forEach(([key, value]) => {
-          query = query.eq(`${this.metadataColumnName}->>${key}`, value);
+      if (mergedFilters) {
+        Object.entries(mergedFilters).forEach(([key, value]) => {
+          if (
+            typeof value === "object" &&
+            value !== null &&
+            "overlaps" in value
+          ) {
+            query = query.overlaps(
+              `${this.metadataColumnName}->>${key}`,
+              value.overlaps,
+            );
+          } else {
+            query = query.eq(`${this.metadataColumnName}->>${key}`, value);
+          }
         });
       }
 

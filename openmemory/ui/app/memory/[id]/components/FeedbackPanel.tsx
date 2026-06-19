@@ -6,6 +6,8 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useDispatch } from "react-redux";
+import { updateMemoryFeedbackStatus } from "@/store/memoriesSlice";
 import {
   Dialog,
   DialogContent,
@@ -68,6 +70,7 @@ interface FeedbackPanelProps {
 }
 
 export function FeedbackPanel({ memoryId }: FeedbackPanelProps) {
+  const dispatch = useDispatch();
   const { submitFeedback, fetchFeedbackHistory, isLoading } = useFeedbackApi();
   const [feedbackHistory, setFeedbackHistory] = useState<FeedbackRecord[]>([]);
   const [currentStatus, setCurrentStatus] = useState<FeedbackStatusType>("unreviewed");
@@ -104,6 +107,7 @@ export function FeedbackPanel({ memoryId }: FeedbackPanelProps) {
     if (!pendingStatus) return;
     try {
       await submitFeedback(memoryId, pendingStatus, reason || undefined);
+      dispatch(updateMemoryFeedbackStatus({ memoryId, feedbackStatus: pendingStatus }));
       setDialogOpen(false);
       setPendingStatus(null);
       setReason("");

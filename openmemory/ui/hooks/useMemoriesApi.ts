@@ -13,6 +13,7 @@ export interface SimpleMemory {
   state: string;
   categories: string[];
   app_name: string;
+  feedback_status?: string;
 }
 
 // Define the shape of the API response item
@@ -25,6 +26,7 @@ interface ApiMemoryItem {
   categories: string[];
   metadata_?: Record<string, any>;
   app_name: string;
+  feedback_status?: string;
 }
 
 // Define the shape of the API response
@@ -79,6 +81,7 @@ interface UseMemoriesApiReturn {
       sortColumn?: string;
       sortDirection?: 'asc' | 'desc';
       showArchived?: boolean;
+      feedbackStatuses?: string[];
     }
   ) => Promise<{ memories: Memory[]; total: number; pages: number }>;
   fetchMemoryById: (memoryId: string) => Promise<void>;
@@ -116,6 +119,7 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
       sortColumn?: string;
       sortDirection?: 'asc' | 'desc';
       showArchived?: boolean;
+      feedbackStatuses?: string[];
     }
   ): Promise<{ memories: Memory[], total: number, pages: number }> => {
     setIsLoading(true);
@@ -132,7 +136,8 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
           category_ids: filters?.categories,
           sort_column: filters?.sortColumn?.toLowerCase(),
           sort_direction: filters?.sortDirection,
-          show_archived: filters?.showArchived
+          show_archived: filters?.showArchived,
+          feedback_statuses: filters?.feedbackStatuses,
         }
       );
 
@@ -144,7 +149,8 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
         metadata: item.metadata_,
         categories: item.categories as Category[],
         client: 'api',
-        app_name: item.app_name
+        app_name: item.app_name,
+        feedback_status: (item.feedback_status as any) || undefined,
       }));
       setIsLoading(false);
       dispatch(setMemoriesSuccess(adaptedMemories));

@@ -86,7 +86,8 @@ export function MemoryFilters() {
 
   const hasActiveFilters =
     activeFilters.selectedApps.length > 0 ||
-    activeFilters.selectedCategories.length > 0;
+    activeFilters.selectedCategories.length > 0 ||
+    (activeFilters as any).feedbackStatuses?.length > 0;
 
   return (
     <div className="flex flex-col md:flex-row gap-4 mb-4">

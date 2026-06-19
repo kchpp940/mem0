@@ -35,6 +35,26 @@ from sqlalchemy.orm import Session, joinedload
 router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
 
 
+def _batch_feedback_statuses(db: Session, memory_ids: list) -> dict:
+    latest_sub = db.query(
+        MemoryFeedback.memory_id,
+        func.max(MemoryFeedback.created_at).label("max_created_at"),
+    ).filter(
+        MemoryFeedback.memory_id.in_(memory_ids)
+    ).group_by(MemoryFeedback.memory_id).subquery()
+
+    rows = db.query(
+        MemoryFeedback.memory_id,
+        MemoryFeedback.status,
+    ).join(
+        latest_sub,
+        (MemoryFeedback.memory_id == latest_sub.c.memory_id)
+        & (MemoryFeedback.created_at == latest_sub.c.max_created_at),
+    ).all()
+
+    return {str(row.memory_id): row.status.value for row in rows}
+
+
 def get_memory_or_404(db: Session, memory_id: UUID) -> Memory:
     memory = db.query(Memory).filter(Memory.id == memory_id).first()
     if not memory:
@@ -172,7 +192,9 @@ async def list_memories(
         joinedload(Memory.categories)
     ).distinct(Memory.id)
 
-    # Get paginated results with transformer
+    all_items = query.all()
+    fb_map = _batch_feedback_statuses(db, [m.id for m in all_items])
+
     return sqlalchemy_paginate(
         query,
         params,
@@ -185,7 +207,8 @@ async def list_memories(
                 app_id=memory.app_id,
                 app_name=memory.app.name if memory.app else None,
                 categories=[category.name for category in memory.categories],
-                metadata_=memory.metadata_
+                metadata_=memory.metadata_,
+                feedback_status=fb_map.get(str(memory.id)),
             )
             for memory in items
             if check_memory_access_permissions(db, memory, app_id)
@@ -549,6 +572,7 @@ class FilterMemoriesRequest(BaseModel):
     from_date: Optional[int] = None
     to_date: Optional[int] = None
     show_archived: Optional[bool] = False
+    feedback_statuses: Optional[List[str]] = None
 
 @router.post("/filter", response_model=Page[MemoryResponse])
 async def filter_memories(
@@ -595,6 +619,21 @@ async def filter_memories(
         to_datetime = datetime.fromtimestamp(request.to_date, tz=UTC)
         query = query.filter(Memory.created_at <= to_datetime)
 
+    if request.feedback_statuses:
+        valid = [FeedbackStatus(s) for s in request.feedback_statuses]
+        latest_sub = db.query(
+            MemoryFeedback.memory_id,
+            func.max(MemoryFeedback.created_at).label("max_created_at"),
+        ).group_by(MemoryFeedback.memory_id).subquery()
+        matching_ids = db.query(MemoryFeedback.memory_id).join(
+            latest_sub,
+            (MemoryFeedback.memory_id == latest_sub.c.memory_id)
+            & (MemoryFeedback.created_at == latest_sub.c.max_created_at),
+        ).filter(
+            MemoryFeedback.status.in_(valid)
+        ).subquery()
+        query = query.filter(Memory.id.in_(db.query(matching_ids.c.memory_id)))
+
     # Apply sorting
     if request.sort_column and request.sort_direction:
         sort_direction = request.sort_direction.lower()
@@ -624,11 +663,11 @@ async def filter_memories(
         joinedload(Memory.categories)
     ).distinct(Memory.id)
 
-    # Use fastapi-pagination's paginate function
-    return sqlalchemy_paginate(
-        query,
-        Params(page=request.page, size=request.size),
-        transformer=lambda items: [
+    all_memories = query.all()
+    fb_map = _batch_feedback_statuses(db, [m.id for m in all_memories])
+
+    def _build_response(items):
+        return [
             MemoryResponse(
                 id=memory.id,
                 content=memory.content,
@@ -637,10 +676,16 @@ async def filter_memories(
                 app_id=memory.app_id,
                 app_name=memory.app.name if memory.app else None,
                 categories=[category.name for category in memory.categories],
-                metadata_=memory.metadata_
+                metadata_=memory.metadata_,
+                feedback_status=fb_map.get(str(memory.id)),
             )
             for memory in items
         ]
+
+    return sqlalchemy_paginate(
+        query,
+        Params(page=request.page, size=request.size),
+        transformer=_build_response
     )
 
 
@@ -680,9 +725,11 @@ async def get_related_memories(
         Memory.created_at.desc()
     ).group_by(Memory.id)
     
-    # ⚡ Force page size to be 5
     params = Params(page=params.page, size=5)
-    
+
+    all_related = query.all()
+    fb_map = _batch_feedback_statuses(db, [m.id for m in all_related])
+
     return sqlalchemy_paginate(
         query,
         params,
@@ -695,7 +742,8 @@ async def get_related_memories(
                 app_id=memory.app_id,
                 app_name=memory.app.name if memory.app else None,
                 categories=[category.name for category in memory.categories],
-                metadata_=memory.metadata_
+                metadata_=memory.metadata_,
+                feedback_status=fb_map.get(str(memory.id)),
             )
             for memory in items
         ]

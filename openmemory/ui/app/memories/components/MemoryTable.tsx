@@ -5,6 +5,11 @@ import {
   Pause,
   Archive,
   Play,
+  CheckCircle2,
+  XCircle,
+  Clock,
+  AlertTriangle,
+  Eye,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -48,6 +53,16 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { formatDate } from "@/lib/helpers";
+import { FeedbackStatusType } from "@/components/types";
+import { Badge } from "@/components/ui/badge";
+
+const FEEDBACK_BADGE_CONFIG: Record<string, { label: string; icon: React.ReactNode; color: string; bg: string }> = {
+  needs_review: { label: "Review", icon: <AlertTriangle className="h-3 w-3" />, color: "text-amber-400", bg: "bg-amber-400/10 border-amber-400/30" },
+  incorrect: { label: "Incorrect", icon: <XCircle className="h-3 w-3" />, color: "text-red-400", bg: "bg-red-400/10 border-red-400/30" },
+  outdated: { label: "Outdated", icon: <Clock className="h-3 w-3" />, color: "text-orange-400", bg: "bg-orange-400/10 border-orange-400/30" },
+  confirmed: { label: "Confirmed", icon: <CheckCircle2 className="h-3 w-3" />, color: "text-emerald-400", bg: "bg-emerald-400/10 border-emerald-400/30" },
+  unreviewed: { label: "Unreviewed", icon: <Eye className="h-3 w-3" />, color: "text-zinc-400", bg: "bg-zinc-500/10 border-zinc-500/30" },
+};
 
 export function MemoryTable() {
   const { toast } = useToast();
@@ -143,6 +158,12 @@ export function MemoryTable() {
                 Source App
               </div>
             </TableHead>
+            <TableHead className="w-[120px] border-zinc-700">
+              <div className="flex items-center">
+                <AlertTriangle className="mr-1 h-3.5 w-3.5" />
+                Feedback
+              </div>
+            </TableHead>
             <TableHead className="w-[140px] border-zinc-700">
               <div className="flex items-center w-full justify-center">
                 <CiCalendar className="mr-1" size={16} />
@@ -225,6 +246,16 @@ export function MemoryTable() {
               </TableCell>
               <TableCell className="w-[140px] text-center">
                 <SourceApp source={memory.app_name} />
+              </TableCell>
+              <TableCell className="w-[120px] text-center">
+                {memory.feedback_status && FEEDBACK_BADGE_CONFIG[memory.feedback_status] ? (
+                  <Badge variant="outline" className={`${FEEDBACK_BADGE_CONFIG[memory.feedback_status].bg} ${FEEDBACK_BADGE_CONFIG[memory.feedback_status].color} border text-[10px] px-1.5 py-0.5`}>
+                    {FEEDBACK_BADGE_CONFIG[memory.feedback_status].icon}
+                    <span className="ml-0.5">{FEEDBACK_BADGE_CONFIG[memory.feedback_status].label}</span>
+                  </Badge>
+                ) : (
+                  <span className="text-zinc-600 text-xs">—</span>
+                )}
               </TableCell>
               <TableCell className="w-[140px] text-center">
                 {formatDate(memory.created_at)}

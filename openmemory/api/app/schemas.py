@@ -50,6 +50,7 @@ class MemoryResponse(BaseModel):
     app_name: str
     categories: List[str]
     metadata_: Optional[dict] = None
+    feedback_status: Optional[str] = None
 
     @validator('created_at', pre=True)
     def convert_to_epoch(cls, v):

@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { useDispatch } from "react-redux";
+import { updateMemoryFeedbackStatus } from "@/store/memoriesSlice";
 import {
   CheckCircle2,
   XCircle,
@@ -55,6 +57,7 @@ type TabStatus = "needs_review" | "incorrect" | "outdated";
 
 export default function ReviewQueuePage() {
   const router = useRouter();
+  const dispatch = useDispatch();
   const { fetchFeedbackQueue, submitFeedback, isLoading } = useFeedbackApi();
   const [items, setItems] = useState<FeedbackQueueItem[]>([]);
   const [activeTab, setActiveTab] = useState<TabStatus>("needs_review");
@@ -76,6 +79,7 @@ export default function ReviewQueuePage() {
     e.stopPropagation();
     try {
       await submitFeedback(memoryId, "confirmed", "Quick confirmed from review queue");
+      dispatch(updateMemoryFeedbackStatus({ memoryId, feedbackStatus: "confirmed" }));
       setItems((prev) => prev.filter((item) => item.memory_id !== memoryId));
     } catch (err) {
       console.error("Failed to confirm memory:", err);

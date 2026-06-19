@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Filter, X, ChevronDown, SortAsc, SortDesc } from "lucide-react";
+import { Filter, X, ChevronDown, SortAsc, SortDesc, AlertTriangle, XCircle, Clock, CheckCircle2 } from "lucide-react";
 import { useDispatch, useSelector } from "react-redux";
 
 import {
@@ -32,6 +32,7 @@ import {
   setSelectedApps,
   setSelectedCategories,
   clearFilters,
+  setFeedbackStatuses,
 } from "@/store/filtersSlice";
 import { useMemoriesApi } from "@/hooks/useMemoriesApi";
 
@@ -61,6 +62,7 @@ export default function FilterComponent() {
     string[]
   >([]);
   const [showArchived, setShowArchived] = useState(false);
+  const [tempFeedbackStatuses, setTempFeedbackStatuses] = useState<string[]>([]);
 
   const apps = useSelector((state: RootState) => state.apps.apps);
   const categories = useSelector(
@@ -79,6 +81,7 @@ export default function FilterComponent() {
       setTempSelectedApps(filters.selectedApps);
       setTempSelectedCategories(filters.selectedCategories);
       setShowArchived(filters.showArchived || false);
+      setTempFeedbackStatuses((filters as any).feedbackStatuses || []);
     }
   }, [isOpen, filters]);
 
@@ -112,6 +115,7 @@ export default function FilterComponent() {
     setTempSelectedApps([]);
     setTempSelectedCategories([]);
     setShowArchived(false);
+    setTempFeedbackStatuses([]);
     dispatch(clearFilters());
     await fetchMemories();
   };
@@ -132,6 +136,7 @@ export default function FilterComponent() {
       dispatch(setSelectedApps(tempSelectedApps));
       dispatch(setSelectedCategories(tempSelectedCategories));
       dispatch({ type: "filters/setShowArchived", payload: showArchived });
+      dispatch(setFeedbackStatuses(tempFeedbackStatuses));
 
       await fetchMemories(undefined, 1, 10, {
         apps: selectedAppIds,
@@ -139,6 +144,7 @@ export default function FilterComponent() {
         sortColumn: filters.sortColumn,
         sortDirection: filters.sortDirection,
         showArchived: showArchived,
+        feedbackStatuses: tempFeedbackStatuses.length > 0 ? tempFeedbackStatuses : undefined,
       });
       setIsOpen(false);
     } catch (error) {
@@ -149,10 +155,10 @@ export default function FilterComponent() {
   const handleDialogChange = (open: boolean) => {
     setIsOpen(open);
     if (!open) {
-      // Reset temporary selections to active filters when dialog closes without applying
       setTempSelectedApps(filters.selectedApps);
       setTempSelectedCategories(filters.selectedCategories);
       setShowArchived(filters.showArchived || false);
+      setTempFeedbackStatuses((filters as any).feedbackStatuses || []);
     }
   };
 
@@ -188,12 +194,14 @@ export default function FilterComponent() {
   const hasActiveFilters =
     filters.selectedApps.length > 0 ||
     filters.selectedCategories.length > 0 ||
-    filters.showArchived;
+    filters.showArchived ||
+    (filters as any).feedbackStatuses?.length > 0;
 
   const hasTempFilters =
     tempSelectedApps.length > 0 ||
     tempSelectedCategories.length > 0 ||
-    showArchived;
+    showArchived ||
+    tempFeedbackStatuses.length > 0;
 
   return (
     <div className="flex items-center gap-2">
@@ -225,7 +233,7 @@ export default function FilterComponent() {
             </DialogTitle>
           </DialogHeader>
           <Tabs defaultValue="apps" className="w-full">
-            <TabsList className="grid grid-cols-3 bg-zinc-800">
+            <TabsList className="grid grid-cols-4 bg-zinc-800">
               <TabsTrigger
                 value="apps"
                 className="data-[state=active]:bg-zinc-700"
@@ -237,6 +245,12 @@ export default function FilterComponent() {
                 className="data-[state=active]:bg-zinc-700"
               >
                 Categories
+              </TabsTrigger>
+              <TabsTrigger
+                value="feedback"
+                className="data-[state=active]:bg-zinc-700"
+              >
+                Feedback
               </TabsTrigger>
               <TabsTrigger
                 value="archived"
@@ -322,6 +336,38 @@ export default function FilterComponent() {
                       className="text-sm font-normal text-zinc-300 cursor-pointer"
                     >
                       {category.name}
+                    </Label>
+                  </div>
+                ))}
+              </div>
+            </TabsContent>
+            <TabsContent value="feedback" className="mt-4">
+              <div className="space-y-3">
+                {[
+                  { value: "needs_review", label: "Needs Review", icon: <AlertTriangle className="h-3.5 w-3.5 text-amber-400" /> },
+                  { value: "incorrect", label: "Incorrect", icon: <XCircle className="h-3.5 w-3.5 text-red-400" /> },
+                  { value: "outdated", label: "Outdated", icon: <Clock className="h-3.5 w-3.5 text-orange-400" /> },
+                  { value: "confirmed", label: "Confirmed", icon: <CheckCircle2 className="h-3.5 w-3.5 text-emerald-400" /> },
+                ].map((status) => (
+                  <div key={status.value} className="flex items-center space-x-2">
+                    <Checkbox
+                      id={`feedback-${status.value}`}
+                      checked={tempFeedbackStatuses.includes(status.value)}
+                      onCheckedChange={(checked) => {
+                        if (checked) {
+                          setTempFeedbackStatuses((prev) => [...prev, status.value]);
+                        } else {
+                          setTempFeedbackStatuses((prev) => prev.filter((s) => s !== status.value));
+                        }
+                      }}
+                      className="border-zinc-600 data-[state=checked]:bg-primary data-[state=checked]:border-primary"
+                    />
+                    <Label
+                      htmlFor={`feedback-${status.value}`}
+                      className="text-sm font-normal text-zinc-300 cursor-pointer flex items-center gap-1.5"
+                    >
+                      {status.icon}
+                      {status.label}
                     </Label>
                   </div>
                 ))}

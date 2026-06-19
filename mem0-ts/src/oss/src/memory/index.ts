@@ -1,6 +1,7 @@
 import { v4 as uuidv4 } from "uuid";
 import { createHash } from "crypto";
 import {
+  HybridWeights,
   MemoryConfig,
   MemoryConfigSchema,
   MemoryItem,
@@ -9,6 +10,7 @@ import {
   SearchResult,
   SearchProfile,
   SearchProfileStore,
+  SearchRerankConfig,
   ScoreWeights,
   SearchExplainInfo,
 } from "../types";
@@ -672,6 +674,68 @@ export class Memory {
     return normalized;
   }
 
+  private _normalizeCategories(
+    categories: string | string[] | undefined,
+  ): string[] | undefined {
+    if (categories === undefined || categories === null) return undefined;
+    if (typeof categories === "string") {
+      return categories.length > 0 ? [categories] : undefined;
+    }
+    if (Array.isArray(categories)) {
+      const filtered = categories.filter((c) => typeof c === "string" && c.length > 0);
+      return filtered.length > 0 ? filtered : undefined;
+    }
+    return undefined;
+  }
+
+  private _categoriesToFilters(
+    categories: string[] | undefined,
+  ): Record<string, any> {
+    if (!categories || categories.length === 0) return {};
+    if (categories.length === 1) {
+      return { category: categories[0] };
+    }
+    return { category: { in: categories } };
+  }
+
+  private _normalizeRerankConfig(
+    rerank: boolean | SearchRerankConfig | undefined,
+  ): SearchRerankConfig {
+    if (rerank === undefined || rerank === null) {
+      return { enabled: false };
+    }
+    if (typeof rerank === "boolean") {
+      return { enabled: rerank };
+    }
+    return {
+      enabled: rerank.enabled ?? true,
+      provider: rerank.provider,
+      model: rerank.model,
+      topK: rerank.topK,
+      config: rerank.config,
+    };
+  }
+
+  private _mergeRerankConfig(
+    base: boolean | SearchRerankConfig | undefined,
+    override: boolean | SearchRerankConfig | undefined,
+  ): SearchRerankConfig {
+    const baseNormalized = this._normalizeRerankConfig(base);
+    const overrideNormalized = this._normalizeRerankConfig(override);
+
+    if (override === undefined || override === null) {
+      return baseNormalized;
+    }
+
+    return {
+      enabled: overrideNormalized.enabled,
+      provider: overrideNormalized.provider ?? baseNormalized.provider,
+      model: overrideNormalized.model ?? baseNormalized.model,
+      topK: overrideNormalized.topK ?? baseNormalized.topK,
+      config: { ...(baseNormalized.config ?? {}), ...(overrideNormalized.config ?? {}) },
+    };
+  }
+
   private _resolveSearchProfile(
     profile: string | SearchProfile | undefined,
   ): { profile: SearchProfile | null; profileName: string | null } {
@@ -704,7 +768,10 @@ export class Memory {
     > & {
       filters: Record<string, any>;
       scoreWeights: ScoreWeights;
-      rerank: boolean;
+      hybridWeights: HybridWeights;
+      categories: string[] | undefined;
+      rawCategories: string | string[] | undefined;
+      rerank: SearchRerankConfig;
     };
     profileInfo: {
       name: string | null;
@@ -717,11 +784,13 @@ export class Memory {
     const profileConfig = resolved.profile ?? {};
 
     const profileOptionFields = [
+      "categories",
       "topK",
       "filters",
       "threshold",
       "explain",
       "scoreWeights",
+      "hybridWeights",
       "rerank",
     ] as const;
     const overriddenFields: string[] = [];
@@ -735,9 +804,20 @@ export class Memory {
       }
     }
 
-    const mergedFilters: Record<string, any> = {
+    const rawCategories =
+      optionsRest.categories !== undefined
+        ? optionsRest.categories
+        : profileConfig.categories;
+    const normalizedCategories = this._normalizeCategories(rawCategories);
+
+    const entityFilters: Record<string, any> = {
       ...(this._normalizeEntityFilters(profileConfig.filters)),
       ...(this._normalizeEntityFilters(optionsRest.filters)),
+    };
+    const categoryFilters = this._categoriesToFilters(normalizedCategories);
+    const mergedFilters: Record<string, any> = {
+      ...categoryFilters,
+      ...entityFilters,
     };
 
     const mergedScoreWeights: ScoreWeights = {
@@ -745,19 +825,31 @@ export class Memory {
       ...(optionsRest.scoreWeights ?? {}),
     };
 
+    const mergedHybridWeights: HybridWeights = {
+      ...(profileConfig.hybridWeights ?? {}),
+      ...(optionsRest.hybridWeights ?? {}),
+    };
+
     const topK = optionsRest.topK ?? profileConfig.topK ?? 20;
     const threshold = optionsRest.threshold ?? profileConfig.threshold ?? 0.1;
     const explain = optionsRest.explain ?? profileConfig.explain ?? false;
-    const rerank = optionsRest.rerank ?? profileConfig.rerank ?? false;
+    const mergedRerank = this._mergeRerankConfig(
+      profileConfig.rerank,
+      optionsRest.rerank,
+    );
 
-    const appliedConfig: Omit<SearchProfile, "name" | "description"> = {
-      filters: { ...mergedFilters },
-      topK,
-      threshold,
-      explain,
-      scoreWeights: { ...mergedScoreWeights },
-      rerank,
-    };
+    const appliedConfig: Omit<SearchProfile, "name" | "description"> = {};
+    if (normalizedCategories) appliedConfig.categories = normalizedCategories;
+    if (Object.keys(mergedFilters).length > 0)
+      appliedConfig.filters = { ...mergedFilters };
+    appliedConfig.topK = topK;
+    appliedConfig.threshold = threshold;
+    appliedConfig.explain = explain;
+    if (Object.keys(mergedScoreWeights).length > 0)
+      appliedConfig.scoreWeights = { ...mergedScoreWeights };
+    if (Object.keys(mergedHybridWeights).length > 0)
+      appliedConfig.hybridWeights = { ...mergedHybridWeights };
+    appliedConfig.rerank = mergedRerank;
 
     const usedProfile = resolved.profile !== null;
     const profileInfo: {
@@ -777,7 +869,10 @@ export class Memory {
         explain,
         filters: mergedFilters,
         scoreWeights: mergedScoreWeights,
-        rerank,
+        hybridWeights: mergedHybridWeights,
+        categories: normalizedCategories,
+        rawCategories,
+        rerank: mergedRerank,
       },
       profileInfo,
       overriddenFields,
@@ -1393,7 +1488,10 @@ export class Memory {
       explain,
       filters: mergedFilters,
       scoreWeights,
-      rerank,
+      hybridWeights,
+      categories,
+      rawCategories,
+      rerank: rerankConfig,
     } = merged;
 
     const temporalUsageNotice = detectTemporalUsageFromSearch(
@@ -1576,11 +1674,16 @@ export class Memory {
       payload: mem.payload || {},
     }));
 
-    // Step 8: Score and rank with custom weights
+    // Step 8: Score and rank with custom weights (hybridWeights takes precedence over scoreWeights)
+    const hasHybrid = Object.keys(hybridWeights).length > 0;
+    const effectiveWeights = hasHybrid ? (hybridWeights as HybridWeights) : scoreWeights;
     const scoringWeights: ScoringScoreWeights = {
-      semanticWeight: scoreWeights.semanticWeight,
-      bm25Weight: scoreWeights.bm25Weight,
-      entityBoostWeight: scoreWeights.entityBoostWeight,
+      semanticWeight: effectiveWeights.semanticWeight,
+      bm25Weight:
+        effectiveWeights.bm25Weight ??
+        (hasHybrid ? (effectiveWeights as HybridWeights).keywordWeight : undefined),
+      entityBoostWeight: effectiveWeights.entityBoostWeight,
+      vectorWeight: hasHybrid ? (effectiveWeights as HybridWeights).vectorWeight : undefined,
     };
     const scoredResults = scoreAndRank(
       candidates,
@@ -1627,12 +1730,43 @@ export class Memory {
       });
 
     let rerankApplied = false;
-    if (rerank && this.reranker && results.length > 0) {
-      try {
-        results = await this.reranker.rerank(query, results, topK);
-        rerankApplied = true;
-      } catch (e) {
-        console.warn(`Reranking failed, using original results: ${e}`);
+    let appliedRerankProvider: string | null = null;
+    let appliedRerankModel: string | null = null;
+    let appliedRerankTopK: number | null = null;
+
+    if (rerankConfig.enabled && results.length > 0) {
+      let activeReranker: Reranker | null = this.reranker;
+
+      // If profile specifies a different provider, try to instantiate it
+      if (
+        rerankConfig.provider &&
+        rerankConfig.provider !== this.config.reranker?.provider
+      ) {
+        try {
+          activeReranker = RerankerFactory.create(rerankConfig.provider, {
+            provider: rerankConfig.provider,
+            model: rerankConfig.model,
+            config: rerankConfig.config,
+          });
+        } catch (e) {
+          console.warn(
+            `Failed to instantiate reranker '${rerankConfig.provider}': ${e}. Falling back to default.`,
+          );
+        }
+      }
+
+      if (activeReranker) {
+        try {
+          const rerankTopK = rerankConfig.topK ?? topK;
+          results = await activeReranker.rerank(query, results, rerankTopK);
+          rerankApplied = true;
+          appliedRerankProvider =
+            rerankConfig.provider ?? this.config.reranker?.provider ?? null;
+          appliedRerankModel = rerankConfig.model ?? null;
+          appliedRerankTopK = rerankTopK;
+        } catch (e) {
+          console.warn(`Reranking failed, using original results: ${e}`);
+        }
       }
     }
 
@@ -1640,7 +1774,8 @@ export class Memory {
       results,
     };
 
-    if (explain || profileInfo || rerankApplied) {
+    const hasHybridWeights = Object.keys(hybridWeights).length > 0;
+    if (explain || profileInfo || rerankApplied || categories || hasHybridWeights) {
       result.explain = {};
       if (profileInfo) {
         result.explain.profile = profileInfo;
@@ -1648,10 +1783,21 @@ export class Memory {
       if (overriddenFields.length > 0) {
         result.explain.overriddenFields = overriddenFields;
       }
+      if (categories || rawCategories) {
+        result.explain.categories = {
+          raw: rawCategories,
+          normalized: categories,
+        };
+      }
+      if (hasHybridWeights) {
+        result.explain.hybridWeights = { ...hybridWeights };
+      }
       if (rerankApplied) {
         result.explain.rerank = {
           applied: true,
-          provider: this.config.reranker?.provider ?? null,
+          provider: appliedRerankProvider,
+          model: appliedRerankModel,
+          topK: appliedRerankTopK,
         };
       }
     }
@@ -1830,9 +1976,13 @@ export class Memory {
 
     const { topK = 20 } = config;
 
-    const filters: Record<string, any> = this._normalizeEntityFilters(
-      config.filters,
-    );
+    const normalizedCategories = this._normalizeCategories(config.categories);
+    const categoryFilters = this._categoriesToFilters(normalizedCategories);
+    const entityFilters = this._normalizeEntityFilters(config.filters);
+    const filters: Record<string, any> = {
+      ...categoryFilters,
+      ...entityFilters,
+    };
 
     await this._captureEvent("get_all", {
       topK,

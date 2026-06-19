@@ -18,6 +18,7 @@ import { Embedder } from "../embeddings/base";
 import { LLM } from "../llms/base";
 import { VectorStore } from "../vector_stores/base";
 import { Reranker } from "../rerankers/base";
+import { LLMReranker } from "../rerankers/llm";
 import { Qdrant } from "../vector_stores/qdrant";
 import { VectorizeDB } from "../vector_stores/vectorize";
 import { RedisDB } from "../vector_stores/redis";
@@ -140,9 +141,13 @@ export class HistoryManagerFactory {
 export class RerankerFactory {
   static create(provider: string, config: RerankerConfig): Reranker {
     switch (provider.toLowerCase()) {
+      case "llm":
+      case "simple":
+      case "default":
+        return new LLMReranker(config);
       default:
         throw new Error(
-          `Unsupported reranker provider: ${provider}. Available providers will be added in future releases.`,
+          `Unsupported reranker provider: ${provider}. Available providers: llm, simple, default`,
         );
     }
   }

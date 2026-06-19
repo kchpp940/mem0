@@ -6,14 +6,29 @@ export interface ScoreWeights {
   entityBoostWeight?: number;
 }
 
+export interface HybridWeights extends ScoreWeights {
+  vectorWeight?: number;
+  keywordWeight?: number;
+}
+
+export interface SearchRerankConfig {
+  enabled?: boolean;
+  provider?: string;
+  model?: string;
+  topK?: number;
+  config?: Record<string, any>;
+}
+
 export interface SearchProfile {
   name?: string;
+  categories?: string | string[];
   filters?: SearchFilters;
   topK?: number;
   threshold?: number;
   explain?: boolean;
   scoreWeights?: ScoreWeights;
-  rerank?: boolean;
+  hybridWeights?: HybridWeights;
+  rerank?: boolean | SearchRerankConfig;
   description?: string;
 }
 
@@ -27,10 +42,17 @@ export interface SearchExplainInfo {
     appliedConfig: Omit<SearchProfile, "name" | "description">;
   };
   overriddenFields?: string[];
+  categories?: {
+    raw: string | string[] | undefined;
+    normalized: string[] | undefined;
+  };
   rerank?: {
     applied: boolean;
     provider: string | null;
+    model?: string | null;
+    topK?: number | null;
   };
+  hybridWeights?: HybridWeights;
 }
 
 export interface MultiModalMessages {
@@ -150,14 +172,32 @@ const ScoreWeightsSchema = z.object({
   entityBoostWeight: z.number().min(0).max(1).optional(),
 });
 
+const HybridWeightsSchema = z.object({
+  vectorWeight: z.number().min(0).max(1).optional(),
+  keywordWeight: z.number().min(0).max(1).optional(),
+  semanticWeight: z.number().min(0).max(1).optional(),
+  bm25Weight: z.number().min(0).max(1).optional(),
+  entityBoostWeight: z.number().min(0).max(1).optional(),
+});
+
+const SearchRerankConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  provider: z.string().optional(),
+  model: z.string().optional(),
+  topK: z.number().int().min(0).optional(),
+  config: z.record(z.string(), z.any()).optional(),
+});
+
 const SearchProfileSchema = z.object({
   name: z.string().optional(),
+  categories: z.union([z.string(), z.array(z.string())]).optional(),
   filters: z.record(z.string(), z.any()).optional(),
   topK: z.number().int().min(0).optional(),
   threshold: z.number().min(0).max(1).optional(),
   explain: z.boolean().optional(),
   scoreWeights: ScoreWeightsSchema.optional(),
-  rerank: z.boolean().optional(),
+  hybridWeights: HybridWeightsSchema.optional(),
+  rerank: z.union([z.boolean(), SearchRerankConfigSchema]).optional(),
   description: z.string().optional(),
 });
 

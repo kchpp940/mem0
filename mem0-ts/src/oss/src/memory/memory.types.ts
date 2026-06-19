@@ -1,4 +1,10 @@
-import { Message, SearchFilters, SearchProfile } from "../types";
+import {
+  HybridWeights,
+  SearchFilters,
+  SearchProfile,
+  SearchRerankConfig,
+  ScoreWeights,
+} from "../types";
 
 export interface Entity {
   userId?: string;
@@ -15,22 +21,21 @@ export interface AddMemoryOptions extends Entity {
 
 export interface SearchMemoryOptions {
   profile?: string | SearchProfile;
+  categories?: string | string[];
   topK?: number;
   filters?: SearchFilters;
   threshold?: number;
   explain?: boolean;
   referenceDate?: number | string | Date | null;
-  scoreWeights?: {
-    semanticWeight?: number;
-    bm25Weight?: number;
-    entityBoostWeight?: number;
-  };
-  rerank?: boolean;
+  scoreWeights?: ScoreWeights;
+  hybridWeights?: HybridWeights;
+  rerank?: boolean | SearchRerankConfig;
 }
 
 export interface GetAllMemoryOptions {
   topK?: number;
   filters?: SearchFilters;
+  categories?: string | string[];
 }
 
 export interface DeleteAllMemoryOptions extends Entity {}

@@ -79,15 +79,6 @@ const memoriesSlice = createSlice({
     setRelatedMemories: (state, action: PayloadAction<Memory[]>) => {
       state.relatedMemories = action.payload;
     },
-    updateMemoryFeedbackStatus: (state, action: PayloadAction<{ memoryId: string; feedbackStatus: string }>) => {
-      const { memoryId, feedbackStatus } = action.payload;
-      state.memories = state.memories.map((m) =>
-        m.id === memoryId ? { ...m, feedback_status: feedbackStatus as any } : m
-      );
-      if (state.selectedMemory?.id === memoryId) {
-        state.selectedMemory = { ...state.selectedMemory, feedback_status: feedbackStatus };
-      }
-    },
   },
   // extraReducers section is removed as API calls are handled by the hook
 });
@@ -103,8 +94,7 @@ export const {
   clearSelection,
   setSelectedMemory,
   setAccessLogs,
-  setRelatedMemories,
-  updateMemoryFeedbackStatus
+  setRelatedMemories
 } = memoriesSlice.actions;
 
 export default memoriesSlice.reducer; 

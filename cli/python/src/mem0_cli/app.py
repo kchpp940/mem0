@@ -1009,17 +1009,56 @@ def status(
     )
 
 
-@app.command("import", rich_help_panel="Management")
+@app.command("import", rich_help_panel="Memory")
 def import_cmd(
-    file_path: str = typer.Argument(..., help="JSON file to import."),
+    file_path: Path = typer.Argument(..., help="Input file (JSONL, JSON, or CSV)."),
     user_id: str | None = typer.Option(
-        None, "--user-id", "-u", help="Override user ID.", rich_help_panel="Scope"
+        None, "--user-id", "-u", help="Set user ID for all memories.", rich_help_panel="Scope"
     ),
     agent_id: str | None = typer.Option(
-        None, "--agent-id", help="Override agent ID.", rich_help_panel="Scope"
+        None, "--agent-id", help="Set agent ID for all memories.", rich_help_panel="Scope"
+    ),
+    app_id: str | None = typer.Option(
+        None, "--app-id", help="Set app ID for all memories.", rich_help_panel="Scope"
+    ),
+    run_id: str | None = typer.Option(
+        None, "--run-id", help="Set run ID for all memories.", rich_help_panel="Scope"
+    ),
+    category: str | None = typer.Option(
+        None, "--category", help="Add a category to all memories.", rich_help_panel="Metadata"
+    ),
+    categories: str | None = typer.Option(
+        None, "--categories", help="Categories (JSON array or comma-separated).", rich_help_panel="Metadata"
+    ),
+    field_map: str | None = typer.Option(
+        None,
+        "--field-map",
+        help="Field mapping: source=dest, e.g. 'content=memory,owner=user_id'.",
+        rich_help_panel="Mapping",
+    ),
+    metadata: str | None = typer.Option(
+        None, "--metadata", "-m", help="Metadata to attach (JSON).", rich_help_panel="Metadata"
+    ),
+    format: str | None = typer.Option(
+        None, "--format", "-f", help="Input format: jsonl, json, csv (auto-detected from extension).", rich_help_panel="Input"
+    ),
+    batch_size: int = typer.Option(
+        100, "--batch-size", help="Batch size for processing.", rich_help_panel="Processing"
+    ),
+    infer: bool = typer.Option(
+        True, "--infer/--no-infer", help="Infer facts from memory content.", rich_help_panel="Processing"
+    ),
+    cursor: int = typer.Option(
+        0, "--cursor", help="Start index for resuming a failed import.", rich_help_panel="Processing"
+    ),
+    resume: bool = typer.Option(
+        False, "--resume", help="Resume from cursor position.", rich_help_panel="Processing"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Preview import without making changes."
     ),
     output: str = typer.Option(
-        "text", "--output", "-o", help="Output: text, json.", rich_help_panel="Output"
+        "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
     ),
     api_key: str | None = typer.Option(
         None,
@@ -1032,17 +1071,108 @@ def import_cmd(
         None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
     ),
 ) -> None:
-    """Import memories from a JSON file.
+    """Import memories from JSONL, JSON, or CSV with field mapping and batch processing.
+
+    Supports field mapping, category assignment, user/agent/run scope,
+    batch processing with resumable cursor, and dry-run preview.
 
     Examples:
-      mem0 import data.json --user-id alice
-      mem0 import data.json -u alice -o json
+      mem0 import data.jsonl --user-id alice
+      mem0 import data.csv --field-map content=memory,owner=user_id -u alice
+      mem0 import data.json --category preference --dry-run
+      mem0 import data.jsonl --resume --cursor 150
     """
-    from mem0_cli.commands.utils import cmd_import
+    from mem0_cli.commands.memory import cmd_import
 
     backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id)
-    cmd_import(backend, file_path, user_id=ids["user_id"], agent_id=ids["agent_id"], output=output)
+    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
+    cmd_import(
+        backend,
+        file_path,
+        **ids,
+        category=category,
+        categories=categories,
+        field_map=field_map,
+        metadata=metadata,
+        format=format,
+        batch_size=batch_size,
+        infer=infer,
+        cursor=cursor,
+        resume=resume,
+        dry_run=dry_run,
+        output=output,
+    )
+
+
+@app.command("export", rich_help_panel="Memory")
+def export_cmd(
+    output_file: Path = typer.Argument(..., help="Output file path (JSONL)."),
+    user_id: str | None = typer.Option(
+        None, "--user-id", "-u", help="Filter by user.", rich_help_panel="Scope"
+    ),
+    agent_id: str | None = typer.Option(
+        None, "--agent-id", help="Filter by agent.", rich_help_panel="Scope"
+    ),
+    app_id: str | None = typer.Option(
+        None, "--app-id", help="Filter by app.", rich_help_panel="Scope"
+    ),
+    run_id: str | None = typer.Option(
+        None, "--run-id", help="Filter by run.", rich_help_panel="Scope"
+    ),
+    category: str | None = typer.Option(
+        None, "--category", help="Filter by category.", rich_help_panel="Filters"
+    ),
+    after: str | None = typer.Option(
+        None, "--after", help="Created after (YYYY-MM-DD).", rich_help_panel="Filters"
+    ),
+    before: str | None = typer.Option(
+        None, "--before", help="Created before (YYYY-MM-DD).", rich_help_panel="Filters"
+    ),
+    filter_json: str | None = typer.Option(
+        None, "--filter", help="Advanced filter expression (JSON).", rich_help_panel="Filters"
+    ),
+    format: str = typer.Option(
+        "jsonl", "--format", "-f", help="Output format (currently only jsonl).", rich_help_panel="Output"
+    ),
+    output: str = typer.Option(
+        "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
+    ),
+    api_key: str | None = typer.Option(
+        None,
+        "--api-key",
+        help="Override API key.",
+        envvar="MEM0_API_KEY",
+        rich_help_panel="Connection",
+    ),
+    base_url: str | None = typer.Option(
+        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
+    ),
+) -> None:
+    """Export memories to JSONL format with optional filters.
+
+    Exports fields: id, memory, user_id, agent_id, run_id, metadata,
+    created_at, updated_at, categories, feedback, feedback_reason.
+
+    Examples:
+      mem0 export backup.jsonl --user-id alice
+      mem0 export backup.jsonl --category preference --after 2024-01-01
+      mem0 export backup.jsonl --filter '{"user_id": "alice"}'
+    """
+    from mem0_cli.commands.memory import cmd_export
+
+    backend, config = _get_backend_and_config(api_key, base_url)
+    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
+    cmd_export(
+        backend,
+        output_file,
+        **ids,
+        category=category,
+        after=after,
+        before=before,
+        filter_json=filter_json,
+        format=format,
+        output=output,
+    )
 
 
 # ── Help (machine-readable) ──────────────────────────────────────────────
@@ -1150,13 +1280,52 @@ def _build_help_json() -> dict:
             },
         },
         "import": {
-            "description": "Import memories from a JSON file.",
+            "description": "Import memories from JSONL, JSON, or CSV with field mapping and batch processing.",
             "usage": "mem0 import <file_path> [OPTIONS]",
-            "arguments": {"file_path": {"description": "JSON file to import.", "required": True}},
+            "arguments": {
+                "file_path": {
+                    "description": "Input file (JSONL, JSON, or CSV).",
+                    "required": True,
+                }
+            },
             "options": {
-                "--user-id, -u": "Override user ID.",
-                "--agent-id": "Override agent ID.",
-                "--output, -o": "Output format: text, json.",
+                "--user-id, -u": "Set user ID for all memories.",
+                "--agent-id": "Set agent ID for all memories.",
+                "--app-id": "Set app ID for all memories.",
+                "--run-id": "Set run ID for all memories.",
+                "--category": "Add a category to all memories.",
+                "--categories": "Categories (JSON array or comma-separated).",
+                "--field-map": "Field mapping: source=dest, e.g. 'content=memory,owner=user_id'.",
+                "--metadata, -m": "Metadata to attach (JSON).",
+                "--format, -f": "Input format: jsonl, json, csv (auto-detected from extension).",
+                "--batch-size": "Batch size for processing (default: 100).",
+                "--infer/--no-infer": "Infer facts from memory content (default: true).",
+                "--cursor": "Start index for resuming a failed import.",
+                "--resume": "Resume from cursor position.",
+                "--dry-run": "Preview import without making changes.",
+                "--output, -o": "Output format: text, json, quiet.",
+            },
+        },
+        "export": {
+            "description": "Export memories to JSONL format with optional filters.",
+            "usage": "mem0 export <output_file> [OPTIONS]",
+            "arguments": {
+                "output_file": {
+                    "description": "Output file path (JSONL).",
+                    "required": True,
+                }
+            },
+            "options": {
+                "--user-id, -u": "Filter by user.",
+                "--agent-id": "Filter by agent.",
+                "--app-id": "Filter by app.",
+                "--run-id": "Filter by run.",
+                "--category": "Filter by category.",
+                "--after": "Created after (YYYY-MM-DD).",
+                "--before": "Created before (YYYY-MM-DD).",
+                "--filter": "Advanced filter expression (JSON).",
+                "--format, -f": "Output format (currently only jsonl).",
+                "--output, -o": "Output format: text, json, quiet.",
             },
         },
         "config show": {

@@ -348,6 +348,74 @@ class PlatformBackend(Backend):
     def get_event(self, event_id: str) -> dict:
         return self._request("GET", f"/v1/event/{event_id}/")
 
+    def batch_import(
+        self,
+        memories: list[dict],
+        *,
+        cursor: int = 0,
+        batch_size: int = 100,
+        infer: bool = True,
+    ) -> dict:
+        payload = {
+            "memories": memories,
+            "cursor": cursor,
+            "batch_size": batch_size,
+            "infer": infer,
+        }
+        return self._request("POST", "/v1/memories/batch/import", json=payload)
+
+    def export_memories(
+        self,
+        *,
+        user_id: str | None = None,
+        agent_id: str | None = None,
+        app_id: str | None = None,
+        run_id: str | None = None,
+        category: str | None = None,
+        after: str | None = None,
+        before: str | None = None,
+        filters: dict | None = None,
+    ) -> str:
+        params = {
+            "source": "CLI",
+        }
+        if user_id:
+            params["user_id"] = user_id
+        if agent_id:
+            params["agent_id"] = agent_id
+        if app_id:
+            params["app_id"] = app_id
+        if run_id:
+            params["run_id"] = run_id
+        if category:
+            params["category"] = category
+        if after:
+            params["after"] = after
+        if before:
+            params["before"] = before
+
+        if filters:
+            payload = {"filters": filters}
+            resp = self._client.post("/v1/memories/export", params=params, json=payload)
+        else:
+            resp = self._client.get("/v1/memories/export", params=params)
+
+        if resp.status_code == 401:
+            raise AuthError("Authentication failed. Your API key may be invalid or expired.")
+        if resp.status_code == 404:
+            raise NotFoundError("Resource not found: /v1/memories/export")
+        if resp.status_code == 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise APIError(f"Bad request to /v1/memories/export: {detail}")
+        resp.raise_for_status()
+        return resp.text
+
+    def get_batch_status(self, batch_id: str) -> dict:
+        return self._request("GET", f"/v1/memories/batch/import/{batch_id}")
+
 
 class AuthError(Exception):
     pass

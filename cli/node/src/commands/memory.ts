@@ -1,10 +1,14 @@
 /**
- * Memory CRUD commands: add, search, get, list, update, delete.
+ * Memory CRUD commands: add, search, get, list, update, delete, import, export.
  */
 
 import fs from "node:fs";
-import type { Backend } from "../backend/base.js";
+import path from "node:path";
+import Table from "cli-table3";
+import ora from "ora";
+import type { Backend, BatchImportResponse } from "../backend/base.js";
 import {
+	colors,
 	printError,
 	printInfo,
 	printScope,
@@ -22,6 +26,8 @@ import {
 	printResultSummary,
 } from "../output.js";
 import { isAgentMode, setCurrentCommand } from "../state.js";
+
+const { brand, accent, success, error: errorColor, dim } = colors;
 
 /** True only when stdin is an actual pipe or file redirect — never in agent mode. */
 function _stdinIsPiped(): boolean {
@@ -700,4 +706,521 @@ export async function cmdDeleteAll(
 			printSuccess(`All matching memories deleted (${elapsed.toFixed(2)}s)`);
 		}
 	}
+}
+
+// ── Import / Export helpers ────────────────────────────────────────────────
+
+function _parseFieldMap(fieldMapStr: string): Record<string, string> {
+	const mapping: Record<string, string> = {};
+	if (!fieldMapStr) return mapping;
+	for (const pair of fieldMapStr.split(",")) {
+		if (pair.includes("=")) {
+			const [src, dst] = pair.split("=", 2);
+			mapping[src.trim()] = dst.trim();
+		}
+	}
+	return mapping;
+}
+
+function _applyFieldMap(
+	item: Record<string, unknown>,
+	fieldMap: Record<string, string>,
+): Record<string, unknown> {
+	if (!fieldMap || Object.keys(fieldMap).length === 0) return item;
+	const mapped: Record<string, unknown> = { ...item };
+	for (const [src, dst] of Object.entries(fieldMap)) {
+		if (src in mapped && src !== dst) {
+			mapped[dst] = mapped[src];
+			delete mapped[src];
+		}
+	}
+	return mapped;
+}
+
+function _readInputFile(
+	filePath: string,
+	formatHint?: string,
+): Record<string, unknown>[] {
+	const ext = formatHint
+		? `.${formatHint.toLowerCase()}`
+		: path.extname(filePath).toLowerCase();
+
+	if (ext === ".jsonl") {
+		const items: Record<string, unknown>[] = [];
+		const lines = fs.readFileSync(filePath, "utf-8").split("\n");
+		for (let i = 0; i < lines.length; i++) {
+			const line = lines[i].trim();
+			if (!line) continue;
+			try {
+				items.push(JSON.parse(line));
+			} catch (e) {
+				throw new Error(
+					`Invalid JSONL at line ${i + 1}: ${e instanceof Error ? e.message : String(e)}`,
+				);
+			}
+		}
+		return items;
+	}
+
+	if (ext === ".csv") {
+		const content = fs.readFileSync(filePath, "utf-8");
+		const lines = content.split("\n").filter((l) => l.trim());
+		if (lines.length === 0) return [];
+
+		const headers = lines[0].split(",").map((h) => h.trim());
+		const items: Record<string, unknown>[] = [];
+
+		for (let i = 1; i < lines.length; i++) {
+			const values = lines[i].split(",");
+			const item: Record<string, unknown> = {};
+			for (let j = 0; j < headers.length; j++) {
+				item[headers[j]] = values[j]?.trim() ?? "";
+			}
+			items.push(item);
+		}
+		return items;
+	}
+
+	// Default: JSON
+	try {
+		const data = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+		return Array.isArray(data) ? data : [data];
+	} catch (e) {
+		throw new Error(
+			`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`,
+		);
+	}
+}
+
+function _normalizeImportItem(
+	item: Record<string, unknown>,
+	opts: {
+		userId?: string;
+		agentId?: string;
+		appId?: string;
+		runId?: string;
+		category?: string;
+		categories?: string[];
+		metadata?: Record<string, unknown>;
+	},
+): Record<string, unknown> {
+	const normalized: Record<string, unknown> = { ...item };
+
+	if (opts.userId) normalized.user_id = opts.userId;
+	if (opts.agentId) normalized.agent_id = opts.agentId;
+	if (opts.appId) normalized.app_id = opts.appId;
+	if (opts.runId) normalized.run_id = opts.runId;
+
+	if (opts.category) {
+		let cats: string[] = [];
+		const existing = normalized.categories;
+		if (typeof existing === "string") {
+			cats = existing.split(",").map((c) => c.trim());
+		} else if (Array.isArray(existing)) {
+			cats = existing as string[];
+		}
+		if (!cats.includes(opts.category)) {
+			cats.push(opts.category);
+		}
+		normalized.categories = cats;
+	} else if (opts.categories) {
+		normalized.categories = opts.categories;
+	}
+
+	if (opts.metadata) {
+		let existingMeta: Record<string, unknown> = {};
+		const em = normalized.metadata;
+		if (em && typeof em === "object" && !Array.isArray(em)) {
+			existingMeta = em as Record<string, unknown>;
+		} else if (em !== undefined && em !== null) {
+			existingMeta = { value: em };
+		}
+		normalized.metadata = { ...existingMeta, ...opts.metadata };
+	}
+
+	return normalized;
+}
+
+function _formatPreviewTable(
+	items: Record<string, unknown>[],
+	maxRows = 10,
+): string {
+	const table = new Table({
+		head: [
+			accent("#"),
+			accent("Content"),
+			accent("user_id"),
+			accent("agent_id"),
+			accent("categories"),
+		],
+		colWidths: [4, 50, 20, 20, 20],
+		wordWrap: true,
+		style: { head: [], border: [] },
+	});
+
+	for (let i = 0; i < Math.min(items.length, maxRows); i++) {
+		const item = items[i];
+		let content = (item.memory ?? item.text ?? item.content ?? "") as string;
+		if (content.length > 47) content = `${content.slice(0, 47)}...`;
+		const cats = item.categories;
+		const catStr = Array.isArray(cats) ? cats.join(", ") : "";
+		table.push([
+			dim(String(i + 1)),
+			content,
+			String(item.user_id ?? ""),
+			String(item.agent_id ?? ""),
+			catStr,
+		]);
+	}
+
+	if (items.length > maxRows) {
+		table.push([
+			"...",
+			`... and ${items.length - maxRows} more rows`,
+			"",
+			"",
+			"",
+		]);
+	}
+
+	return table.toString();
+}
+
+// ── Import command ────────────────────────────────────────────────────────
+
+export async function cmdImport(
+	backend: Backend,
+	filePath: string,
+	opts: {
+		userId?: string;
+		agentId?: string;
+		appId?: string;
+		runId?: string;
+		category?: string;
+		categories?: string;
+		fieldMap?: string;
+		metadata?: string;
+		format?: string;
+		batchSize?: number;
+		infer?: boolean;
+		cursor?: number;
+		resume?: boolean;
+		dryRun?: boolean;
+		output: string;
+	},
+): Promise<void> {
+	setCurrentCommand("import");
+
+	if (!fs.existsSync(filePath)) {
+		printError(`File not found: ${filePath}`);
+		process.exit(1);
+	}
+
+	// Parse categories
+	let catsList: string[] | undefined;
+	if (opts.categories) {
+		try {
+			catsList = JSON.parse(opts.categories);
+		} catch {
+			catsList = opts.categories.split(",").map((c) => c.trim());
+		}
+	}
+
+	// Parse metadata
+	let metaDict: Record<string, unknown> | undefined;
+	if (opts.metadata) {
+		try {
+			metaDict = JSON.parse(opts.metadata);
+		} catch {
+			printError("Invalid JSON in --metadata.");
+			process.exit(1);
+		}
+	}
+
+	// Parse field mapping
+	const mapping = _parseFieldMap(opts.fieldMap ?? "");
+
+	// Read input file
+	let items: Record<string, unknown>[];
+	try {
+		items = _readInputFile(filePath, opts.format);
+	} catch (e) {
+		printError(e instanceof Error ? e.message : String(e));
+		process.exit(1);
+	}
+
+	const total = items.length;
+	if (total === 0) {
+		printInfo("No items to import.");
+		return;
+	}
+
+	// Apply field mapping and normalization
+	items = items.map((item) => _applyFieldMap(item, mapping));
+	items = items.map((item) =>
+		_normalizeImportItem(item, {
+			userId: opts.userId,
+			agentId: opts.agentId,
+			appId: opts.appId,
+			runId: opts.runId,
+			category: opts.category,
+			categories: catsList,
+			metadata: metaDict,
+		}),
+	);
+
+	// Dry-run preview
+	if (opts.dryRun) {
+		if (opts.output === "agent" || opts.output === "json") {
+			const preview: Record<string, unknown> = {
+				total,
+				batch_size: opts.batchSize ?? 100,
+				cursor: opts.cursor ?? 0,
+				infer: opts.infer ?? true,
+				field_map: mapping,
+				items: items.slice(0, 10),
+			};
+			const scope: Record<string, string | undefined> = {
+				user_id: opts.userId,
+				agent_id: opts.agentId,
+				app_id: opts.appId,
+				run_id: opts.runId,
+				category: opts.category,
+			};
+			formatAgentEnvelope({
+				command: "import",
+				data: preview,
+				scope,
+				count: total,
+			});
+			return;
+		}
+
+		console.log();
+		console.log(brand("Import Preview (first 10 rows):"));
+		console.log();
+		console.log(_formatPreviewTable(items));
+		console.log();
+		printInfo(`Total items: ${total}`);
+		printInfo(`Batch size: ${opts.batchSize ?? 100}`);
+		if (Object.keys(mapping).length > 0) {
+			printInfo(`Field mapping: ${JSON.stringify(mapping)}`);
+		}
+		printInfo("No changes made (dry run).");
+		return;
+	}
+
+	// Resume from cursor
+	const startCursor = opts.resume ? (opts.cursor ?? 0) : 0;
+	if (opts.resume && startCursor > 0) {
+		printInfo(`Resuming from cursor: ${startCursor}`);
+	}
+
+	const start = performance.now();
+	let totalSuccess = 0;
+	let totalFailed = 0;
+	const allSuccessful: BatchImportResponse["successful"] = [];
+	const allFailed: BatchImportResponse["failed"] = [];
+	let currentCursor = startCursor;
+	const batchSize = opts.batchSize ?? 100;
+	let lastResult: BatchImportResponse | undefined;
+
+	const spinner = ora({
+		text: dim(`Importing ${total} memories...`),
+		color: "yellow",
+		stream: process.stderr,
+	}).start();
+
+	while (currentCursor < total) {
+		const batchEnd = Math.min(currentCursor + batchSize, total);
+		const batchItems = items.slice(currentCursor, batchEnd);
+
+		try {
+			const result = await backend.batchImport(batchItems, {
+				cursor: currentCursor,
+				batchSize,
+				infer: opts.infer,
+			});
+			lastResult = result;
+
+			totalSuccess += result.successCount;
+			totalFailed += result.failedCount;
+			allSuccessful.push(...result.successful);
+			allFailed.push(...result.failed);
+			currentCursor = result.cursor;
+
+			const progress = Math.round((currentCursor / total) * 100);
+			spinner.text = dim(
+				`Importing... ${currentCursor}/${total} (${progress}%) · ${totalSuccess} ok · ${totalFailed} failed`,
+			);
+		} catch (e) {
+			spinner.stop();
+			printError(
+				`Batch import failed at cursor ${currentCursor}: ${e instanceof Error ? e.message : String(e)}`,
+			);
+			printInfo(`To resume, run with --resume --cursor ${currentCursor}`);
+			process.exit(1);
+		}
+	}
+
+	spinner.stop();
+	const elapsed = (performance.now() - start) / 1000;
+
+	if (opts.output === "agent" || opts.output === "json") {
+		const data: Record<string, unknown> = {
+			batch_id: lastResult?.batchId,
+			total,
+			processed: currentCursor,
+			success_count: totalSuccess,
+			failed_count: totalFailed,
+			cursor: currentCursor,
+			completed: currentCursor >= total,
+			successful: allSuccessful,
+			failed: allFailed,
+		};
+		const scope: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+		};
+		formatAgentEnvelope({
+			command: "import",
+			data,
+			scope,
+			count: total,
+			durationMs: Math.round(elapsed * 1000),
+		});
+		return;
+	}
+
+	console.log();
+	printScope({
+		user_id: opts.userId,
+		agent_id: opts.agentId,
+		app_id: opts.appId,
+		run_id: opts.runId,
+	});
+	printSuccess(
+		`Import complete — ${totalSuccess} succeeded, ${totalFailed} failed (${elapsed.toFixed(2)}s)`,
+	);
+
+	if (currentCursor < total) {
+		printInfo(`To resume, run with --resume --cursor ${currentCursor}`);
+	}
+
+	if (allFailed.length > 0) {
+		console.log();
+		console.log(`${errorColor("Failures:")}`);
+		for (let i = 0; i < Math.min(allFailed.length, 10); i++) {
+			const f = allFailed[i];
+			const mem = (f.data?.memory ?? f.data?.text ?? "") as string;
+			const memPreview = mem.slice(0, 50);
+			console.log(`  ${dim(`#${f.index}:`)} ${f.error} — ${memPreview}...`);
+		}
+		if (allFailed.length > 10) {
+			console.log(`  ${dim(`... and ${allFailed.length - 10} more`)}`);
+		}
+	}
+}
+
+// ── Export command ────────────────────────────────────────────────────────
+
+export async function cmdExport(
+	backend: Backend,
+	outputFile: string,
+	opts: {
+		userId?: string;
+		agentId?: string;
+		appId?: string;
+		runId?: string;
+		category?: string;
+		after?: string;
+		before?: string;
+		filterJson?: string;
+		format?: string;
+		output: string;
+	},
+): Promise<void> {
+	setCurrentCommand("export");
+
+	let filters: Record<string, unknown> | undefined;
+	if (opts.filterJson) {
+		try {
+			filters = JSON.parse(opts.filterJson);
+		} catch {
+			printError("Invalid JSON in --filter.");
+			process.exit(1);
+		}
+	}
+
+	const start = performance.now();
+	let exportData: string;
+	try {
+		exportData = await backend.exportMemories({
+			userId: opts.userId,
+			agentId: opts.agentId,
+			appId: opts.appId,
+			runId: opts.runId,
+			category: opts.category,
+			after: opts.after,
+			before: opts.before,
+			filters,
+		});
+	} catch (e) {
+		printError(`Export failed: ${e instanceof Error ? e.message : String(e)}`);
+		process.exit(1);
+	}
+
+	const elapsed = (performance.now() - start) / 1000;
+
+	// Count exported items
+	const count = exportData
+		.trim()
+		.split("\n")
+		.filter((l) => l.trim()).length;
+
+	// Write to file
+	try {
+		fs.writeFileSync(outputFile, exportData, "utf-8");
+	} catch (e) {
+		printError(
+			`Failed to write output file: ${e instanceof Error ? e.message : String(e)}`,
+		);
+		process.exit(1);
+	}
+
+	if (opts.output === "agent" || opts.output === "json") {
+		const data: Record<string, unknown> = {
+			file: outputFile,
+			count,
+			format: opts.format ?? "jsonl",
+		};
+		const scope: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+			category: opts.category,
+		};
+		formatAgentEnvelope({
+			command: "export",
+			data,
+			scope,
+			count,
+			durationMs: Math.round(elapsed * 1000),
+		});
+		return;
+	}
+
+	console.log();
+	printScope({
+		user_id: opts.userId,
+		agent_id: opts.agentId,
+		app_id: opts.appId,
+		run_id: opts.runId,
+	});
+	printSuccess(
+		`Exported ${count} memories to ${outputFile} (${elapsed.toFixed(2)}s)`,
+	);
 }

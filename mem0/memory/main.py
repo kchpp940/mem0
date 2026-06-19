@@ -10,12 +10,12 @@ import uuid
 import warnings
 from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
 
-from mem0.configs.base import FeedbackRecord, MemoryConfig, MemoryItem
-from mem0.configs.enums import FeedbackStatus, MemoryType
+from mem0.configs.base import MemoryConfig, MemoryItem
+from mem0.configs.enums import MemoryType
 from mem0.configs.prompts import (
     ADDITIVE_EXTRACTION_PROMPT,
     AGENT_CONTEXT_SUFFIX,
@@ -1149,7 +1149,6 @@ class Memory(MemoryBase):
         if additional_metadata:
             result_item["metadata"] = additional_metadata
 
-        self._attach_feedback_to_result(result_item)
         annotate_memory_result(result_item)
 
         display_first_run_notice(self, "sync", "get")
@@ -1272,7 +1271,6 @@ class Memory(MemoryBase):
             if additional_metadata:
                 memory_item_dict["metadata"] = additional_metadata
 
-            self._attach_feedback_to_result(memory_item_dict)
             annotate_memory_result(memory_item_dict)
 
             formatted_memories.append(memory_item_dict)
@@ -1582,9 +1580,6 @@ class Memory(MemoryBase):
             explain=explain,
         )
 
-        # Step 8.5: Apply feedback-based score penalties
-        scored_results = self._apply_feedback_penalty(scored_results)
-
         # Step 9: Format results
         promoted_payload_keys = [
             "user_id",
@@ -1629,7 +1624,6 @@ class Memory(MemoryBase):
             if explain and "score_details" in scored:
                 memory_item_dict["score_details"] = scored["score_details"]
 
-            self._attach_feedback_to_result(memory_item_dict)
             annotate_memory_result(memory_item_dict)
 
             original_memories.append(memory_item_dict)
@@ -1815,213 +1809,6 @@ class Memory(MemoryBase):
         history = self.db.get_history(memory_id)
         display_first_run_notice(self, "sync", "history")
         return history
-
-    def feedback(
-        self,
-        memory_id: str,
-        status: str,
-        *,
-        reason: Optional[str] = None,
-        reviewer_id: Optional[str] = None,
-        linked_history_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Submit feedback on a memory.
-
-        Args:
-            memory_id (str): ID of the memory to submit feedback for.
-            status (str): Feedback status. Must be one of: confirmed, incorrect, outdated, needs_review.
-            reason (str, optional): Feedback reason or explanation. Defaults to None.
-            reviewer_id (str, optional): ID of the person/system submitting the feedback. Defaults to None.
-            linked_history_id (str, optional): ID of linked history record (for update/delete traceability).
-                If None, automatically links to the most recent history event for this memory. Defaults to None.
-
-        Returns:
-            dict: Feedback submission result containing the feedback record details.
-
-        Raises:
-            ValueError: If memory_id is not found, or status is invalid.
-        """
-        valid_statuses = {s.value for s in FeedbackStatus}
-        if status not in valid_statuses:
-            raise ValueError(
-                f"Invalid feedback status '{status}'. Must be one of: {', '.join(sorted(valid_statuses))}"
-            )
-
-        capture_event(
-            "mem0.feedback",
-            self,
-            {"memory_id": memory_id, "status": status, "sync_type": "sync"},
-        )
-
-        existing_memory = self.vector_store.get(vector_id=memory_id)
-        if existing_memory is None:
-            history_records = self.db.get_history(memory_id)
-            if not history_records:
-                raise ValueError(f"Memory with id {memory_id} not found. Please provide a valid 'memory_id'")
-
-        current_feedback = self.db.get_current_feedback_status(memory_id)
-        previous_status = current_feedback["status"] if current_feedback else None
-
-        if linked_history_id is None:
-            memory_history = self.db.get_history(memory_id)
-            if memory_history:
-                linked_history_id = memory_history[-1]["id"]
-
-        feedback_id = self.db.add_feedback(
-            memory_id=memory_id,
-            status=status,
-            reason=reason,
-            reviewer_id=reviewer_id,
-            previous_status=previous_status,
-            linked_history_id=linked_history_id,
-        )
-
-        new_feedback_list = self.db.get_feedback_for_memory(memory_id)
-        new_record = None
-        for fb in new_feedback_list:
-            if fb["id"] == feedback_id:
-                new_record = fb
-                break
-
-        display_first_run_notice(self, "sync", "feedback")
-
-        return {
-            "message": "Feedback submitted successfully",
-            "feedback": new_record,
-        }
-
-    def get_feedback(self, memory_id: str) -> List[Dict[str, Any]]:
-        """
-        Get all feedback records for a specific memory.
-
-        Args:
-            memory_id (str): ID of the memory to get feedback for.
-
-        Returns:
-            list: Feedback records in chronological order.
-        """
-        capture_event("mem0.get_feedback", self, {"memory_id": memory_id, "sync_type": "sync"})
-        return self.db.get_feedback_for_memory(memory_id)
-
-    def list_feedback_by_status(
-        self,
-        status: str,
-        *,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        run_id: Optional[str] = None,
-    ) -> List[str]:
-        """
-        List memory IDs filtered by current feedback status, optionally scoped by entity.
-
-        Args:
-            status (str): Feedback status to filter by (confirmed, incorrect, outdated, needs_review, unreviewed).
-            user_id (str, optional): Scope to a specific user.
-            agent_id (str, optional): Scope to a specific agent.
-            run_id (str, optional): Scope to a specific run.
-
-        Returns:
-            list: Memory IDs matching the criteria.
-        """
-        valid_statuses = {s.value for s in FeedbackStatus}
-        if status not in valid_statuses:
-            raise ValueError(
-                f"Invalid feedback status '{status}'. Must be one of: {', '.join(sorted(valid_statuses))}"
-            )
-        capture_event(
-            "mem0.list_feedback_by_status",
-            self,
-            {"status": status, "sync_type": "sync"},
-        )
-        return self.db.list_memories_by_feedback_status(
-            status, user_id=user_id, agent_id=agent_id, run_id=run_id
-        )
-
-    def _attach_feedback_to_result(self, memory_dict: Dict[str, Any]) -> None:
-        """
-        Attach feedback status and history to a memory result dictionary, IN-PLACE.
-
-        Feedback data lives in a separate SQLite table and is NEVER mixed into user
-        metadata — this method injects it at the top-level of the returned dict
-        for API ergonomics.
-
-        Args:
-            memory_dict: Memory dictionary as produced by MemoryItem.model_dump().
-        """
-        memory_id = memory_dict.get("id")
-        if not memory_id:
-            return
-
-        feedback_list_raw = self.db.get_feedback_for_memory(memory_id)
-        if not feedback_list_raw:
-            memory_dict["feedback_status"] = FeedbackStatus.UNREVIEWED.value
-            memory_dict["feedback_history"] = []
-            return
-
-        feedback_records = []
-        for fb_raw in feedback_list_raw:
-            feedback_records.append(
-                FeedbackRecord(
-                    id=fb_raw["id"],
-                    status=fb_raw["status"],
-                    reason=fb_raw.get("reason"),
-                    reviewer_id=fb_raw.get("reviewer_id"),
-                    created_at=fb_raw["created_at"],
-                    previous_status=fb_raw.get("previous_status"),
-                    linked_history_id=fb_raw.get("linked_history_id"),
-                ).model_dump()
-            )
-
-        memory_dict["feedback_status"] = feedback_records[-1]["status"]
-        memory_dict["feedback_history"] = feedback_records
-
-    def _apply_feedback_penalty(self, scored_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Apply score penalties to memories based on feedback status.
-
-        - incorrect: 70% penalty (multiplier 0.3)
-        - outdated: 40% penalty (multiplier 0.6)
-        - needs_review: 10% penalty (multiplier 0.9)
-        - confirmed / unreviewed: no penalty
-
-        Args:
-            scored_results: List of scored result dicts from score_and_rank.
-
-        Returns:
-            New list of result dicts with adjusted scores, re-sorted descending.
-        """
-        PENALTIES = {
-            FeedbackStatus.INCORRECT.value: 0.3,
-            FeedbackStatus.OUTDATED.value: 0.6,
-            FeedbackStatus.NEEDS_REVIEW.value: 0.9,
-            FeedbackStatus.CONFIRMED.value: 1.0,
-            FeedbackStatus.UNREVIEWED.value: 1.0,
-        }
-
-        adjusted = []
-        for result in scored_results:
-            mem_id = result.get("id")
-            multiplier = 1.0
-            if mem_id:
-                current_fb = self.db.get_current_feedback_status(mem_id)
-                if current_fb:
-                    multiplier = PENALTIES.get(current_fb["status"], 1.0)
-
-            original_score = result.get("score", 0.0)
-            new_score = original_score * multiplier
-
-            new_result = dict(result)
-            new_result["score"] = new_score
-            if "score_details" in new_result:
-                new_result["score_details"] = dict(new_result["score_details"])
-                new_result["score_details"]["feedback_multiplier"] = multiplier
-                new_result["score_details"]["final_score_after_feedback"] = new_score
-
-            adjusted.append(new_result)
-
-        adjusted.sort(key=lambda x: x["score"], reverse=True)
-        return adjusted
 
     def _create_memory(self, data, existing_embeddings, metadata=None):
         logger.debug(f"Creating memory with {data=}")
@@ -2886,9 +2673,6 @@ class AsyncMemory(MemoryBase):
         if additional_metadata:
             result_item["metadata"] = additional_metadata
 
-        await self._attach_feedback_to_result(result_item)
-        annotate_memory_result(result_item)
-
         await display_first_run_notice_async(self, "async", "get")
         return result_item
 
@@ -3002,9 +2786,6 @@ class AsyncMemory(MemoryBase):
             additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
             if additional_metadata:
                 memory_item_dict["metadata"] = additional_metadata
-
-            await self._attach_feedback_to_result(memory_item_dict)
-            annotate_memory_result(memory_item_dict)
 
             formatted_memories.append(memory_item_dict)
 
@@ -3319,9 +3100,6 @@ class AsyncMemory(MemoryBase):
             explain=explain,
         )
 
-        # Step 8.5: Apply feedback-based score penalties
-        scored_results = await self._apply_feedback_penalty(scored_results)
-
         # Step 9: Format results
         promoted_payload_keys = [
             "user_id",
@@ -3358,9 +3136,6 @@ class AsyncMemory(MemoryBase):
                 memory_item_dict["metadata"].update(additional_metadata)
             if explain and "score_details" in scored:
                 memory_item_dict["score_details"] = scored["score_details"]
-
-            await self._attach_feedback_to_result(memory_item_dict)
-            annotate_memory_result(memory_item_dict)
 
             original_memories.append(memory_item_dict)
 
@@ -3547,177 +3322,6 @@ class AsyncMemory(MemoryBase):
         history = await asyncio.to_thread(self.db.get_history, memory_id)
         await display_first_run_notice_async(self, "async", "history")
         return history
-
-    async def feedback(
-        self,
-        memory_id: str,
-        status: str,
-        *,
-        reason: Optional[str] = None,
-        reviewer_id: Optional[str] = None,
-        linked_history_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Submit feedback on a memory (async version).
-
-        Args:
-            memory_id (str): ID of the memory to submit feedback for.
-            status (str): Feedback status. Must be one of: confirmed, incorrect, outdated, needs_review.
-            reason (str, optional): Feedback reason or explanation. Defaults to None.
-            reviewer_id (str, optional): ID of the person/system submitting the feedback. Defaults to None.
-            linked_history_id (str, optional): ID of linked history record. Auto-links to latest if None.
-
-        Returns:
-            dict: Feedback submission result.
-        """
-        valid_statuses = {s.value for s in FeedbackStatus}
-        if status not in valid_statuses:
-            raise ValueError(
-                f"Invalid feedback status '{status}'. Must be one of: {', '.join(sorted(valid_statuses))}"
-            )
-
-        capture_event(
-            "mem0.feedback",
-            self,
-            {"memory_id": memory_id, "status": status, "sync_type": "async"},
-        )
-
-        existing_memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
-        if existing_memory is None:
-            history_records = await asyncio.to_thread(self.db.get_history, memory_id)
-            if not history_records:
-                raise ValueError(f"Memory with id {memory_id} not found. Please provide a valid 'memory_id'")
-
-        current_feedback = await asyncio.to_thread(self.db.get_current_feedback_status, memory_id)
-        previous_status = current_feedback["status"] if current_feedback else None
-
-        if linked_history_id is None:
-            memory_history = await asyncio.to_thread(self.db.get_history, memory_id)
-            if memory_history:
-                linked_history_id = memory_history[-1]["id"]
-
-        feedback_id = await asyncio.to_thread(
-            self.db.add_feedback,
-            memory_id=memory_id,
-            status=status,
-            reason=reason,
-            reviewer_id=reviewer_id,
-            previous_status=previous_status,
-            linked_history_id=linked_history_id,
-        )
-
-        new_feedback_list = await asyncio.to_thread(self.db.get_feedback_for_memory, memory_id)
-        new_record = None
-        for fb in new_feedback_list:
-            if fb["id"] == feedback_id:
-                new_record = fb
-                break
-
-        await display_first_run_notice_async(self, "async", "feedback")
-
-        return {
-            "message": "Feedback submitted successfully",
-            "feedback": new_record,
-        }
-
-    async def get_feedback(self, memory_id: str) -> List[Dict[str, Any]]:
-        """
-        Get all feedback records for a specific memory (async).
-        """
-        capture_event("mem0.get_feedback", self, {"memory_id": memory_id, "sync_type": "async"})
-        return await asyncio.to_thread(self.db.get_feedback_for_memory, memory_id)
-
-    async def list_feedback_by_status(
-        self,
-        status: str,
-        *,
-        user_id: Optional[str] = None,
-        agent_id: Optional[str] = None,
-        run_id: Optional[str] = None,
-    ) -> List[str]:
-        """
-        List memory IDs filtered by current feedback status, optionally scoped by entity (async).
-        """
-        valid_statuses = {s.value for s in FeedbackStatus}
-        if status not in valid_statuses:
-            raise ValueError(
-                f"Invalid feedback status '{status}'. Must be one of: {', '.join(sorted(valid_statuses))}"
-            )
-        capture_event(
-            "mem0.list_feedback_by_status",
-            self,
-            {"status": status, "sync_type": "async"},
-        )
-        return await asyncio.to_thread(
-            self.db.list_memories_by_feedback_status,
-            status, user_id=user_id, agent_id=agent_id, run_id=run_id,
-        )
-
-    async def _attach_feedback_to_result(self, memory_dict: Dict[str, Any]) -> None:
-        """Async wrapper — delegates to thread-pool execution."""
-        memory_id = memory_dict.get("id")
-        if not memory_id:
-            return
-
-        feedback_list_raw = await asyncio.to_thread(self.db.get_feedback_for_memory, memory_id)
-        if not feedback_list_raw:
-            memory_dict["feedback_status"] = FeedbackStatus.UNREVIEWED.value
-            memory_dict["feedback_history"] = []
-            return
-
-        feedback_records = []
-        for fb_raw in feedback_list_raw:
-            feedback_records.append(
-                FeedbackRecord(
-                    id=fb_raw["id"],
-                    status=fb_raw["status"],
-                    reason=fb_raw.get("reason"),
-                    reviewer_id=fb_raw.get("reviewer_id"),
-                    created_at=fb_raw["created_at"],
-                    previous_status=fb_raw.get("previous_status"),
-                    linked_history_id=fb_raw.get("linked_history_id"),
-                ).model_dump()
-            )
-
-        memory_dict["feedback_status"] = feedback_records[-1]["status"]
-        memory_dict["feedback_history"] = feedback_records
-
-    async def _apply_feedback_penalty(self, scored_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Apply score penalties to memories based on feedback status (async).
-        Same penalty matrix as the sync version.
-        """
-        PENALTIES = {
-            FeedbackStatus.INCORRECT.value: 0.3,
-            FeedbackStatus.OUTDATED.value: 0.6,
-            FeedbackStatus.NEEDS_REVIEW.value: 0.9,
-            FeedbackStatus.CONFIRMED.value: 1.0,
-            FeedbackStatus.UNREVIEWED.value: 1.0,
-        }
-
-        adjusted = []
-        for result in scored_results:
-            mem_id = result.get("id")
-            multiplier = 1.0
-            if mem_id:
-                current_fb = await asyncio.to_thread(self.db.get_current_feedback_status, mem_id)
-                if current_fb:
-                    multiplier = PENALTIES.get(current_fb["status"], 1.0)
-
-            original_score = result.get("score", 0.0)
-            new_score = original_score * multiplier
-
-            new_result = dict(result)
-            new_result["score"] = new_score
-            if "score_details" in new_result:
-                new_result["score_details"] = dict(new_result["score_details"])
-                new_result["score_details"]["feedback_multiplier"] = multiplier
-                new_result["score_details"]["final_score_after_feedback"] = new_score
-
-            adjusted.append(new_result)
-
-        adjusted.sort(key=lambda x: x["score"], reverse=True)
-        return adjusted
 
     async def _create_memory(self, data, existing_embeddings, metadata=None):
         logger.debug(f"Creating memory with {data=}")

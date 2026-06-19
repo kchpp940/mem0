@@ -15,7 +15,6 @@ export interface FiltersState {
     sortColumn: string;
     sortDirection: 'asc' | 'desc';
     showArchived: boolean;
-    feedbackStatuses: string[];
   };
   categories: {
     items: Category[];
@@ -32,7 +31,6 @@ const initialState: FiltersState = {
     sortColumn: 'created_at',
     sortDirection: 'desc',
     showArchived: false,
-    feedbackStatuses: [],
   },
   categories: {
     items: [],
@@ -73,14 +71,10 @@ const filtersSlice = createSlice({
       state.apps.selectedApps = [];
       state.apps.selectedCategories = [];
       state.apps.showArchived = false;
-      state.apps.feedbackStatuses = [];
     },
     setSortingState: (state, action: PayloadAction<{ column: string; direction: 'asc' | 'desc' }>) => {
       state.apps.sortColumn = action.payload.column;
       state.apps.sortDirection = action.payload.direction;
-    },
-    setFeedbackStatuses: (state, action: PayloadAction<string[]>) => {
-      state.apps.feedbackStatuses = action.payload;
     },
   },
 });
@@ -93,8 +87,7 @@ export const {
   setSelectedCategories,
   setShowArchived,
   clearFilters,
-  setSortingState,
-  setFeedbackStatuses,
+  setSortingState
 } = filtersSlice.actions;
 
 export default filtersSlice.reducer; 

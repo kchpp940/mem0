@@ -13,17 +13,6 @@ export interface SimpleMemory {
   state: string;
   categories: string[];
   app_name: string;
-  feedback_status?: string;
-}
-
-export interface MemoryHistoryRecord {
-  id: string;
-  memory_id: string;
-  event: "ADD" | "UPDATE" | "DELETE";
-  old_memory: string | null;
-  new_memory: string | null;
-  metadata_?: Record<string, any>;
-  created_at: number;
 }
 
 // Define the shape of the API response item
@@ -36,7 +25,6 @@ interface ApiMemoryItem {
   categories: string[];
   metadata_?: Record<string, any>;
   app_name: string;
-  feedback_status?: string;
 }
 
 // Define the shape of the API response
@@ -91,13 +79,11 @@ interface UseMemoriesApiReturn {
       sortColumn?: string;
       sortDirection?: 'asc' | 'desc';
       showArchived?: boolean;
-      feedbackStatuses?: string[];
     }
   ) => Promise<{ memories: Memory[]; total: number; pages: number }>;
   fetchMemoryById: (memoryId: string) => Promise<void>;
   fetchAccessLogs: (memoryId: string, page?: number, pageSize?: number) => Promise<void>;
   fetchRelatedMemories: (memoryId: string) => Promise<void>;
-  fetchMemoryHistory: (memoryId: string) => Promise<MemoryHistoryRecord[]>;
   createMemory: (text: string) => Promise<void>;
   deleteMemories: (memoryIds: string[]) => Promise<void>;
   updateMemory: (memoryId: string, content: string) => Promise<void>;
@@ -130,7 +116,6 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
       sortColumn?: string;
       sortDirection?: 'asc' | 'desc';
       showArchived?: boolean;
-      feedbackStatuses?: string[];
     }
   ): Promise<{ memories: Memory[], total: number, pages: number }> => {
     setIsLoading(true);
@@ -147,8 +132,7 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
           category_ids: filters?.categories,
           sort_column: filters?.sortColumn?.toLowerCase(),
           sort_direction: filters?.sortDirection,
-          show_archived: filters?.showArchived,
-          feedback_statuses: filters?.feedbackStatuses,
+          show_archived: filters?.showArchived
         }
       );
 
@@ -160,8 +144,7 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
         metadata: item.metadata_,
         categories: item.categories as Category[],
         client: 'api',
-        app_name: item.app_name,
-        feedback_status: (item.feedback_status as any) || undefined,
+        app_name: item.app_name
       }));
       setIsLoading(false);
       dispatch(setMemoriesSuccess(adaptedMemories));
@@ -281,22 +264,6 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
     }
   };
 
-  const fetchMemoryHistory = async (memoryId: string): Promise<MemoryHistoryRecord[]> => {
-    if (memoryId === "") {
-      return [];
-    }
-    try {
-      const response = await axios.get<{ history: MemoryHistoryRecord[] }>(
-        `${URL}/api/v1/memories/${memoryId}/history?user_id=${user_id}`
-      );
-      return response.data.history;
-    } catch (err: any) {
-      const errorMessage = err.message || 'Failed to fetch memory history';
-      setError(errorMessage);
-      throw new Error(errorMessage);
-    }
-  };
-
   const updateMemory = async (memoryId: string, content: string): Promise<void> => {
     if (memoryId === "") {
       return;
@@ -364,7 +331,6 @@ export const useMemoriesApi = (): UseMemoriesApiReturn => {
     fetchMemoryById,
     fetchAccessLogs,
     fetchRelatedMemories,
-    fetchMemoryHistory,
     createMemory,
     deleteMemories,
     updateMemory,

@@ -1,7 +1,10 @@
 import asyncio
+import json
 import logging
 import os
 import time
+import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import telemetry
@@ -18,7 +21,7 @@ from errors import (
 )
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
 from models import RequestLog, User
 from pydantic import BaseModel, Field
 from rate_limit import limiter
@@ -26,7 +29,15 @@ from routers import api_keys as api_keys_router
 from routers import auth as auth_router
 from routers import entities as entities_router
 from routers import requests as requests_router
-from schemas import MessageResponse
+from schemas import (
+    BatchImportRequest,
+    BatchImportResponse,
+    BatchStatusResponse,
+    ExportMemoryItem,
+    ExportRequest,
+    ImportResultItem,
+    MessageResponse,
+)
 from server_state import (
     get_current_config,
     get_memory_instance,
@@ -189,23 +200,6 @@ class MemoryCreate(BaseModel):
 class MemoryUpdate(BaseModel):
     text: str = Field(..., description="New content to update the memory with.")
     metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to update.")
-
-
-class FeedbackSubmitRequest(BaseModel):
-    status: str = Field(..., description="Feedback status: confirmed, incorrect, outdated, needs_review")
-    reason: Optional[str] = Field(None, description="Feedback reason or explanation")
-    reviewer_id: Optional[str] = Field(None, description="ID of the person/system submitting the feedback")
-    linked_history_id: Optional[str] = Field(
-        None,
-        description="Optional ID of linked history record for update/delete traceability. Auto-links to latest if omitted."
-    )
-
-
-class FeedbackListByStatusRequest(BaseModel):
-    status: str = Field(..., description="Feedback status to filter by")
-    user_id: Optional[str] = None
-    agent_id: Optional[str] = None
-    run_id: Optional[str] = None
 
 
 class SearchRequest(BaseModel):
@@ -496,75 +490,6 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
         raise upstream_error()
 
 
-@app.post("/memories/{memory_id}/feedback", summary="Submit feedback on a memory")
-def submit_feedback(
-    memory_id: str,
-    req: FeedbackSubmitRequest,
-    _auth=Depends(verify_auth),
-):
-    """Submit review feedback on a single memory."""
-    try:
-        return get_memory_instance().feedback(
-            memory_id=memory_id,
-            status=req.status,
-            reason=req.reason,
-            reviewer_id=req.reviewer_id,
-            linked_history_id=req.linked_history_id,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception:
-        raise upstream_error()
-
-
-@app.get("/memories/{memory_id}/feedback", summary="Get feedback history for a memory")
-def get_feedback_history(memory_id: str, _auth=Depends(verify_auth)):
-    """Retrieve all feedback review records for a specific memory."""
-    try:
-        records = get_memory_instance().get_feedback(memory_id=memory_id)
-        return {"memory_id": memory_id, "feedback": records}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
-        raise upstream_error()
-
-
-@app.post("/memories/feedback/status", summary="List memory IDs filtered by feedback status")
-def list_memories_by_feedback_status(
-    req: FeedbackListByStatusRequest,
-    request: Request,
-    _auth=Depends(verify_auth),
-):
-    """
-    List memory IDs whose *current* feedback status matches the filter.
-    Optionally scopes by user_id / agent_id / run_id.
-    Listing across all memories requires admin role.
-    """
-    try:
-        if not any([req.user_id, req.agent_id, req.run_id]):
-            auth_type = getattr(request.state, "auth_type", "none")
-            if _auth is not None and getattr(_auth, "role", None) != "admin" and auth_type not in {"admin_api_key", "disabled"}:
-                raise HTTPException(
-                    status_code=403,
-                    detail="Admin role required to list by feedback status across all memories. Provide user_id/agent_id/run_id for scoped queries.",
-                )
-        memory_ids = get_memory_instance().list_feedback_by_status(
-            status=req.status,
-            user_id=req.user_id,
-            agent_id=req.agent_id,
-            run_id=req.run_id,
-        )
-        return {"status": req.status, "memory_ids": memory_ids}
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except HTTPException:
-        raise
-    except Exception:
-        raise upstream_error()
-
-
 @app.delete("/memories/{memory_id}", summary="Delete a memory", response_model=MessageResponse)
 def delete_memory(memory_id: str, _auth=Depends(verify_auth)):
     """Delete a specific memory by ID."""
@@ -603,6 +528,331 @@ def reset_memory(_auth=Depends(require_admin)):
         return {"message": "All memories reset"}
     except Exception:
         raise upstream_error()
+
+
+_batch_store: Dict[str, Dict[str, Any]] = {}
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _normalize_memory_for_import(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a memory dict from various import formats to the API format."""
+    normalized: Dict[str, Any] = {}
+
+    content = item.get("memory") or item.get("text") or item.get("content")
+    if content:
+        normalized["messages"] = [{"role": "user", "content": content}]
+
+    for key in ("user_id", "agent_id", "app_id", "run_id"):
+        val = item.get(key) or item.get(key.replace("_", "")) or item.get(key.replace("_id", ""))
+        if val:
+            normalized[key] = val
+
+    if item.get("metadata"):
+        normalized["metadata"] = item["metadata"]
+
+    if item.get("categories"):
+        normalized["categories"] = item["categories"]
+
+    if item.get("immutable"):
+        normalized["immutable"] = item["immutable"]
+
+    if item.get("infer") is not None:
+        normalized["infer"] = item["infer"]
+
+    return normalized
+
+
+def _normalize_memory_for_export(row: Any) -> Dict[str, Any]:
+    """Normalize a memory row from storage to export format."""
+    payload = getattr(row, "payload", None) or {}
+    memory_id = getattr(row, "id", None)
+
+    exported: Dict[str, Any] = {
+        "id": memory_id,
+        "memory": payload.get("data", ""),
+        "user_id": payload.get("user_id"),
+        "agent_id": payload.get("agent_id"),
+        "run_id": payload.get("run_id"),
+        "app_id": payload.get("app_id"),
+        "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
+        "categories": payload.get("categories", []),
+        "created_at": payload.get("created_at"),
+        "updated_at": payload.get("updated_at"),
+        "feedback": payload.get("feedback"),
+        "feedback_reason": payload.get("feedback_reason"),
+    }
+
+    return exported
+
+
+@app.post(
+    "/v1/memories/batch/import",
+    summary="Batch import memories",
+    response_model=BatchImportResponse,
+)
+def batch_import(req: BatchImportRequest, _auth=Depends(verify_auth)):
+    """
+    Batch import memories with resumable cursor support.
+
+    - Send memories in batches, use `cursor` to resume from a previous position
+    - Returns batch_id, success/failure counts, and next cursor position
+    - Use `batch_id` to check status and resume failed imports
+    """
+    batch_id = f"batch_{uuid.uuid4().hex[:12]}"
+    total = len(req.memories)
+    cursor = req.cursor or 0
+    batch_size = req.batch_size or 100
+
+    end_idx = min(cursor + batch_size, total)
+    batch_items = req.memories[cursor:end_idx]
+
+    successful: list[ImportResultItem] = []
+    failed: list[ImportResultItem] = []
+    success_count = 0
+    failed_count = 0
+
+    mem_instance = get_memory_instance()
+
+    for i, item in enumerate(batch_items):
+        global_idx = cursor + i
+        content = item.get_content()
+
+        if not content:
+            failed.append(
+                ImportResultItem(
+                    index=global_idx,
+                    success=False,
+                    error="Missing memory content (memory/text/content field)",
+                )
+            )
+            failed_count += 1
+            continue
+
+        try:
+            normalized = _normalize_memory_for_import(item.model_dump(exclude_none=True))
+
+            if not any(normalized.get(k) for k in ("user_id", "agent_id", "run_id", "app_id")):
+                normalized["user_id"] = "imported"
+
+            normalized["infer"] = req.infer if req.infer is not None else (item.infer if item.infer is not None else True)
+
+            result = mem_instance.add(**normalized)
+
+            memory_id = None
+            results_list = result.get("results", []) if isinstance(result, dict) else []
+            if results_list:
+                memory_id = results_list[0].get("id") or results_list[0].get("memory_id")
+            elif isinstance(result, dict):
+                memory_id = result.get("id")
+
+            successful.append(
+                ImportResultItem(
+                    index=global_idx,
+                    success=True,
+                    memory_id=memory_id,
+                    memory=content[:200],
+                )
+            )
+            success_count += 1
+
+        except Exception as e:
+            failed.append(
+                ImportResultItem(
+                    index=global_idx,
+                    success=False,
+                    memory=content[:200],
+                    error=str(e),
+                )
+            )
+            failed_count += 1
+
+    processed = end_idx
+    completed = processed >= total
+
+    batch_data = {
+        "batch_id": batch_id,
+        "total": total,
+        "processed": processed,
+        "success_count": success_count,
+        "failed_count": failed_count,
+        "cursor": end_idx,
+        "completed": completed,
+        "created_at": _utcnow(),
+        "updated_at": _utcnow(),
+    }
+    _batch_store[batch_id] = batch_data
+
+    return BatchImportResponse(
+        batch_id=batch_id,
+        total=total,
+        processed=processed,
+        success_count=success_count,
+        failed_count=failed_count,
+        cursor=end_idx,
+        completed=completed,
+        successful=successful,
+        failed=failed,
+    )
+
+
+@app.get(
+    "/v1/memories/batch/import/{batch_id}",
+    summary="Get batch import status",
+    response_model=BatchStatusResponse,
+)
+def get_batch_status(batch_id: str, _auth=Depends(verify_auth)):
+    """Get the status of a batch import by batch_id."""
+    batch = _batch_store.get(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+
+    return BatchStatusResponse(**batch)
+
+
+@app.post("/v1/memories/export", summary="Export memories (POST with filters)")
+def export_memories_post(req: ExportRequest, _auth=Depends(verify_auth)):
+    """
+    Export memories as JSONL stream using POST for complex filters.
+
+    Returns one JSON object per line with fields:
+    id, memory, user_id, agent_id, run_id, app_id, metadata, categories,
+    created_at, updated_at, feedback, feedback_reason
+    """
+    return _export_memories(
+        user_id=req.user_id,
+        agent_id=req.agent_id,
+        run_id=req.run_id,
+        app_id=req.app_id,
+        category=req.category,
+        after=req.after,
+        before=req.before,
+        filters=req.filters,
+        page_size=req.page_size or 1000,
+    )
+
+
+@app.get("/v1/memories/export", summary="Export memories (GET)")
+def export_memories_get(
+    request: Request,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    app_id: Optional[str] = None,
+    category: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    page_size: int = 1000,
+    _auth=Depends(verify_auth),
+):
+    """
+    Export memories as JSONL stream via GET.
+
+    Returns one JSON object per line with fields:
+    id, memory, user_id, agent_id, run_id, app_id, metadata, categories,
+    created_at, updated_at, feedback, feedback_reason
+    """
+    return _export_memories(
+        user_id=user_id,
+        agent_id=agent_id,
+        run_id=run_id,
+        app_id=app_id,
+        category=category,
+        after=after,
+        before=before,
+        filters=None,
+        page_size=page_size,
+    )
+
+
+def _export_memories(
+    *,
+    user_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    run_id: Optional[str] = None,
+    app_id: Optional[str] = None,
+    category: Optional[str] = None,
+    after: Optional[str] = None,
+    before: Optional[str] = None,
+    filters: Optional[Dict[str, Any]] = None,
+    page_size: int = 1000,
+):
+    """Internal export implementation that streams JSONL."""
+    mem_instance = get_memory_instance()
+
+    extra: Dict[str, Any] = {}
+    if category:
+        extra["categories"] = {"contains": category}
+    if after:
+        extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
+    if before:
+        extra["created_at"] = {**(extra.get("created_at", {})), "lte": before}
+
+    api_filters = None
+    and_conditions: list[Dict[str, Any]] = []
+    if user_id:
+        and_conditions.append({"user_id": user_id})
+    if agent_id:
+        and_conditions.append({"agent_id": agent_id})
+    if app_id:
+        and_conditions.append({"app_id": app_id})
+    if run_id:
+        and_conditions.append({"run_id": run_id})
+    if extra:
+        for k, v in extra.items():
+            and_conditions.append({k: v})
+    if filters:
+        if "AND" in filters or "OR" in filters:
+            api_filters = filters
+        else:
+            for k, v in filters.items():
+                and_conditions.append({k: v})
+
+    if not api_filters:
+        if len(and_conditions) == 1:
+            api_filters = and_conditions[0]
+        elif and_conditions:
+            api_filters = {"AND": and_conditions}
+
+    def generate():
+        page = 1
+        while True:
+            try:
+                if api_filters:
+                    result = mem_instance.get_all(filters=api_filters, page=page, page_size=page_size)
+                else:
+                    result = mem_instance.get_all(page=page, page_size=page_size)
+
+                rows = []
+                if isinstance(result, dict):
+                    rows = result.get("results", result.get("memories", []))
+                elif isinstance(result, list):
+                    rows = result
+
+                if not rows:
+                    break
+
+                for row in rows:
+                    exported = _normalize_memory_for_export(row)
+                    export_item = ExportMemoryItem(**exported)
+                    yield export_item.model_dump_json() + "\n"
+
+                if len(rows) < page_size:
+                    break
+                page += 1
+            except Exception as e:
+                yield json.dumps({"error": str(e)}) + "\n"
+                break
+
+    return StreamingResponse(
+        generate(),
+        media_type="application/x-ndjson",
+        headers={
+            "Content-Disposition": f'attachment; filename="mem0-export-{_utcnow().strftime("%Y%m%d-%H%M%S")}.jsonl"',
+        },
+    )
 
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)

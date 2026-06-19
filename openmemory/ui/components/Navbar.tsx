@@ -11,7 +11,7 @@ import { useMemoriesApi } from "@/hooks/useMemoriesApi";
 import Image from "next/image";
 import { useStats } from "@/hooks/useStats";
 import { useAppsApi } from "@/hooks/useAppsApi";
-import { Settings, ClipboardCheck } from "lucide-react";
+import { Settings } from "lucide-react";
 import { useConfig } from "@/hooks/useConfig";
 
 export function Navbar() {
@@ -46,10 +46,6 @@ export function Navbar() {
     {
       match: /^\/memories$/,
       getFetchers: () => [memoriesApi.fetchMemories],
-    },
-    {
-      match: /^\/review$/,
-      getFetchers: () => [],
     },
     {
       match: /^\/apps$/,
@@ -124,18 +120,6 @@ export function Navbar() {
             >
               <HiMiniRectangleStack />
               Memories
-            </Button>
-          </Link>
-          <Link href="/review">
-            <Button
-              variant="outline"
-              size="sm"
-              className={`flex items-center gap-2 border-none ${
-                isActive("/review") ? activeClass : inactiveClass
-              }`}
-            >
-              <ClipboardCheck className="h-4 w-4" />
-              Review
             </Button>
           </Link>
           <Link href="/apps">

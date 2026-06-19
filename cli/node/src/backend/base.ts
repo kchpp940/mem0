@@ -57,6 +57,43 @@ export interface EntityIds {
 	runId?: string;
 }
 
+export interface BatchImportOptions {
+	cursor?: number;
+	batchSize?: number;
+	infer?: boolean;
+}
+
+export interface BatchImportResponse {
+	batchId: string;
+	total: number;
+	processed: number;
+	successCount: number;
+	failedCount: number;
+	cursor: number;
+	completed: boolean;
+	successful: Array<{
+		index: number;
+		id?: string;
+		memory?: string;
+	}>;
+	failed: Array<{
+		index: number;
+		error: string;
+		data?: Record<string, unknown>;
+	}>;
+}
+
+export interface ExportOptions {
+	userId?: string;
+	agentId?: string;
+	appId?: string;
+	runId?: string;
+	category?: string;
+	after?: string;
+	before?: string;
+	filters?: Record<string, unknown>;
+}
+
 export interface Backend {
 	add(
 		content?: string,
@@ -97,6 +134,15 @@ export interface Backend {
 	listEvents(): Promise<Record<string, unknown>[]>;
 
 	getEvent(eventId: string): Promise<Record<string, unknown>>;
+
+	batchImport(
+		memories: Record<string, unknown>[],
+		opts?: BatchImportOptions,
+	): Promise<BatchImportResponse>;
+
+	getBatchStatus(batchId: string): Promise<BatchImportResponse>;
+
+	exportMemories(opts?: ExportOptions): Promise<string>;
 }
 
 export class AuthError extends Error {

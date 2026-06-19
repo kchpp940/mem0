@@ -8,23 +8,13 @@ from app.models import (
     AccessControl,
     App,
     Category,
-    FeedbackStatus,
     Memory,
     MemoryAccessLog,
-    MemoryFeedback,
-    MemoryHistory,
     MemoryState,
     MemoryStatusHistory,
     User,
 )
-from app.schemas import (
-    FeedbackByStatusRequest,
-    FeedbackListResponse,
-    FeedbackRecordResponse,
-    FeedbackSubmitRequest,
-    MemoryHistoryResponse,
-    MemoryResponse,
-)
+from app.schemas import MemoryResponse
 from app.utils.memory import get_memory_client
 from app.utils.permissions import check_memory_access_permissions
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -35,33 +25,6 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 router = APIRouter(prefix="/api/v1/memories", tags=["memories"])
-
-
-def _batch_feedback_statuses(db: Session, memory_ids: list) -> dict:
-    if not memory_ids:
-        return {}
-    latest_sub = db.query(
-        MemoryFeedback.memory_id,
-        func.max(MemoryFeedback.created_at).label("max_created_at"),
-    ).filter(
-        MemoryFeedback.memory_id.in_(memory_ids)
-    ).group_by(MemoryFeedback.memory_id).subquery()
-
-    rows = db.query(
-        MemoryFeedback.memory_id,
-        MemoryFeedback.status,
-    ).join(
-        latest_sub,
-        (MemoryFeedback.memory_id == latest_sub.c.memory_id)
-        & (MemoryFeedback.created_at == latest_sub.c.max_created_at),
-    ).all()
-
-    result = {str(row.memory_id): row.status.value for row in rows}
-    for mid in memory_ids:
-        key = str(mid)
-        if key not in result:
-            result[key] = "unreviewed"
-    return result
 
 
 def get_memory_or_404(db: Session, memory_id: UUID) -> Memory:
@@ -81,13 +44,6 @@ def update_memory_state(db: Session, memory_id: UUID, new_state: MemoryState, us
         memory.archived_at = datetime.now(UTC)
     elif new_state == MemoryState.deleted:
         memory.deleted_at = datetime.now(UTC)
-        # Record a DELETE content history event for traceability
-        db.add(MemoryHistory(
-            memory_id=memory_id,
-            event="DELETE",
-            old_memory=memory.content,
-            new_memory=None,
-        ))
 
     # Record state change
     history = MemoryStatusHistory(
@@ -208,9 +164,7 @@ async def list_memories(
         joinedload(Memory.categories)
     ).distinct(Memory.id)
 
-    all_items = query.all()
-    fb_map = _batch_feedback_statuses(db, [m.id for m in all_items])
-
+    # Get paginated results with transformer
     return sqlalchemy_paginate(
         query,
         params,
@@ -223,8 +177,7 @@ async def list_memories(
                 app_id=memory.app_id,
                 app_name=memory.app.name if memory.app else None,
                 categories=[category.name for category in memory.categories],
-                metadata_=memory.metadata_,
-                feedback_status=fb_map.get(str(memory.id)),
+                metadata_=memory.metadata_
             )
             for memory in items
             if check_memory_access_permissions(db, memory, app_id)
@@ -327,15 +280,12 @@ async def create_memory(
                     
                     # Check if memory already exists
                     existing_memory = db.query(Memory).filter(Memory.id == memory_id).first()
-                    old_content = None
                     
                     if existing_memory:
                         # Update existing memory
-                        old_content = existing_memory.content
                         existing_memory.state = MemoryState.active
                         existing_memory.content = result['memory']
                         memory = existing_memory
-                        content_event = "UPDATE"
                     else:
                         # Create memory with the EXACT SAME ID from Qdrant
                         memory = Memory(
@@ -347,17 +297,8 @@ async def create_memory(
                             state=MemoryState.active
                         )
                         db.add(memory)
-                        content_event = "ADD"
                     
-                    # Create content change history
-                    db.add(MemoryHistory(
-                        memory_id=memory_id,
-                        event=content_event,
-                        old_memory=old_content,
-                        new_memory=result['memory'],
-                    ))
-                    
-                    # Create status history entry
+                    # Create history entry
                     history = MemoryStatusHistory(
                         memory_id=memory_id,
                         changed_by=user.id,
@@ -583,14 +524,7 @@ async def update_memory(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     memory = get_memory_or_404(db, memory_id)
-    old_content = memory.content
     memory.content = request.memory_content
-    db.add(MemoryHistory(
-        memory_id=memory_id,
-        event="UPDATE",
-        old_memory=old_content,
-        new_memory=request.memory_content,
-    ))
     db.commit()
     db.refresh(memory)
     return memory
@@ -607,7 +541,6 @@ class FilterMemoriesRequest(BaseModel):
     from_date: Optional[int] = None
     to_date: Optional[int] = None
     show_archived: Optional[bool] = False
-    feedback_statuses: Optional[List[str]] = None
 
 @router.post("/filter", response_model=Page[MemoryResponse])
 async def filter_memories(
@@ -654,32 +587,6 @@ async def filter_memories(
         to_datetime = datetime.fromtimestamp(request.to_date, tz=UTC)
         query = query.filter(Memory.created_at <= to_datetime)
 
-    if request.feedback_statuses:
-        has_unreviewed = any(s == "unreviewed" for s in request.feedback_statuses)
-        valid = [FeedbackStatus(s) for s in request.feedback_statuses if s != "unreviewed"]
-
-        latest_sub = db.query(
-            MemoryFeedback.memory_id,
-            func.max(MemoryFeedback.created_at).label("max_created_at"),
-        ).group_by(MemoryFeedback.memory_id).subquery()
-
-        memory_ids_with_feedback = [r[0] for r in db.query(MemoryFeedback.memory_id).join(
-            latest_sub,
-            (MemoryFeedback.memory_id == latest_sub.c.memory_id)
-            & (MemoryFeedback.created_at == latest_sub.c.max_created_at),
-        ).filter(
-            MemoryFeedback.status.in_(valid) if valid else False
-        ).all()]
-
-        if has_unreviewed:
-            all_fb_memory_ids = {r[0] for r in db.query(MemoryFeedback.memory_id).distinct().all()}
-            query = query.filter(
-                (Memory.id.in_(memory_ids_with_feedback))
-                | (~Memory.id.in_(list(all_fb_memory_ids)))
-            )
-        else:
-            query = query.filter(Memory.id.in_(memory_ids_with_feedback))
-
     # Apply sorting
     if request.sort_column and request.sort_direction:
         sort_direction = request.sort_direction.lower()
@@ -709,11 +616,11 @@ async def filter_memories(
         joinedload(Memory.categories)
     ).distinct(Memory.id)
 
-    all_memories = query.all()
-    fb_map = _batch_feedback_statuses(db, [m.id for m in all_memories])
-
-    def _build_response(items):
-        return [
+    # Use fastapi-pagination's paginate function
+    return sqlalchemy_paginate(
+        query,
+        Params(page=request.page, size=request.size),
+        transformer=lambda items: [
             MemoryResponse(
                 id=memory.id,
                 content=memory.content,
@@ -722,16 +629,10 @@ async def filter_memories(
                 app_id=memory.app_id,
                 app_name=memory.app.name if memory.app else None,
                 categories=[category.name for category in memory.categories],
-                metadata_=memory.metadata_,
-                feedback_status=fb_map.get(str(memory.id)),
+                metadata_=memory.metadata_
             )
             for memory in items
         ]
-
-    return sqlalchemy_paginate(
-        query,
-        Params(page=request.page, size=request.size),
-        transformer=_build_response
     )
 
 
@@ -771,11 +672,9 @@ async def get_related_memories(
         Memory.created_at.desc()
     ).group_by(Memory.id)
     
+    # ⚡ Force page size to be 5
     params = Params(page=params.page, size=5)
-
-    all_related = query.all()
-    fb_map = _batch_feedback_statuses(db, [m.id for m in all_related])
-
+    
     return sqlalchemy_paginate(
         query,
         params,
@@ -788,243 +687,8 @@ async def get_related_memories(
                 app_id=memory.app_id,
                 app_name=memory.app.name if memory.app else None,
                 categories=[category.name for category in memory.categories],
-                metadata_=memory.metadata_,
-                feedback_status=fb_map.get(str(memory.id)),
+                metadata_=memory.metadata_
             )
             for memory in items
         ]
     )
-
-
-def _validate_feedback_status(status: str) -> FeedbackStatus:
-    """Validate and convert string status to FeedbackStatus enum."""
-    try:
-        return FeedbackStatus(status)
-    except ValueError:
-        valid = ", ".join(sorted(s.value for s in FeedbackStatus))
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid feedback status '{status}'. Must be one of: {valid}",
-        )
-
-
-def _get_current_feedback_status(db: Session, memory_id: UUID) -> Optional[FeedbackStatus]:
-    """Get the latest feedback status for a memory (or None if never reviewed)."""
-    latest = (
-        db.query(MemoryFeedback)
-        .filter(MemoryFeedback.memory_id == memory_id)
-        .order_by(MemoryFeedback.created_at.desc())
-        .first()
-    )
-    return latest.status if latest else None
-
-
-# Submit feedback on a memory
-@router.post("/{memory_id}/feedback")
-async def submit_feedback(
-    memory_id: UUID,
-    request: FeedbackSubmitRequest,
-    db: Session = Depends(get_db),
-):
-    user = db.query(User).filter(User.user_id == request.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    memory = get_memory_or_404(db, memory_id)
-
-    status_enum = _validate_feedback_status(request.status)
-    previous_status = _get_current_feedback_status(db, memory_id)
-
-    linked_history_uuid = None
-    if request.linked_history_id:
-        try:
-            linked_history_uuid = UUID(request.linked_history_id)
-        except ValueError:
-            raise HTTPException(status_code=400, detail="linked_history_id must be a valid UUID")
-
-    reviewer_uuid = None
-    if request.reviewer_id:
-        reviewer = db.query(User).filter(User.user_id == request.reviewer_id).first()
-        if not reviewer:
-            raise HTTPException(status_code=404, detail="Reviewer user not found")
-        reviewer_uuid = reviewer.id
-
-    feedback_record = MemoryFeedback(
-        memory_id=memory_id,
-        user_id=user.id,
-        status=status_enum,
-        reason=request.reason,
-        reviewer_id=reviewer_uuid,
-        previous_status=previous_status,
-        linked_history_id=linked_history_uuid,
-    )
-    db.add(feedback_record)
-    db.commit()
-    db.refresh(feedback_record)
-
-    return {
-        "message": "Feedback submitted successfully",
-        "feedback": FeedbackRecordResponse(
-            id=feedback_record.id,
-            memory_id=feedback_record.memory_id,
-            status=feedback_record.status.value,
-            reason=feedback_record.reason,
-            reviewer_id=request.reviewer_id,
-            previous_status=feedback_record.previous_status.value if feedback_record.previous_status else None,
-            linked_history_id=str(feedback_record.linked_history_id) if feedback_record.linked_history_id else None,
-            created_at=feedback_record.created_at,
-        ),
-    }
-
-
-# Get all feedback records for a memory
-@router.get("/{memory_id}/feedback", response_model=FeedbackListResponse)
-async def get_memory_feedback(
-    memory_id: UUID,
-    user_id: str,
-    db: Session = Depends(get_db),
-):
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    memory = get_memory_or_404(db, memory_id)
-
-    records = (
-        db.query(MemoryFeedback)
-        .filter(MemoryFeedback.memory_id == memory_id)
-        .order_by(MemoryFeedback.created_at.asc())
-        .all()
-    )
-
-    # Build a reviewer-id -> reviewer-user-id map for the response
-    reviewer_ids = {r.reviewer_id for r in records if r.reviewer_id}
-    reviewer_map = {}
-    if reviewer_ids:
-        reviewers = db.query(User).filter(User.id.in_(reviewer_ids)).all()
-        reviewer_map = {r.id: r.user_id for r in reviewers}
-
-    feedback_list = [
-        FeedbackRecordResponse(
-            id=r.id,
-            memory_id=r.memory_id,
-            status=r.status.value,
-            reason=r.reason,
-            reviewer_id=reviewer_map.get(r.reviewer_id) if r.reviewer_id else None,
-            previous_status=r.previous_status.value if r.previous_status else None,
-            linked_history_id=str(r.linked_history_id) if r.linked_history_id else None,
-            created_at=r.created_at,
-        )
-        for r in records
-    ]
-
-    return FeedbackListResponse(memory_id=memory_id, feedback=feedback_list)
-
-
-# Get all content history records for a memory (ADD / UPDATE / DELETE)
-@router.get("/{memory_id}/history")
-async def get_memory_history(
-    memory_id: UUID,
-    user_id: str,
-    db: Session = Depends(get_db),
-):
-    user = db.query(User).filter(User.user_id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-    memory = get_memory_or_404(db, memory_id)
-
-    records = (
-        db.query(MemoryHistory)
-        .filter(MemoryHistory.memory_id == memory_id)
-        .order_by(MemoryHistory.created_at.asc())
-        .all()
-    )
-
-    return {
-        "memory_id": str(memory_id),
-        "history": [
-            MemoryHistoryResponse(
-                id=r.id,
-                memory_id=r.memory_id,
-                event=r.event,
-                old_memory=r.old_memory,
-                new_memory=r.new_memory,
-                metadata_=r.metadata_,
-                created_at=r.created_at,
-            )
-            for r in records
-        ],
-    }
-
-
-# List memory IDs filtered by feedback status — for the review queue in the dashboard
-@router.post("/feedback/status")
-async def list_memories_by_feedback_status(
-    request: FeedbackByStatusRequest,
-    db: Session = Depends(get_db),
-):
-    """
-    Returns memory IDs whose *current* feedback status matches the requested filter.
-    Each memory is represented by its latest feedback record, and we filter across those.
-    Useful for building the dashboard's review queue (needs_review, etc.).
-    """
-    user = db.query(User).filter(User.user_id == request.user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
-
-    status_enum = _validate_feedback_status(request.status)
-
-    # Subquery: pick the latest feedback per memory_id
-    from sqlalchemy import and_ as sa_and_
-    from sqlalchemy import tuple_ as sa_tuple_
-
-    latest_created_subq = (
-        db.query(
-            MemoryFeedback.memory_id,
-            func.max(MemoryFeedback.created_at).label("max_created"),
-        )
-        .filter(MemoryFeedback.memory_id.in_(
-            db.query(Memory.id).filter(Memory.user_id == user.id).subquery()
-        ))
-        .group_by(MemoryFeedback.memory_id)
-        .subquery()
-    )
-
-    query = (
-        db.query(MemoryFeedback)
-        .join(
-            latest_created_subq,
-            sa_and_(
-                MemoryFeedback.memory_id == latest_created_subq.c.memory_id,
-                MemoryFeedback.created_at == latest_created_subq.c.max_created,
-            ),
-        )
-        .filter(MemoryFeedback.status == status_enum)
-    )
-
-    if request.app_id:
-        query = query.filter(
-            MemoryFeedback.memory_id.in_(
-                db.query(Memory.id).filter(Memory.app_id == request.app_id).subquery()
-            )
-        )
-
-    records = query.all()
-
-    # Also attach memory content preview, app_id, app_name so the dashboard can render the queue directly
-    result_items = []
-    for r in records:
-        memory = db.query(Memory).options(joinedload(Memory.app)).filter(Memory.id == r.memory_id).first()
-        if memory:
-            result_items.append({
-                "memory_id": str(r.memory_id),
-                "content_preview": (memory.content[:140] + "...") if len(memory.content) > 140 else memory.content,
-                "app_id": str(memory.app_id) if memory.app_id else None,
-                "app_name": memory.app.name if memory.app else None,
-                "created_at": int(r.created_at.timestamp()),
-                "reviewer_id": None,
-            })
-
-    return {
-        "status": request.status,
-        "total": len(result_items),
-        "items": result_items,
-    }

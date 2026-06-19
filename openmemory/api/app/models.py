@@ -17,7 +17,6 @@ from sqlalchemy import (
     Integer,
     String,
     Table,
-    Text,
     event,
 )
 from sqlalchemy.orm import Session, relationship
@@ -33,14 +32,6 @@ class MemoryState(enum.Enum):
     paused = "paused"
     archived = "archived"
     deleted = "deleted"
-
-
-class FeedbackStatus(enum.Enum):
-    unreviewed = "unreviewed"
-    confirmed = "confirmed"
-    incorrect = "incorrect"
-    outdated = "outdated"
-    needs_review = "needs_review"
 
 
 class User(Base):
@@ -110,8 +101,6 @@ class Memory(Base):
     user = relationship("User", back_populates="memories")
     app = relationship("App", back_populates="memories")
     categories = relationship("Category", secondary="memory_categories", back_populates="memories")
-    feedback_records = relationship("MemoryFeedback", back_populates="memory", cascade="all, delete-orphan")
-    history_records = relationship("MemoryHistory", back_populates="memory", cascade="all, delete-orphan")
 
     __table_args__ = (
         Index('idx_memory_user_state', 'user_id', 'state'),
@@ -184,24 +173,6 @@ class MemoryStatusHistory(Base):
     )
 
 
-class MemoryHistory(Base):
-    __tablename__ = "memory_history"
-    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
-    memory_id = Column(UUID, ForeignKey("memories.id"), nullable=False, index=True)
-    event = Column(String(16), nullable=False, index=True)
-    old_memory = Column(Text, nullable=True)
-    new_memory = Column(Text, nullable=True)
-    metadata_ = Column('metadata', JSON, default=dict)
-    created_at = Column(DateTime, default=get_current_utc_time, index=True)
-
-    memory = relationship("Memory", back_populates="history_records")
-
-    __table_args__ = (
-        Index('idx_memhist_memory_created', 'memory_id', 'created_at'),
-        Index('idx_memhist_event', 'event'),
-    )
-
-
 class MemoryAccessLog(Base):
     __tablename__ = "memory_access_logs"
     id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
@@ -214,27 +185,6 @@ class MemoryAccessLog(Base):
     __table_args__ = (
         Index('idx_access_memory_time', 'memory_id', 'accessed_at'),
         Index('idx_access_app_time', 'app_id', 'accessed_at'),
-    )
-
-
-class MemoryFeedback(Base):
-    __tablename__ = "memory_feedback"
-    id = Column(UUID, primary_key=True, default=lambda: uuid.uuid4())
-    memory_id = Column(UUID, ForeignKey("memories.id"), nullable=False, index=True)
-    user_id = Column(UUID, ForeignKey("users.id"), nullable=False, index=True)
-    status = Column(Enum(FeedbackStatus), nullable=False, index=True)
-    reason = Column(Text, nullable=True)
-    reviewer_id = Column(UUID, ForeignKey("users.id"), nullable=True, index=True)
-    previous_status = Column(Enum(FeedbackStatus), nullable=True, index=True)
-    linked_history_id = Column(UUID, nullable=True)
-    created_at = Column(DateTime, default=get_current_utc_time, index=True)
-
-    memory = relationship("Memory", back_populates="feedback_records")
-
-    __table_args__ = (
-        Index('idx_feedback_memory_status', 'memory_id', 'status'),
-        Index('idx_feedback_status_time', 'status', 'created_at'),
-        Index('idx_feedback_reviewer_time', 'reviewer_id', 'created_at'),
     )
 
 def categorize_memory(memory: Memory, db: Session) -> None:

@@ -11,11 +11,13 @@ import {
   EmbeddingConfig,
   HistoryStoreConfig,
   LLMConfig,
+  RerankerConfig,
   VectorStoreConfig,
 } from "../types";
 import { Embedder } from "../embeddings/base";
 import { LLM } from "../llms/base";
 import { VectorStore } from "../vector_stores/base";
+import { Reranker } from "../rerankers/base";
 import { Qdrant } from "../vector_stores/qdrant";
 import { VectorizeDB } from "../vector_stores/vectorize";
 import { RedisDB } from "../vector_stores/redis";
@@ -131,6 +133,17 @@ export class HistoryManagerFactory {
         return new MemoryHistoryManager();
       default:
         throw new Error(`Unsupported history store provider: ${provider}`);
+    }
+  }
+}
+
+export class RerankerFactory {
+  static create(provider: string, config: RerankerConfig): Reranker {
+    switch (provider.toLowerCase()) {
+      default:
+        throw new Error(
+          `Unsupported reranker provider: ${provider}. Available providers will be added in future releases.`,
+        );
     }
   }
 }

@@ -6,28 +6,14 @@ export interface ScoreWeights {
   entityBoostWeight?: number;
 }
 
-export type HybridWeights = ScoreWeights;
-
-export interface RerankConfig {
-  enabled?: boolean;
-  strategy?: "score" | "diversity" | "timestamp_decay" | "external";
-  limit?: number;
-  diversityField?: string;
-  decayHalfLifeHours?: number;
-}
-
-export type SearchRerank = boolean | RerankConfig;
-
 export interface SearchProfile {
   name?: string;
   filters?: SearchFilters;
-  categories?: string[];
   topK?: number;
   threshold?: number;
   explain?: boolean;
   scoreWeights?: ScoreWeights;
-  hybridWeights?: HybridWeights;
-  rerank?: SearchRerank;
+  rerank?: boolean;
   description?: string;
 }
 
@@ -41,18 +27,10 @@ export interface SearchExplainInfo {
     appliedConfig: Omit<SearchProfile, "name" | "description">;
   };
   overriddenFields?: string[];
-  categories?: {
-    resolved: string[];
-    filterApplied: Record<string, any>;
-  };
   rerank?: {
     applied: boolean;
-    strategy: RerankConfig["strategy"];
-    preCount?: number;
-    postCount?: number;
-    config?: RerankConfig;
+    provider: string | null;
   };
-  hybridWeights?: Required<HybridWeights>;
 }
 
 export interface MultiModalMessages {
@@ -109,6 +87,14 @@ export interface LLMConfig {
   maxTokens?: number;
 }
 
+export interface RerankerConfig {
+  provider: string;
+  config?: Record<string, any>;
+  apiKey?: string;
+  model?: string;
+  baseURL?: string;
+}
+
 export interface MemoryConfig {
   version?: string;
   embedder: {
@@ -123,6 +109,7 @@ export interface MemoryConfig {
     provider: string;
     config: LLMConfig;
   };
+  reranker?: RerankerConfig;
   historyStore?: HistoryStoreConfig;
   disableHistory?: boolean;
   historyDbPath?: string;
@@ -158,37 +145,31 @@ export interface VectorStoreResult {
 }
 
 const ScoreWeightsSchema = z.object({
-  semanticWeight: z.number().min(0).optional(),
-  bm25Weight: z.number().min(0).optional(),
-  entityBoostWeight: z.number().min(0).optional(),
+  semanticWeight: z.number().min(0).max(1).optional(),
+  bm25Weight: z.number().min(0).max(1).optional(),
+  entityBoostWeight: z.number().min(0).max(1).optional(),
 });
-
-const RerankConfigSchema = z.object({
-  enabled: z.boolean().optional(),
-  strategy: z
-    .enum(["score", "diversity", "timestamp_decay", "external"])
-    .optional(),
-  limit: z.number().int().min(1).optional(),
-  diversityField: z.string().optional(),
-  decayHalfLifeHours: z.number().positive().optional(),
-});
-
-const SearchRerankSchema = z.union([z.boolean(), RerankConfigSchema]);
 
 const SearchProfileSchema = z.object({
   name: z.string().optional(),
   filters: z.record(z.string(), z.any()).optional(),
-  categories: z.array(z.string()).optional(),
   topK: z.number().int().min(0).optional(),
   threshold: z.number().min(0).max(1).optional(),
   explain: z.boolean().optional(),
   scoreWeights: ScoreWeightsSchema.optional(),
-  hybridWeights: ScoreWeightsSchema.optional(),
-  rerank: SearchRerankSchema.optional(),
+  rerank: z.boolean().optional(),
   description: z.string().optional(),
 });
 
 const SearchProfileStoreSchema = z.record(z.string(), SearchProfileSchema);
+
+const RerankerConfigSchema = z.object({
+  provider: z.string(),
+  config: z.record(z.string(), z.any()).optional(),
+  apiKey: z.string().optional(),
+  model: z.string().optional(),
+  baseURL: z.string().optional(),
+});
 
 export const MemoryConfigSchema = z.object({
   version: z.string().optional(),
@@ -228,6 +209,7 @@ export const MemoryConfigSchema = z.object({
       maxTokens: z.number().optional(),
     }),
   }),
+  reranker: RerankerConfigSchema.optional(),
   historyDbPath: z.string().optional(),
   customInstructions: z.string().optional(),
   historyStore: z

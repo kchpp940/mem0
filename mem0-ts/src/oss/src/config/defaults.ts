@@ -26,6 +26,7 @@ export const DEFAULT_MEMORY_CONFIG: MemoryConfig = {
       modelProperties: undefined,
     },
   },
+  reranker: undefined,
   historyStore: {
     provider: "sqlite",
     config: {

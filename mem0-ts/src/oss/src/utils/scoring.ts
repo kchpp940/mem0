@@ -116,35 +116,22 @@ export function scoreAndRank(
   const hasBm25 = Object.keys(bm25Scores).length > 0;
   const hasEntity = Object.keys(entityBoosts).length > 0;
 
-  const hasCustomWeights =
-    weights.semanticWeight !== undefined ||
-    weights.bm25Weight !== undefined ||
-    weights.entityBoostWeight !== undefined;
-
   const semanticWeight = weights.semanticWeight ?? 1.0;
   const bm25Weight = weights.bm25Weight ?? 1.0;
-  const entityBoostWeight = hasCustomWeights
-    ? (weights.entityBoostWeight ?? ENTITY_BOOST_WEIGHT)
-    : 1.0;
-
-  const maxEntityComponent = hasCustomWeights
-    ? entityBoostWeight
-    : ENTITY_BOOST_WEIGHT;
+  const entityBoostWeight = weights.entityBoostWeight ?? ENTITY_BOOST_WEIGHT;
 
   let maxPossible = semanticWeight;
   if (hasBm25) {
     maxPossible += bm25Weight;
   }
   if (hasEntity) {
-    maxPossible += maxEntityComponent;
+    maxPossible += entityBoostWeight;
   }
 
   const appliedWeights: Required<ScoreWeights> = {
     semanticWeight,
     bm25Weight,
-    entityBoostWeight: hasCustomWeights
-      ? entityBoostWeight
-      : ENTITY_BOOST_WEIGHT,
+    entityBoostWeight,
   };
 
   const scored: ScoredResult[] = [];

@@ -11,16 +11,15 @@ import {
   SearchProfileStore,
   ScoreWeights,
   SearchExplainInfo,
-  RerankConfig,
-  SearchRerank,
-  HybridWeights,
 } from "../types";
 import {
   EmbedderFactory,
   LLMFactory,
   VectorStoreFactory,
   HistoryManagerFactory,
+  RerankerFactory,
 } from "../utils/factory";
+import { Reranker } from "../rerankers/base";
 import {
   FactRetrievalSchema,
   getFactRetrievalMessages,
@@ -177,6 +176,7 @@ export class Memory {
   private _initError?: Error;
   private _entityStore?: VectorStore;
   private _searchProfiles: SearchProfileStore;
+  private reranker: Reranker | null = null;
 
   constructor(config: Partial<MemoryConfig> = {}) {
     // Merge and validate config
@@ -207,6 +207,20 @@ export class Memory {
     this.apiVersion = this.config.version || "v1.0";
     this.telemetryId = "anonymous";
     this._searchProfiles = this.config.searchProfiles ?? {};
+
+    if (this.config.reranker) {
+      try {
+        this.reranker = RerankerFactory.create(
+          this.config.reranker.provider,
+          this.config.reranker,
+        );
+      } catch (e) {
+        console.warn(
+          `Failed to initialize reranker '${this.config.reranker.provider}': ${e}. Reranking will be disabled.`,
+        );
+        this.reranker = null;
+      }
+    }
 
     // Auto-detect embedding dimension (if needed), create vector store,
     // and initialize it. All public methods await this before proceeding.
@@ -628,167 +642,39 @@ export class Memory {
     filters: SearchFilters | undefined,
   ): Record<string, any> {
     if (!filters) return {};
-    return Object.fromEntries(
-      Object.entries({
-        ...filters,
-        user_id: validateAndTrimEntityId(filters.user_id, "user_id"),
-        agent_id: validateAndTrimEntityId(filters.agent_id, "agent_id"),
-        run_id: validateAndTrimEntityId(filters.run_id, "run_id"),
-      }).filter(([, v]) => v !== undefined),
-    );
+    const normalized: Record<string, any> = {};
+    for (const [key, value] of Object.entries(filters)) {
+      if (value === undefined) continue;
+      let normalizedKey = key;
+      if (key === "userId") normalizedKey = "user_id";
+      else if (key === "agentId") normalizedKey = "agent_id";
+      else if (key === "runId") normalizedKey = "run_id";
+      normalized[normalizedKey] = value;
+    }
+    if (normalized.userId !== undefined) {
+      normalized.user_id = validateAndTrimEntityId(normalized.userId, "user_id");
+      delete normalized.userId;
+    } else if (normalized.user_id !== undefined) {
+      normalized.user_id = validateAndTrimEntityId(normalized.user_id, "user_id");
+    }
+    if (normalized.agentId !== undefined) {
+      normalized.agent_id = validateAndTrimEntityId(normalized.agentId, "agent_id");
+      delete normalized.agentId;
+    } else if (normalized.agent_id !== undefined) {
+      normalized.agent_id = validateAndTrimEntityId(normalized.agent_id, "agent_id");
+    }
+    if (normalized.runId !== undefined) {
+      normalized.run_id = validateAndTrimEntityId(normalized.runId, "run_id");
+      delete normalized.runId;
+    } else if (normalized.run_id !== undefined) {
+      normalized.run_id = validateAndTrimEntityId(normalized.run_id, "run_id");
+    }
+    return normalized;
   }
 
-  private _mergeCategories(
-    profileCategories: string[] | undefined,
-    optionCategories: string[] | undefined,
-  ): string[] {
-    const combined: string[] = [];
-    const seen = new Set<string>();
-    for (const arr of [profileCategories, optionCategories]) {
-      if (Array.isArray(arr)) {
-        for (const c of arr) {
-          if (c && typeof c === "string") {
-            const key = c.trim();
-            if (key && !seen.has(key)) {
-              seen.add(key);
-              combined.push(key);
-            }
-          }
-        }
-      }
-    }
-    return combined;
-  }
-
-  private _normalizeRerank(
-    rerank: SearchRerank | undefined,
-  ): Required<RerankConfig> {
-    if (rerank === undefined || rerank === null) {
-      return {
-        enabled: false,
-        strategy: "score",
-        limit: 0,
-        diversityField: "metadata.category",
-        decayHalfLifeHours: 24,
-      };
-    }
-    if (typeof rerank === "boolean") {
-      return {
-        enabled: rerank,
-        strategy: "score",
-        limit: 0,
-        diversityField: "metadata.category",
-        decayHalfLifeHours: 24,
-      };
-    }
-    return {
-      enabled: rerank.enabled ?? true,
-      strategy: rerank.strategy ?? "score",
-      limit: rerank.limit ?? 0,
-      diversityField: rerank.diversityField ?? "metadata.category",
-      decayHalfLifeHours: rerank.decayHalfLifeHours ?? 24,
-    };
-  }
-
-  private _resolveNestedField(
-    obj: Record<string, any> | undefined,
-    path: string,
-  ): any {
-    if (!obj || !path) return undefined;
-    const parts = path.split(".");
-    let current: any = obj;
-    for (const part of parts) {
-      if (current === null || current === undefined) return undefined;
-      current = current[part];
-    }
-    return current;
-  }
-
-  private _applyRerank(
-    scoredResults: ScoredResult[],
-    query: string,
-    config: Required<RerankConfig>,
-  ): ScoredResult[] {
-    if (!config.enabled || scoredResults.length <= 1) {
-      return scoredResults;
-    }
-
-    const limit =
-      config.limit > 0
-        ? Math.min(config.limit, scoredResults.length)
-        : scoredResults.length;
-    const sorted = [...scoredResults];
-
-    switch (config.strategy) {
-      case "timestamp_decay": {
-        const nowMs = Date.now();
-        const halfLifeMs = config.decayHalfLifeHours * 60 * 60 * 1000;
-        const decayConstant = Math.LN2 / Math.max(halfLifeMs, 1);
-        for (const entry of sorted) {
-          const createdAtStr = entry.payload?.createdAt;
-          let ageMs = 0;
-          if (createdAtStr) {
-            try {
-              const ts = new Date(createdAtStr).getTime();
-              if (!isNaN(ts)) ageMs = Math.max(nowMs - ts, 0);
-            } catch {}
-          }
-          const decayFactor = Math.exp(-decayConstant * ageMs);
-          entry.score = entry.score * decayFactor;
-        }
-        sorted.sort((a, b) => b.score - a.score);
-        break;
-      }
-      case "diversity": {
-        const field = config.diversityField;
-        const bucketLimit = Math.max(1, Math.ceil(limit / 3));
-        const buckets = new Map<string, ScoredResult[]>();
-        const others: ScoredResult[] = [];
-        for (const r of sorted) {
-          const val = this._resolveNestedField(r.payload, field);
-          const key =
-            val !== undefined && val !== null ? String(val) : "__no_value__";
-          if (key === "__no_value__") {
-            others.push(r);
-          } else {
-            if (!buckets.has(key)) buckets.set(key, []);
-            buckets.get(key)!.push(r);
-          }
-        }
-        const picked: ScoredResult[] = [];
-        let changed = true;
-        while (changed && picked.length < limit) {
-          changed = false;
-          for (const [, bucket] of buckets) {
-            if (bucket.length > 0 && picked.length < limit) {
-              const take = bucket.shift()!;
-              picked.push(take);
-              changed = true;
-            }
-          }
-        }
-        for (const r of others) {
-          if (picked.length >= limit) break;
-          picked.push(r);
-        }
-        picked.sort((a, b) => b.score - a.score);
-        return picked;
-      }
-      case "external":
-        break;
-      case "score":
-      default:
-        sorted.sort((a, b) => b.score - a.score);
-        break;
-    }
-
-    return sorted.slice(0, limit);
-  }
-
-  private _resolveSearchProfile(profile: string | SearchProfile | undefined): {
-    profile: SearchProfile | null;
-    profileName: string | null;
-  } {
+  private _resolveSearchProfile(
+    profile: string | SearchProfile | undefined,
+  ): { profile: SearchProfile | null; profileName: string | null } {
     if (profile === undefined || profile === null) {
       return { profile: null, profileName: null };
     }
@@ -810,15 +696,15 @@ export class Memory {
     );
   }
 
-  private _mergeSearchConfig(options: SearchMemoryOptions): {
-    merged: {
-      topK: number;
-      threshold: number;
-      explain: boolean;
+  private _mergeSearchConfig(
+    options: SearchMemoryOptions,
+  ): {
+    merged: Required<
+      Pick<SearchMemoryOptions, "topK" | "threshold" | "explain">
+    > & {
       filters: Record<string, any>;
-      categories: string[];
       scoreWeights: ScoreWeights;
-      rerank: Required<RerankConfig>;
+      rerank: boolean;
     };
     profileInfo: {
       name: string | null;
@@ -833,11 +719,9 @@ export class Memory {
     const profileOptionFields = [
       "topK",
       "filters",
-      "categories",
       "threshold",
       "explain",
       "scoreWeights",
-      "hybridWeights",
       "rerank",
     ] as const;
     const overriddenFields: string[] = [];
@@ -851,66 +735,28 @@ export class Memory {
       }
     }
 
-    // 1. Merge filters (call-time wins per-key)
     const mergedFilters: Record<string, any> = {
-      ...this._normalizeEntityFilters(profileConfig.filters),
-      ...this._normalizeEntityFilters(optionsRest.filters),
+      ...(this._normalizeEntityFilters(profileConfig.filters)),
+      ...(this._normalizeEntityFilters(optionsRest.filters)),
     };
 
-    // 2. Merge categories (union, deduplicate)
-    const mergedCategories = this._mergeCategories(
-      profileConfig.categories,
-      optionsRest.categories,
-    );
-
-    // 3. Merge hybridWeights into scoreWeights (hybridWeights is alias, scoreWeights has higher priority)
-    const profileScoreWeights: ScoreWeights = {
-      ...(profileConfig.hybridWeights ?? {}),
+    const mergedScoreWeights: ScoreWeights = {
       ...(profileConfig.scoreWeights ?? {}),
-    };
-    const optionScoreWeights: ScoreWeights = {
-      ...(optionsRest.hybridWeights ?? {}),
       ...(optionsRest.scoreWeights ?? {}),
     };
-    const mergedScoreWeights: ScoreWeights = {
-      ...profileScoreWeights,
-      ...optionScoreWeights,
-    };
 
-    // 4. Normalize scalar fields (call-time > profile > default)
     const topK = optionsRest.topK ?? profileConfig.topK ?? 20;
     const threshold = optionsRest.threshold ?? profileConfig.threshold ?? 0.1;
     const explain = optionsRest.explain ?? profileConfig.explain ?? false;
-
-    // 5. Merge & normalize rerank (call-time fully overrides profile — since it's bool | object)
-    const mergedRerank: Required<RerankConfig> =
-      optionsRest.rerank !== undefined
-        ? this._normalizeRerank(optionsRest.rerank)
-        : this._normalizeRerank(profileConfig.rerank);
+    const rerank = optionsRest.rerank ?? profileConfig.rerank ?? false;
 
     const appliedConfig: Omit<SearchProfile, "name" | "description"> = {
       filters: { ...mergedFilters },
-      categories:
-        mergedCategories.length > 0 ? [...mergedCategories] : undefined,
       topK,
       threshold,
       explain,
-      scoreWeights:
-        Object.keys(mergedScoreWeights).length > 0
-          ? { ...mergedScoreWeights }
-          : undefined,
-      hybridWeights:
-        Object.keys(mergedScoreWeights).length > 0
-          ? { ...mergedScoreWeights }
-          : undefined,
-      rerank: mergedRerank.enabled
-        ? ({
-            strategy: mergedRerank.strategy,
-            limit: mergedRerank.limit || undefined,
-            diversityField: mergedRerank.diversityField,
-            decayHalfLifeHours: mergedRerank.decayHalfLifeHours,
-          } as RerankConfig)
-        : false,
+      scoreWeights: { ...mergedScoreWeights },
+      rerank,
     };
 
     const usedProfile = resolved.profile !== null;
@@ -930,9 +776,8 @@ export class Memory {
         threshold,
         explain,
         filters: mergedFilters,
-        categories: mergedCategories,
         scoreWeights: mergedScoreWeights,
-        rerank: mergedRerank,
+        rerank,
       },
       profileInfo,
       overriddenFields,
@@ -1547,39 +1392,23 @@ export class Memory {
       threshold,
       explain,
       filters: mergedFilters,
-      categories: mergedCategories,
       scoreWeights,
-      rerank: rerankConfig,
+      rerank,
     } = merged;
-
-    // Build category filter from resolved categories (OR match via { in: [...] })
-    let categoryFilterEntry: Record<string, any> | null = null;
-    if (mergedCategories.length > 0) {
-      categoryFilterEntry = { category: { in: mergedCategories } };
-    }
-
-    const effectiveFiltersBeforeAdvanced: Record<string, any> = {
-      ...mergedFilters,
-      ...(categoryFilterEntry ?? {}),
-    };
 
     const temporalUsageNotice = detectTemporalUsageFromSearch(
       query,
-      effectiveFiltersBeforeAdvanced,
+      mergedFilters,
     );
 
     await this._captureEvent("search", {
       query_length: query.length,
       topK,
-      has_filters: Object.keys(effectiveFiltersBeforeAdvanced).length > 0,
-      categories_count: mergedCategories.length,
-      rerank_enabled: rerankConfig.enabled,
+      has_filters: Object.keys(mergedFilters).length > 0,
       profile: profileInfo?.name ?? null,
     });
 
-    let effectiveFilters: Record<string, any> = {
-      ...effectiveFiltersBeforeAdvanced,
-    };
+    let effectiveFilters: Record<string, any> = { ...mergedFilters };
 
     // Apply enhanced metadata filtering if advanced operators are detected
     if (this._hasAdvancedOperators(effectiveFilters)) {
@@ -1717,14 +1546,10 @@ export class Memory {
                 const numLinked = Math.max(linkedMemoryIds.length, 1);
                 const memoryCountWeight =
                   1.0 / (1.0 + 0.001 * (numLinked - 1) ** 2);
-                const hasCustomScoreWeightsLocal =
-                  scoreWeights.semanticWeight !== undefined ||
-                  scoreWeights.bm25Weight !== undefined ||
-                  scoreWeights.entityBoostWeight !== undefined;
-                const boostMultiplier = hasCustomScoreWeightsLocal
-                  ? 1.0
-                  : ENTITY_BOOST_WEIGHT;
-                const boost = similarity * boostMultiplier * memoryCountWeight;
+                const defaultBoostWeight =
+                  scoreWeights.entityBoostWeight ?? ENTITY_BOOST_WEIGHT;
+                const boost =
+                  similarity * defaultBoostWeight * memoryCountWeight;
 
                 for (const memoryId of linkedMemoryIds) {
                   if (memoryId) {
@@ -1752,10 +1577,6 @@ export class Memory {
     }));
 
     // Step 8: Score and rank with custom weights
-    const hasCustomScoreWeights =
-      scoreWeights.semanticWeight !== undefined ||
-      scoreWeights.bm25Weight !== undefined ||
-      scoreWeights.entityBoostWeight !== undefined;
     const scoringWeights: ScoringScoreWeights = {
       semanticWeight: scoreWeights.semanticWeight,
       bm25Weight: scoreWeights.bm25Weight,
@@ -1771,26 +1592,7 @@ export class Memory {
       scoringWeights,
     );
 
-    // Step 9: Apply reranking if enabled
-    const rerankedResults = this._applyRerank(
-      scoredResults,
-      query,
-      rerankConfig,
-    );
-
-    // Build hybrid weights info (default values for transparency in explain)
-    const resolvedHybridWeights: Required<HybridWeights> = {
-      semanticWeight: scoreWeights.semanticWeight ?? 1.0,
-      bm25Weight: scoreWeights.bm25Weight ?? 1.0,
-      entityBoostWeight: hasCustomScoreWeights
-        ? (scoreWeights.entityBoostWeight ?? 0.5)
-        : 0.5,
-    };
-
-    // Resolve applied category filter entry for explain
-    const resolvedCategoryFilter = categoryFilterEntry ?? null;
-
-    // Step 10: Format results
+    // Step 9: Format results
     const excludedKeys = new Set([
       "user_id",
       "agent_id",
@@ -1803,7 +1605,7 @@ export class Memory {
       "attributedTo",
     ]);
 
-    const results = rerankedResults
+    let results = scoredResults
       .filter((scored) => scored.payload?.data)
       .map((scored) => {
         const payload = scored.payload || {};
@@ -1824,19 +1626,21 @@ export class Memory {
         };
       });
 
+    let rerankApplied = false;
+    if (rerank && this.reranker && results.length > 0) {
+      try {
+        results = await this.reranker.rerank(query, results, topK);
+        rerankApplied = true;
+      } catch (e) {
+        console.warn(`Reranking failed, using original results: ${e}`);
+      }
+    }
+
     const result: SearchResult & { explain?: SearchExplainInfo } = {
       results,
     };
 
-    const shouldIncludeExplain =
-      explain ||
-      profileInfo ||
-      mergedCategories.length > 0 ||
-      rerankConfig.enabled ||
-      hasCustomScoreWeights ||
-      overriddenFields.length > 0;
-
-    if (shouldIncludeExplain) {
+    if (explain || profileInfo || rerankApplied) {
       result.explain = {};
       if (profileInfo) {
         result.explain.profile = profileInfo;
@@ -1844,26 +1648,12 @@ export class Memory {
       if (overriddenFields.length > 0) {
         result.explain.overriddenFields = overriddenFields;
       }
-      if (mergedCategories.length > 0 || resolvedCategoryFilter) {
-        result.explain.categories = {
-          resolved: [...mergedCategories],
-          filterApplied: resolvedCategoryFilter ?? {},
+      if (rerankApplied) {
+        result.explain.rerank = {
+          applied: true,
+          provider: this.config.reranker?.provider ?? null,
         };
       }
-      result.explain.rerank = {
-        applied: rerankConfig.enabled,
-        strategy: rerankConfig.strategy,
-        preCount: scoredResults.length,
-        postCount: rerankedResults.length,
-        config: {
-          enabled: rerankConfig.enabled,
-          strategy: rerankConfig.strategy,
-          limit: rerankConfig.limit || undefined,
-          diversityField: rerankConfig.diversityField,
-          decayHalfLifeHours: rerankConfig.decayHalfLifeHours,
-        },
-      };
-      result.explain.hybridWeights = resolvedHybridWeights;
     }
     const searchElapsedMs = Date.now() - searchStartMs;
     if (temporalUsageNotice) {

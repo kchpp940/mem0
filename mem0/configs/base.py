@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -7,6 +7,16 @@ from mem0.configs.rerankers.config import RerankerConfig
 from mem0.embeddings.configs import EmbedderConfig
 from mem0.llms.configs import LlmConfig
 from mem0.vector_stores.configs import VectorStoreConfig
+
+
+class FeedbackRecord(BaseModel):
+    id: str = Field(..., description="Unique feedback record ID")
+    status: str = Field(..., description="Feedback status: confirmed, incorrect, outdated, needs_review")
+    reason: Optional[str] = Field(None, description="Feedback reason")
+    reviewer_id: Optional[str] = Field(None, description="ID of the reviewer")
+    created_at: str = Field(..., description="ISO 8601 timestamp when feedback was created")
+    previous_status: Optional[str] = Field(None, description="Previous feedback status before this change")
+    linked_history_id: Optional[str] = Field(None, description="ID of linked history record (for update/delete traceability)")
 
 
 class LifecyclePolicyConfig(BaseModel):
@@ -63,6 +73,14 @@ class MemoryItem(BaseModel):
     ttl_source: Optional[str] = Field(
         None,
         description='Which policy scope produced expires_at: "default" | "category" | "user" | "agent" | "workspace" | "request".',
+    )
+    feedback_status: Optional[str] = Field(
+        None,
+        description="Current feedback status: unreviewed, confirmed, incorrect, outdated, needs_review",
+    )
+    feedback_history: Optional[List[FeedbackRecord]] = Field(
+        None,
+        description="Complete feedback review history for traceability",
     )
 
 

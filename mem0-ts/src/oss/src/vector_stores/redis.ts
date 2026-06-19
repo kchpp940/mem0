@@ -8,7 +8,6 @@ import type {
 } from "redis";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { transformCategoriesForRedis } from "../utils/filter_normalizer";
 
 /**
  * Escape RediSearch TAG filter special characters. Any punctuation in the
@@ -96,7 +95,6 @@ const DEFAULT_FIELDS: RedisField[] = [
   { name: "agent_id", type: "tag" },
   { name: "run_id", type: "tag" },
   { name: "user_id", type: "tag" },
-  { name: "categories", type: "tag" },
   { name: "memory", type: "text" },
   { name: "metadata", type: "text" },
   { name: "created_at", type: "numeric" },
@@ -354,12 +352,6 @@ export class RedisDB implements VectorStore {
         }
       });
 
-      if (Array.isArray(payload.categories)) {
-        entry.categories = payload.categories.join("|");
-      } else if (payload.categories) {
-        entry.categories = String(payload.categories);
-      }
-
       // Add metadata excluding specific keys
       entry.metadata = JSON.stringify(
         Object.fromEntries(
@@ -395,24 +387,13 @@ export class RedisDB implements VectorStore {
     topK: number = 5,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
-    const { filters: adaptedFilters, categoryTagExpr } =
-      transformCategoriesForRedis(filters);
-    const snakeFilters = adaptedFilters
-      ? toSnakeCase(adaptedFilters)
-      : undefined;
-    let filterExpr = snakeFilters
+    const snakeFilters = filters ? toSnakeCase(filters) : undefined;
+    const filterExpr = snakeFilters
       ? Object.entries(snakeFilters)
           .filter(([_, value]) => value !== null && value !== undefined)
           .map(([key, value]) => `@${key}:{${escapeRedisTagValue(value)}}`)
           .join(" ")
       : "*";
-
-    if (categoryTagExpr) {
-      filterExpr =
-        filterExpr === "*"
-          ? categoryTagExpr
-          : `${filterExpr} ${categoryTagExpr}`;
-    }
 
     const queryVector = new Float32Array(query).buffer;
 
@@ -596,12 +577,6 @@ export class RedisDB implements VectorStore {
       }
     });
 
-    if (Array.isArray(snakePayload.categories)) {
-      entry.categories = snakePayload.categories.join("|");
-    } else if (snakePayload.categories) {
-      entry.categories = String(snakePayload.categories);
-    }
-
     // Add metadata excluding specific keys
     entry.metadata = JSON.stringify(
       Object.fromEntries(
@@ -650,24 +625,13 @@ export class RedisDB implements VectorStore {
     filters?: SearchFilters,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
-    const { filters: adaptedFilters, categoryTagExpr } =
-      transformCategoriesForRedis(filters);
-    const snakeFilters = adaptedFilters
-      ? toSnakeCase(adaptedFilters)
-      : undefined;
-    let filterExpr = snakeFilters
+    const snakeFilters = filters ? toSnakeCase(filters) : undefined;
+    const filterExpr = snakeFilters
       ? Object.entries(snakeFilters)
           .filter(([_, value]) => value !== null && value !== undefined)
           .map(([key, value]) => `@${key}:{${escapeRedisTagValue(value)}}`)
           .join(" ")
       : "*";
-
-    if (categoryTagExpr) {
-      filterExpr =
-        filterExpr === "*"
-          ? categoryTagExpr
-          : `${filterExpr} ${categoryTagExpr}`;
-    }
 
     const searchOptions = {
       SORTBY: "created_at",

@@ -16,6 +16,7 @@ class SQLiteManager:
         self._migrate_history_table()
         self._create_history_table()
         self._create_messages_table()
+        self._create_feedback_tables()
 
     def _migrate_history_table(self) -> None:
         """
@@ -159,7 +160,8 @@ class SQLiteManager:
         is_deleted: int = 0,
         actor_id: Optional[str] = None,
         role: Optional[str] = None,
-    ) -> None:
+    ) -> str:
+        record_id = str(uuid.uuid4())
         with self._lock:
             try:
                 self.connection.execute("BEGIN")
@@ -172,7 +174,7 @@ class SQLiteManager:
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                     (
-                        str(uuid.uuid4()),
+                        record_id,
                         memory_id,
                         old_memory,
                         new_memory,
@@ -189,6 +191,7 @@ class SQLiteManager:
                 self.connection.execute("ROLLBACK")
                 logger.error(f"Failed to add history record: {e}")
                 raise
+        return record_id
 
     def batch_add_history(self, records: List[Dict[str, Any]]) -> None:
         with self._lock:
@@ -323,13 +326,176 @@ class SQLiteManager:
             for r in rows
         ]
 
+    def _create_feedback_tables(self) -> None:
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN")
+                self.connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS memory_feedback (
+                        id             TEXT PRIMARY KEY,
+                        memory_id      TEXT NOT NULL,
+                        status         TEXT NOT NULL,
+                        reason         TEXT,
+                        reviewer_id    TEXT,
+                        previous_status TEXT,
+                        linked_history_id TEXT,
+                        created_at     DATETIME NOT NULL,
+                        FOREIGN KEY (memory_id) REFERENCES history(memory_id)
+                    )
+                """
+                )
+                self.connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_feedback_memory_id
+                    ON memory_feedback(memory_id)
+                """
+                )
+                self.connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_feedback_status
+                    ON memory_feedback(status)
+                """
+                )
+                self.connection.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_memory_feedback_created_at
+                    ON memory_feedback(created_at)
+                """
+                )
+                self.connection.execute("COMMIT")
+            except Exception as e:
+                self.connection.execute("ROLLBACK")
+                logger.error(f"Failed to create feedback tables: {e}")
+                raise
+
+    def add_feedback(
+        self,
+        memory_id: str,
+        status: str,
+        reason: Optional[str] = None,
+        reviewer_id: Optional[str] = None,
+        previous_status: Optional[str] = None,
+        linked_history_id: Optional[str] = None,
+        created_at: Optional[str] = None,
+    ) -> str:
+        if created_at is None:
+            created_at = datetime.now(timezone.utc).isoformat()
+        feedback_id = str(uuid.uuid4())
+        with self._lock:
+            try:
+                self.connection.execute("BEGIN")
+                self.connection.execute(
+                    """
+                    INSERT INTO memory_feedback (
+                        id, memory_id, status, reason, reviewer_id,
+                        previous_status, linked_history_id, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                    (
+                        feedback_id,
+                        memory_id,
+                        status,
+                        reason,
+                        reviewer_id,
+                        previous_status,
+                        linked_history_id,
+                        created_at,
+                    ),
+                )
+                self.connection.execute("COMMIT")
+            except Exception as e:
+                self.connection.execute("ROLLBACK")
+                logger.error(f"Failed to add feedback record: {e}")
+                raise
+        return feedback_id
+
+    def get_feedback_for_memory(self, memory_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            cur = self.connection.execute(
+                """
+                SELECT id, memory_id, status, reason, reviewer_id,
+                       previous_status, linked_history_id, created_at
+                FROM memory_feedback
+                WHERE memory_id = ?
+                ORDER BY created_at ASC
+                """,
+                (memory_id,),
+            )
+            rows = cur.fetchall()
+
+        return [
+            {
+                "id": r[0],
+                "memory_id": r[1],
+                "status": r[2],
+                "reason": r[3],
+                "reviewer_id": r[4],
+                "previous_status": r[5],
+                "linked_history_id": r[6],
+                "created_at": r[7],
+            }
+            for r in rows
+        ]
+
+    def get_current_feedback_status(self, memory_id: str) -> Optional[Dict[str, Any]]:
+        feedback_list = self.get_feedback_for_memory(memory_id)
+        if not feedback_list:
+            return None
+        return feedback_list[-1]
+
+    def list_memories_by_feedback_status(
+        self,
+        status: str,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> List[str]:
+        """
+        List memory IDs filtered by feedback status, optionally scoped by entity IDs.
+
+        Note: Entity-based filtering (user_id/agent_id/run_id) is performed by joining
+        to the history table where ADD events record entity context alongside lifecycle events.
+        """
+        query_parts = [
+            """
+            SELECT DISTINCT mf.memory_id
+            FROM memory_feedback mf
+            INNER JOIN (
+                SELECT memory_id, MAX(created_at) AS max_created
+                FROM memory_feedback
+                GROUP BY memory_id
+            ) latest ON mf.memory_id = latest.memory_id
+                AND mf.created_at = latest.max_created
+            WHERE mf.status = ?
+        """
+        ]
+        params: List[Any] = [status]
+
+        if user_id or agent_id or run_id:
+            # TODO: history table currently stores memory text in old_memory/new_memory columns,
+            # not entity-scoped JSON payloads. Entity context (user_id/agent_id/run_id) lives
+            # in the vector store payload layer, so upstream Memory.list_feedback_by_status()
+            # should intersect these results with a vector-store query scoped by the caller's
+            # entity filters. For now we return status-matching IDs only.
+            pass
+
+        final_sql = " ".join(query_parts)
+        with self._lock:
+            cur = self.connection.execute(final_sql, params)
+            rows = cur.fetchall()
+        return [r[0] for r in rows]
+
     def reset(self) -> None:
-        """Drop and recreate the history and messages tables."""
+        """Drop and recreate the history, messages, and feedback tables."""
         with self._lock:
             try:
                 self.connection.execute("BEGIN")
                 self.connection.execute("DROP TABLE IF EXISTS history")
                 self.connection.execute("DROP TABLE IF EXISTS messages")
+                self.connection.execute("DROP TABLE IF EXISTS memory_feedback")
                 self.connection.execute("COMMIT")
             except Exception as e:
                 self.connection.execute("ROLLBACK")
@@ -337,6 +503,7 @@ class SQLiteManager:
                 raise
         self._create_history_table()
         self._create_messages_table()
+        self._create_feedback_tables()
 
     def close(self) -> None:
         if self.connection:

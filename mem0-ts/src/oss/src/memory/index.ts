@@ -78,17 +78,6 @@ import {
 } from "../utils/scoring";
 import { getDefaultVectorStoreDbPath } from "../utils/sqlite";
 import { getOrCreateMem0UserId } from "../../../client/config";
-import { BaseReranker } from "../reranker/base";
-import { RerankerFactory } from "../utils/reranker_factory";
-import {
-  normalizeCategoriesFilter,
-  extractCategoriesFromFilters,
-  normalizeFilterStructure,
-  transformCategoriesForQdrant,
-  transformCategoriesForPgvector,
-  transformCategoriesForRedis,
-  transformCategoriesForSupabase,
-} from "../utils/filter_normalizer";
 
 // Entity params that must be passed via filters - check both snake_case and camelCase
 const ENTITY_PARAMS = [
@@ -185,7 +174,6 @@ export class Memory {
   private _initError?: Error;
   private _entityStore?: VectorStore;
   private _searchProfiles: SearchProfileStore;
-  private _reranker?: BaseReranker;
 
   constructor(config: Partial<MemoryConfig> = {}) {
     // Merge and validate config
@@ -216,18 +204,6 @@ export class Memory {
     this.apiVersion = this.config.version || "v1.0";
     this.telemetryId = "anonymous";
     this._searchProfiles = this.config.searchProfiles ?? {};
-
-    if (this.config.reranker?.provider) {
-      try {
-        this._reranker = RerankerFactory.create(
-          this.config.reranker.provider,
-          this.config.reranker.config ?? {},
-          { llm: this.llm },
-        );
-      } catch (e) {
-        console.warn("Failed to initialize reranker:", e);
-      }
-    }
 
     // Auto-detect embedding dimension (if needed), create vector store,
     // and initialize it. All public methods await this before proceeding.
@@ -659,10 +635,9 @@ export class Memory {
     );
   }
 
-  private _resolveSearchProfile(profile: string | SearchProfile | undefined): {
-    profile: SearchProfile | null;
-    profileName: string | null;
-  } {
+  private _resolveSearchProfile(
+    profile: string | SearchProfile | undefined,
+  ): { profile: SearchProfile | null; profileName: string | null } {
     if (profile === undefined || profile === null) {
       return { profile: null, profileName: null };
     }
@@ -684,76 +659,15 @@ export class Memory {
     );
   }
 
-  private _deepMergeFilters(
-    base: Record<string, any> | undefined,
-    override: Record<string, any> | undefined,
-  ): Record<string, any> {
-    const result: Record<string, any> = { ...(base ?? {}) };
-    if (!override) return result;
-
-    for (const [key, value] of Object.entries(override)) {
-      if (
-        key in result &&
-        typeof result[key] === "object" &&
-        result[key] !== null &&
-        !Array.isArray(result[key]) &&
-        typeof value === "object" &&
-        value !== null &&
-        !Array.isArray(value)
-      ) {
-        result[key] = this._deepMergeFilters(result[key], value);
-      } else if (
-        (key === "$or" || key === "$not") &&
-        Array.isArray(result[key]) &&
-        Array.isArray(value)
-      ) {
-        result[key] = [...result[key], ...value];
-      } else {
-        result[key] = value;
-      }
-    }
-    return result;
-  }
-
-  private _applyCategoriesToFilters(
-    filters: Record<string, any>,
-    categories: string[] | undefined,
-  ): Record<string, any> {
-    if (!categories || categories.length === 0) return filters;
-    const result = { ...filters };
-    if (result.categories) {
-      const existing = Array.isArray(result.categories)
-        ? result.categories
-        : [result.categories];
-      const existingOps =
-        typeof result.categories === "object" &&
-        !Array.isArray(result.categories)
-          ? result.categories
-          : null;
-      if (existingOps) {
-        result.categories = {
-          ...existingOps,
-          in: Array.from(new Set([...(existingOps.in ?? []), ...categories])),
-        };
-      } else {
-        result.categories = {
-          in: Array.from(new Set([...existing, ...categories])),
-        };
-      }
-    } else {
-      result.categories = { in: [...categories] };
-    }
-    return result;
-  }
-
-  private _mergeSearchConfig(options: SearchMemoryOptions): {
+  private _mergeSearchConfig(
+    options: SearchMemoryOptions,
+  ): {
     merged: Required<
       Pick<SearchMemoryOptions, "topK" | "threshold" | "explain">
     > & {
       filters: Record<string, any>;
       scoreWeights: ScoreWeights;
       rerank: boolean;
-      categories: string[];
     };
     profileInfo: {
       name: string | null;
@@ -768,7 +682,6 @@ export class Memory {
     const profileOptionFields = [
       "topK",
       "filters",
-      "categories",
       "threshold",
       "explain",
       "scoreWeights",
@@ -785,23 +698,10 @@ export class Memory {
       }
     }
 
-    const profileFilters = this._normalizeEntityFilters(profileConfig.filters);
-    const optionsFilters = this._normalizeEntityFilters(optionsRest.filters);
-    let mergedFilters: Record<string, any> = this._deepMergeFilters(
-      profileFilters,
-      optionsFilters,
-    );
-
-    const mergedCategories: string[] = Array.from(
-      new Set([
-        ...(profileConfig.categories ?? []),
-        ...(optionsRest.categories ?? []),
-      ]),
-    );
-    mergedFilters = this._applyCategoriesToFilters(
-      mergedFilters,
-      mergedCategories.length > 0 ? mergedCategories : undefined,
-    );
+    const mergedFilters: Record<string, any> = {
+      ...(this._normalizeEntityFilters(profileConfig.filters)),
+      ...(this._normalizeEntityFilters(optionsRest.filters)),
+    };
 
     const mergedScoreWeights: ScoreWeights = {
       ...(profileConfig.scoreWeights ?? {}),
@@ -815,8 +715,6 @@ export class Memory {
 
     const appliedConfig: Omit<SearchProfile, "name" | "description"> = {
       filters: { ...mergedFilters },
-      categories:
-        mergedCategories.length > 0 ? [...mergedCategories] : undefined,
       topK,
       threshold,
       explain,
@@ -843,7 +741,6 @@ export class Memory {
         filters: mergedFilters,
         scoreWeights: mergedScoreWeights,
         rerank,
-        categories: mergedCategories,
       },
       profileInfo,
       overriddenFields,
@@ -1453,13 +1350,8 @@ export class Memory {
 
     const { merged, profileInfo, overriddenFields } =
       this._mergeSearchConfig(config);
-    const {
-      topK,
-      threshold,
-      explain,
-      filters: mergedFilters,
-      scoreWeights,
-    } = merged;
+    const { topK, threshold, explain, filters: mergedFilters, scoreWeights } =
+      merged;
 
     const temporalUsageNotice = detectTemporalUsageFromSearch(
       query,
@@ -1507,62 +1399,6 @@ export class Memory {
     }
 
     const searchStartMs = Date.now();
-
-    const vectorStoreProvider = this.config.vectorStore.provider;
-    let adapterTransformedFilters: Record<string, any> | null = null;
-    if (explain) {
-      switch (vectorStoreProvider.toLowerCase()) {
-        case "qdrant": {
-          const result = transformCategoriesForQdrant(effectiveFilters);
-          adapterTransformedFilters = {
-            filters: result.filters,
-            categoryValues: result.categoryValues,
-            queryType: "filter with $or conditions for categories",
-          };
-          break;
-        }
-        case "pgvector": {
-          const result = transformCategoriesForPgvector(effectiveFilters);
-          adapterTransformedFilters = {
-            filters: result.filters,
-            categoryValues: result.categoryValues,
-            categorySqlClause: result.categorySqlClause,
-            queryType: "JSONB ? operator for array, = for string",
-          };
-          break;
-        }
-        case "redis": {
-          const result = transformCategoriesForRedis(effectiveFilters);
-          adapterTransformedFilters = {
-            filters: result.filters,
-            categoryValues: result.categoryValues,
-            categoryTagExpr: result.categoryTagExpr,
-            queryType: "TAG filter with | OR syntax",
-          };
-          break;
-        }
-        case "supabase": {
-          const result = transformCategoriesForSupabase(effectiveFilters);
-          adapterTransformedFilters = {
-            filters: result.filters,
-            categoryValues: result.categoryValues,
-            categoryExactValue: result.categoryExactValue,
-            categoryOverlapValues: result.categoryOverlapValues,
-            queryType:
-              "JSONB ?/?| operators for array, = for string (via RPC params)",
-          };
-          break;
-        }
-        case "memory":
-        default: {
-          adapterTransformedFilters = {
-            filters: effectiveFilters,
-            queryType: "in-memory SQLite with JSON filter",
-          };
-          break;
-        }
-      }
-    }
 
     // Step 1: Preprocess query
     const queryLemmatized = lemmatizeForBm25(query);
@@ -1713,39 +1549,6 @@ export class Memory {
       scoringWeights,
     );
 
-    // Step 8b: Rerank if enabled
-    let finalResults = scoredResults;
-    let rerankInputCount = 0;
-    let rerankOutputCount = 0;
-    const shouldRerank = !!(merged.rerank && this._reranker);
-    if (shouldRerank) {
-      rerankInputCount = scoredResults.length;
-      const rerankDocs = scoredResults.map((r) => ({
-        id: r.id,
-        memory: r.payload?.data || "",
-        score: r.score,
-        metadata: r.payload,
-      }));
-      try {
-        const reranked = await this._reranker!.rerank(query, rerankDocs, topK);
-        finalResults = reranked.map((rr) => {
-          const original = scoredResults.find((s) => s.id === rr.id);
-          return {
-            id: rr.id,
-            score: rr.rerankScore,
-            payload: original?.payload ?? {},
-            scoreDetails: original?.scoreDetails
-              ? { ...original.scoreDetails, rerankScore: rr.rerankScore }
-              : undefined,
-          };
-        });
-        rerankOutputCount = finalResults.length;
-      } catch (e) {
-        console.warn("Reranking failed, using original results:", e);
-        finalResults = scoredResults;
-      }
-    }
-
     // Step 9: Format results
     const excludedKeys = new Set([
       "user_id",
@@ -1759,7 +1562,7 @@ export class Memory {
       "attributedTo",
     ]);
 
-    const results = finalResults
+    const results = scoredResults
       .filter((scored) => scored.payload?.data)
       .map((scored) => {
         const payload = scored.payload || {};
@@ -1791,38 +1594,6 @@ export class Memory {
       }
       if (overriddenFields.length > 0) {
         result.explain.overriddenFields = overriddenFields;
-      }
-      if (explain) {
-        const categories = extractCategoriesFromFilters(mergedFilters);
-        result.explain.scoring = {
-          semanticCount: candidates.length,
-          bm25Count: Object.keys(bm25Scores).length,
-          entityCount: Object.keys(entityBoosts).length,
-          threshold,
-          topK,
-          weights: {
-            semanticWeight: scoreWeights.semanticWeight ?? 1.0,
-            bm25Weight: scoreWeights.bm25Weight ?? 1.0,
-            entityBoostWeight:
-              scoreWeights.entityBoostWeight ?? ENTITY_BOOST_WEIGHT,
-          },
-        };
-        result.explain.rerank = {
-          enabled: shouldRerank,
-          provider: this.config.reranker?.provider,
-          inputCount: rerankInputCount,
-          outputCount: rerankOutputCount,
-        };
-        result.explain.filters = {
-          normalized: normalizeFilterStructure(mergedFilters),
-          categories: categories ?? undefined,
-        };
-        if (adapterTransformedFilters) {
-          result.explain.filters.adapter = {
-            provider: vectorStoreProvider,
-            transformed: adapterTransformedFilters,
-          };
-        }
       }
     }
     const searchElapsedMs = Date.now() - searchStartMs;

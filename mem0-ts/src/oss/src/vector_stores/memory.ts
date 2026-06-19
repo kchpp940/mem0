@@ -131,21 +131,9 @@ export class MemoryVectorStore implements VectorStore {
       return payloadValue <= value.lte;
     }
     if ("in" in value) {
-      if (Array.isArray(payloadValue)) {
-        return (
-          Array.isArray(value.in) &&
-          value.in.some((v: any) => payloadValue.includes(v))
-        );
-      }
       return Array.isArray(value.in) && value.in.includes(payloadValue);
     }
     if ("nin" in value) {
-      if (Array.isArray(payloadValue)) {
-        return (
-          !Array.isArray(value.nin) ||
-          !value.nin.some((v: any) => payloadValue.includes(v))
-        );
-      }
       return !Array.isArray(value.nin) || !value.nin.includes(payloadValue);
     }
     if ("contains" in value) {

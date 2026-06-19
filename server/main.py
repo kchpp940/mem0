@@ -191,6 +191,23 @@ class MemoryUpdate(BaseModel):
     metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to update.")
 
 
+class FeedbackSubmitRequest(BaseModel):
+    status: str = Field(..., description="Feedback status: confirmed, incorrect, outdated, needs_review")
+    reason: Optional[str] = Field(None, description="Feedback reason or explanation")
+    reviewer_id: Optional[str] = Field(None, description="ID of the person/system submitting the feedback")
+    linked_history_id: Optional[str] = Field(
+        None,
+        description="Optional ID of linked history record for update/delete traceability. Auto-links to latest if omitted."
+    )
+
+
+class FeedbackListByStatusRequest(BaseModel):
+    status: str = Field(..., description="Feedback status to filter by")
+    user_id: Optional[str] = None
+    agent_id: Optional[str] = None
+    run_id: Optional[str] = None
+
+
 class SearchRequest(BaseModel):
     query: str = Field(..., description="Search query.")
     user_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
@@ -475,6 +492,75 @@ def memory_history(memory_id: str, _auth=Depends(verify_auth)):
     """Retrieve memory history."""
     try:
         return get_memory_instance().history(memory_id=memory_id)
+    except Exception:
+        raise upstream_error()
+
+
+@app.post("/memories/{memory_id}/feedback", summary="Submit feedback on a memory")
+def submit_feedback(
+    memory_id: str,
+    req: FeedbackSubmitRequest,
+    _auth=Depends(verify_auth),
+):
+    """Submit review feedback on a single memory."""
+    try:
+        return get_memory_instance().feedback(
+            memory_id=memory_id,
+            status=req.status,
+            reason=req.reason,
+            reviewer_id=req.reviewer_id,
+            linked_history_id=req.linked_history_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise upstream_error()
+
+
+@app.get("/memories/{memory_id}/feedback", summary="Get feedback history for a memory")
+def get_feedback_history(memory_id: str, _auth=Depends(verify_auth)):
+    """Retrieve all feedback review records for a specific memory."""
+    try:
+        records = get_memory_instance().get_feedback(memory_id=memory_id)
+        return {"memory_id": memory_id, "feedback": records}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise upstream_error()
+
+
+@app.post("/memories/feedback/status", summary="List memory IDs filtered by feedback status")
+def list_memories_by_feedback_status(
+    req: FeedbackListByStatusRequest,
+    request: Request,
+    _auth=Depends(verify_auth),
+):
+    """
+    List memory IDs whose *current* feedback status matches the filter.
+    Optionally scopes by user_id / agent_id / run_id.
+    Listing across all memories requires admin role.
+    """
+    try:
+        if not any([req.user_id, req.agent_id, req.run_id]):
+            auth_type = getattr(request.state, "auth_type", "none")
+            if _auth is not None and getattr(_auth, "role", None) != "admin" and auth_type not in {"admin_api_key", "disabled"}:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Admin role required to list by feedback status across all memories. Provide user_id/agent_id/run_id for scoped queries.",
+                )
+        memory_ids = get_memory_instance().list_feedback_by_status(
+            status=req.status,
+            user_id=req.user_id,
+            agent_id=req.agent_id,
+            run_id=req.run_id,
+        )
+        return {"status": req.status, "memory_ids": memory_ids}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except HTTPException:
+        raise
     except Exception:
         raise upstream_error()
 

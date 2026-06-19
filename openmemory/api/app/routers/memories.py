@@ -8,13 +8,21 @@ from app.models import (
     AccessControl,
     App,
     Category,
+    FeedbackStatus,
     Memory,
     MemoryAccessLog,
+    MemoryFeedback,
     MemoryState,
     MemoryStatusHistory,
     User,
 )
-from app.schemas import MemoryResponse
+from app.schemas import (
+    FeedbackByStatusRequest,
+    FeedbackListResponse,
+    FeedbackRecordResponse,
+    FeedbackSubmitRequest,
+    MemoryResponse,
+)
 from app.utils.memory import get_memory_client
 from app.utils.permissions import check_memory_access_permissions
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -692,3 +700,201 @@ async def get_related_memories(
             for memory in items
         ]
     )
+
+
+def _validate_feedback_status(status: str) -> FeedbackStatus:
+    """Validate and convert string status to FeedbackStatus enum."""
+    try:
+        return FeedbackStatus(status)
+    except ValueError:
+        valid = ", ".join(sorted(s.value for s in FeedbackStatus))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid feedback status '{status}'. Must be one of: {valid}",
+        )
+
+
+def _get_current_feedback_status(db: Session, memory_id: UUID) -> Optional[FeedbackStatus]:
+    """Get the latest feedback status for a memory (or None if never reviewed)."""
+    latest = (
+        db.query(MemoryFeedback)
+        .filter(MemoryFeedback.memory_id == memory_id)
+        .order_by(MemoryFeedback.created_at.desc())
+        .first()
+    )
+    return latest.status if latest else None
+
+
+# Submit feedback on a memory
+@router.post("/{memory_id}/feedback")
+async def submit_feedback(
+    memory_id: UUID,
+    request: FeedbackSubmitRequest,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.user_id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    memory = get_memory_or_404(db, memory_id)
+
+    status_enum = _validate_feedback_status(request.status)
+    previous_status = _get_current_feedback_status(db, memory_id)
+
+    linked_history_uuid = None
+    if request.linked_history_id:
+        try:
+            linked_history_uuid = UUID(request.linked_history_id)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="linked_history_id must be a valid UUID")
+
+    reviewer_uuid = None
+    if request.reviewer_id:
+        reviewer = db.query(User).filter(User.user_id == request.reviewer_id).first()
+        if not reviewer:
+            raise HTTPException(status_code=404, detail="Reviewer user not found")
+        reviewer_uuid = reviewer.id
+
+    feedback_record = MemoryFeedback(
+        memory_id=memory_id,
+        user_id=user.id,
+        status=status_enum,
+        reason=request.reason,
+        reviewer_id=reviewer_uuid,
+        previous_status=previous_status,
+        linked_history_id=linked_history_uuid,
+    )
+    db.add(feedback_record)
+    db.commit()
+    db.refresh(feedback_record)
+
+    return {
+        "message": "Feedback submitted successfully",
+        "feedback": FeedbackRecordResponse(
+            id=feedback_record.id,
+            memory_id=feedback_record.memory_id,
+            status=feedback_record.status.value,
+            reason=feedback_record.reason,
+            reviewer_id=request.reviewer_id,
+            previous_status=feedback_record.previous_status.value if feedback_record.previous_status else None,
+            linked_history_id=str(feedback_record.linked_history_id) if feedback_record.linked_history_id else None,
+            created_at=feedback_record.created_at,
+        ),
+    }
+
+
+# Get all feedback records for a memory
+@router.get("/{memory_id}/feedback", response_model=FeedbackListResponse)
+async def get_memory_feedback(
+    memory_id: UUID,
+    user_id: str,
+    db: Session = Depends(get_db),
+):
+    user = db.query(User).filter(User.user_id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    memory = get_memory_or_404(db, memory_id)
+
+    records = (
+        db.query(MemoryFeedback)
+        .filter(MemoryFeedback.memory_id == memory_id)
+        .order_by(MemoryFeedback.created_at.asc())
+        .all()
+    )
+
+    # Build a reviewer-id -> reviewer-user-id map for the response
+    reviewer_ids = {r.reviewer_id for r in records if r.reviewer_id}
+    reviewer_map = {}
+    if reviewer_ids:
+        reviewers = db.query(User).filter(User.id.in_(reviewer_ids)).all()
+        reviewer_map = {r.id: r.user_id for r in reviewers}
+
+    feedback_list = [
+        FeedbackRecordResponse(
+            id=r.id,
+            memory_id=r.memory_id,
+            status=r.status.value,
+            reason=r.reason,
+            reviewer_id=reviewer_map.get(r.reviewer_id) if r.reviewer_id else None,
+            previous_status=r.previous_status.value if r.previous_status else None,
+            linked_history_id=str(r.linked_history_id) if r.linked_history_id else None,
+            created_at=r.created_at,
+        )
+        for r in records
+    ]
+
+    return FeedbackListResponse(memory_id=memory_id, feedback=feedback_list)
+
+
+# List memory IDs filtered by feedback status — for the review queue in the dashboard
+@router.post("/feedback/status")
+async def list_memories_by_feedback_status(
+    request: FeedbackByStatusRequest,
+    db: Session = Depends(get_db),
+):
+    """
+    Returns memory IDs whose *current* feedback status matches the requested filter.
+    Each memory is represented by its latest feedback record, and we filter across those.
+    Useful for building the dashboard's review queue (needs_review, etc.).
+    """
+    user = db.query(User).filter(User.user_id == request.user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    status_enum = _validate_feedback_status(request.status)
+
+    # Subquery: pick the latest feedback per memory_id
+    from sqlalchemy import and_ as sa_and_
+    from sqlalchemy import tuple_ as sa_tuple_
+
+    latest_created_subq = (
+        db.query(
+            MemoryFeedback.memory_id,
+            func.max(MemoryFeedback.created_at).label("max_created"),
+        )
+        .filter(MemoryFeedback.memory_id.in_(
+            db.query(Memory.id).filter(Memory.user_id == user.id).subquery()
+        ))
+        .group_by(MemoryFeedback.memory_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(MemoryFeedback)
+        .join(
+            latest_created_subq,
+            sa_and_(
+                MemoryFeedback.memory_id == latest_created_subq.c.memory_id,
+                MemoryFeedback.created_at == latest_created_subq.c.max_created,
+            ),
+        )
+        .filter(MemoryFeedback.status == status_enum)
+    )
+
+    if request.app_id:
+        query = query.filter(
+            MemoryFeedback.memory_id.in_(
+                db.query(Memory.id).filter(Memory.app_id == request.app_id).subquery()
+            )
+        )
+
+    records = query.all()
+
+    # Also attach memory content preview, app_id, app_name so the dashboard can render the queue directly
+    result_items = []
+    for r in records:
+        memory = db.query(Memory).options(joinedload(Memory.app)).filter(Memory.id == r.memory_id).first()
+        if memory:
+            result_items.append({
+                "memory_id": str(r.memory_id),
+                "content_preview": (memory.content[:140] + "...") if len(memory.content) > 140 else memory.content,
+                "app_id": str(memory.app_id) if memory.app_id else None,
+                "app_name": memory.app.name if memory.app else None,
+                "created_at": int(r.created_at.timestamp()),
+                "reviewer_id": None,
+            })
+
+    return {
+        "status": request.status,
+        "total": len(result_items),
+        "items": result_items,
+    }

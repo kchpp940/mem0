@@ -3,7 +3,6 @@ import pkg from "pg";
 const { Client, escapeIdentifier } = pkg;
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
-import { transformCategoriesForPgvector } from "../utils/filter_normalizer";
 
 const SAFE_IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/;
 
@@ -332,31 +331,11 @@ export class PGVector implements VectorStore {
   ): Promise<VectorStoreResult[] | null> {
     try {
       const {
-        filters: adaptedFilters,
-        categorySqlClause,
-        categorySqlParams,
-      } = transformCategoriesForPgvector(filters);
-      const { conditions, values, paramIndex } = buildFilterConditions(
-        adaptedFilters,
-        3,
-      );
+        conditions,
+        values,
+        paramIndex: _,
+      } = buildFilterConditions(filters, 3);
       const filterValues: any[] = [query, topK, ...values];
-
-      let categoryValues: any[] = [];
-      let nextParamIdx = paramIndex;
-      if (categorySqlClause && categorySqlParams) {
-        let resolvedClause = categorySqlClause;
-        for (const param of categorySqlParams) {
-          resolvedClause = resolvedClause.replace(
-            "$%PGV_PARAM%",
-            `$${nextParamIdx}`,
-          );
-          categoryValues.push(param);
-          nextParamIdx++;
-        }
-        conditions.push(resolvedClause);
-        filterValues.push(...categoryValues);
-      }
 
       const filterClause =
         conditions.length > 0 ? "AND " + conditions.join(" AND ") : "";
@@ -390,31 +369,11 @@ export class PGVector implements VectorStore {
   ): Promise<VectorStoreResult[]> {
     const queryVector = `[${query.join(",")}]`;
     const {
-      filters: adaptedFilters,
-      categorySqlClause,
-      categorySqlParams,
-    } = transformCategoriesForPgvector(filters);
-    const { conditions, values, paramIndex } = buildFilterConditions(
-      adaptedFilters,
-      3,
-    );
+      conditions,
+      values,
+      paramIndex: _,
+    } = buildFilterConditions(filters, 3);
     const filterValues: any[] = [queryVector, topK, ...values];
-
-    let categoryValues: any[] = [];
-    let nextParamIdx = paramIndex;
-    if (categorySqlClause && categorySqlParams) {
-      let resolvedClause = categorySqlClause;
-      for (const param of categorySqlParams) {
-        resolvedClause = resolvedClause.replace(
-          "$%PGV_PARAM%",
-          `$${nextParamIdx}`,
-        );
-        categoryValues.push(param);
-        nextParamIdx++;
-      }
-      conditions.push(resolvedClause);
-      filterValues.push(...categoryValues);
-    }
 
     const filterClause =
       conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";

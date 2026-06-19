@@ -63,3 +63,39 @@ class PaginatedMemoryResponse(BaseModel):
     page: int
     size: int
     pages: int
+
+
+class FeedbackSubmitRequest(BaseModel):
+    user_id: str
+    status: str
+    reason: Optional[str] = None
+    reviewer_id: Optional[str] = None
+    linked_history_id: Optional[str] = None
+
+
+class FeedbackRecordResponse(BaseModel):
+    id: UUID
+    memory_id: UUID
+    status: str
+    reason: Optional[str] = None
+    reviewer_id: Optional[str] = None
+    previous_status: Optional[str] = None
+    linked_history_id: Optional[str] = None
+    created_at: int
+
+    @validator('created_at', pre=True)
+    def convert_created_at_to_epoch(cls, v):
+        if isinstance(v, datetime):
+            return int(v.timestamp())
+        return v
+
+
+class FeedbackListResponse(BaseModel):
+    memory_id: UUID
+    feedback: List[FeedbackRecordResponse]
+
+
+class FeedbackByStatusRequest(BaseModel):
+    user_id: str
+    status: str
+    app_id: Optional[UUID] = None

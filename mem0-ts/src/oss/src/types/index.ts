@@ -9,7 +9,6 @@ export interface ScoreWeights {
 export interface SearchProfile {
   name?: string;
   filters?: SearchFilters;
-  categories?: string[];
   topK?: number;
   threshold?: number;
   explain?: boolean;
@@ -28,28 +27,6 @@ export interface SearchExplainInfo {
     appliedConfig: Omit<SearchProfile, "name" | "description">;
   };
   overriddenFields?: string[];
-  scoring?: {
-    semanticCount: number;
-    bm25Count: number;
-    entityCount: number;
-    threshold: number;
-    topK: number;
-    weights?: Required<ScoreWeights>;
-  };
-  rerank?: {
-    enabled: boolean;
-    provider?: string;
-    inputCount?: number;
-    outputCount?: number;
-  };
-  filters?: {
-    normalized: Record<string, any>;
-    categories?: string[];
-    adapter?: {
-      provider: string;
-      transformed: Record<string, any>;
-    };
-  };
 }
 
 export interface MultiModalMessages {
@@ -121,10 +98,6 @@ export interface MemoryConfig {
     config: LLMConfig;
   };
   historyStore?: HistoryStoreConfig;
-  reranker?: {
-    provider: string;
-    config?: Record<string, any>;
-  };
   disableHistory?: boolean;
   historyDbPath?: string;
   customInstructions?: string;
@@ -167,7 +140,6 @@ const ScoreWeightsSchema = z.object({
 const SearchProfileSchema = z.object({
   name: z.string().optional(),
   filters: z.record(z.string(), z.any()).optional(),
-  categories: z.array(z.string()).optional(),
   topK: z.number().int().min(0).optional(),
   threshold: z.number().min(0).max(1).optional(),
   explain: z.boolean().optional(),
@@ -226,10 +198,4 @@ export const MemoryConfigSchema = z.object({
     .optional(),
   disableHistory: z.boolean().optional(),
   searchProfiles: SearchProfileStoreSchema.optional(),
-  reranker: z
-    .object({
-      provider: z.string(),
-      config: z.record(z.string(), z.any()).optional(),
-    })
-    .optional(),
 });

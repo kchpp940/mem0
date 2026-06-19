@@ -17,7 +17,6 @@ export interface SearchMemoryOptions {
   profile?: string | SearchProfile;
   topK?: number;
   filters?: SearchFilters;
-  categories?: string[];
   threshold?: number;
   explain?: boolean;
   referenceDate?: number | string | Date | null;

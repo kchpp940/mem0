@@ -654,16 +654,28 @@ export class Memory {
       normalized[normalizedKey] = value;
     }
     if (normalized.userId !== undefined) {
-      normalized.user_id = validateAndTrimEntityId(normalized.userId, "user_id");
+      normalized.user_id = validateAndTrimEntityId(
+        normalized.userId,
+        "user_id",
+      );
       delete normalized.userId;
     } else if (normalized.user_id !== undefined) {
-      normalized.user_id = validateAndTrimEntityId(normalized.user_id, "user_id");
+      normalized.user_id = validateAndTrimEntityId(
+        normalized.user_id,
+        "user_id",
+      );
     }
     if (normalized.agentId !== undefined) {
-      normalized.agent_id = validateAndTrimEntityId(normalized.agentId, "agent_id");
+      normalized.agent_id = validateAndTrimEntityId(
+        normalized.agentId,
+        "agent_id",
+      );
       delete normalized.agentId;
     } else if (normalized.agent_id !== undefined) {
-      normalized.agent_id = validateAndTrimEntityId(normalized.agent_id, "agent_id");
+      normalized.agent_id = validateAndTrimEntityId(
+        normalized.agent_id,
+        "agent_id",
+      );
     }
     if (normalized.runId !== undefined) {
       normalized.run_id = validateAndTrimEntityId(normalized.runId, "run_id");
@@ -682,7 +694,9 @@ export class Memory {
       return categories.length > 0 ? [categories] : undefined;
     }
     if (Array.isArray(categories)) {
-      const filtered = categories.filter((c) => typeof c === "string" && c.length > 0);
+      const filtered = categories.filter(
+        (c) => typeof c === "string" && c.length > 0,
+      );
       return filtered.length > 0 ? filtered : undefined;
     }
     return undefined;
@@ -729,13 +743,17 @@ export class Memory {
       provider: overrideNormalized.provider ?? baseNormalized.provider,
       model: overrideNormalized.model ?? baseNormalized.model,
       topK: overrideNormalized.topK ?? baseNormalized.topK,
-      config: { ...(baseNormalized.config ?? {}), ...(overrideNormalized.config ?? {}) },
+      config: {
+        ...(baseNormalized.config ?? {}),
+        ...(overrideNormalized.config ?? {}),
+      },
     };
   }
 
-  private _resolveSearchProfile(
-    profile: string | SearchProfile | undefined,
-  ): { profile: SearchProfile | null; profileName: string | null } {
+  private _resolveSearchProfile(profile: string | SearchProfile | undefined): {
+    profile: SearchProfile | null;
+    profileName: string | null;
+  } {
     if (profile === undefined || profile === null) {
       return { profile: null, profileName: null };
     }
@@ -757,9 +775,7 @@ export class Memory {
     );
   }
 
-  private _mergeSearchConfig(
-    options: SearchMemoryOptions,
-  ): {
+  private _mergeSearchConfig(options: SearchMemoryOptions): {
     merged: Required<
       Pick<SearchMemoryOptions, "topK" | "threshold" | "explain">
     > & {
@@ -808,8 +824,8 @@ export class Memory {
     const normalizedCategories = this._normalizeCategories(rawCategories);
 
     const entityFilters: Record<string, any> = {
-      ...(this._normalizeEntityFilters(profileConfig.filters)),
-      ...(this._normalizeEntityFilters(optionsRest.filters)),
+      ...this._normalizeEntityFilters(profileConfig.filters),
+      ...this._normalizeEntityFilters(optionsRest.filters),
     };
     const categoryFilters = this._categoriesToFilters(normalizedCategories);
     const mergedFilters: Record<string, any> = {
@@ -1673,14 +1689,20 @@ export class Memory {
 
     // Step 8: Score and rank with custom weights (hybridWeights takes precedence over scoreWeights)
     const hasHybrid = Object.keys(hybridWeights).length > 0;
-    const effectiveWeights = hasHybrid ? (hybridWeights as HybridWeights) : scoreWeights;
+    const effectiveWeights = hasHybrid
+      ? (hybridWeights as HybridWeights)
+      : scoreWeights;
     const scoringWeights: ScoringScoreWeights = {
       semanticWeight: effectiveWeights.semanticWeight,
       bm25Weight:
         effectiveWeights.bm25Weight ??
-        (hasHybrid ? (effectiveWeights as HybridWeights).keywordWeight : undefined),
+        (hasHybrid
+          ? (effectiveWeights as HybridWeights).keywordWeight
+          : undefined),
       entityBoostWeight: effectiveWeights.entityBoostWeight,
-      vectorWeight: hasHybrid ? (effectiveWeights as HybridWeights).vectorWeight : undefined,
+      vectorWeight: hasHybrid
+        ? (effectiveWeights as HybridWeights).vectorWeight
+        : undefined,
     };
     const scoredResults = scoreAndRank(
       candidates,
@@ -1772,7 +1794,13 @@ export class Memory {
     };
 
     const hasHybridWeights = Object.keys(hybridWeights).length > 0;
-    if (explain || profileInfo || rerankApplied || categories || hasHybridWeights) {
+    if (
+      explain ||
+      profileInfo ||
+      rerankApplied ||
+      categories ||
+      hasHybridWeights
+    ) {
       result.explain = {};
       if (profileInfo) {
         result.explain.profile = profileInfo;

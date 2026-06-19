@@ -7,6 +7,7 @@ import {
   ensureSQLiteDirectory,
   getDefaultVectorStoreDbPath,
 } from "../utils/sqlite";
+import { buildInMemoryFilters } from "../utils/filter_normalizer";
 
 interface MemoryVector {
   id: string;
@@ -181,7 +182,9 @@ export class MemoryVectorStore implements VectorStore {
    * Supports logical operators (AND, OR, NOT) and comparison operators.
    */
   private filterVector(vector: MemoryVector, filters?: SearchFilters): boolean {
-    if (!filters || Object.keys(filters).length === 0) return true;
+    // Apply shared filter normalization (categories, entity aliases, etc.)
+    const normalized = buildInMemoryFilters(filters);
+    if (!normalized || Object.keys(normalized).length === 0) return true;
 
     // Normalize $or/$not/$and → OR/NOT/AND
     const keyMap: Record<string, string> = {
@@ -189,15 +192,15 @@ export class MemoryVectorStore implements VectorStore {
       $or: "OR",
       $not: "NOT",
     };
-    const normalized: Record<string, any> = {};
-    for (const [key, value] of Object.entries(filters)) {
+    const remapped: Record<string, any> = {};
+    for (const [key, value] of Object.entries(normalized)) {
       const normKey = keyMap[key] || key;
-      if (!(normKey in normalized)) {
-        normalized[normKey] = value;
+      if (!(normKey in remapped)) {
+        remapped[normKey] = value;
       }
     }
 
-    for (const [key, value] of Object.entries(normalized)) {
+    for (const [key, value] of Object.entries(remapped)) {
       // Handle logical operators
       if (key === "AND") {
         if (!Array.isArray(value)) {

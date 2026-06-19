@@ -5,7 +5,12 @@
  */
 /// <reference types="jest" />
 import { Memory } from "../src/memory";
-import type { MemoryConfig, SearchProfile, SearchProfileStore, SearchResult } from "../src/types";
+import type {
+  MemoryConfig,
+  SearchProfile,
+  SearchProfileStore,
+  SearchResult,
+} from "../src/types";
 
 jest.setTimeout(15000);
 
@@ -246,7 +251,10 @@ describe("Memory - Search with Named Profiles", () => {
       searchProfiles: buildProfiles(),
     });
     const userId = `profile_filters_${Date.now()}`;
-    await mem.add("User likes pizza", { userId, metadata: { category: "fact" } });
+    await mem.add("User likes pizza", {
+      userId,
+      metadata: { category: "fact" },
+    });
 
     const result = (await mem.search("What does user like", {
       profile: "agent-facts",

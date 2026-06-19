@@ -31,3 +31,4 @@ export * from "./rerankers/base";
 export * from "./rerankers/simple";
 export * from "./rerankers/llm";
 export * from "./utils/factory";
+export * from "./utils/filter_normalizer";

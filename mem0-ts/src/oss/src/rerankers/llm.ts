@@ -42,7 +42,14 @@ export class LLMReranker extends BaseReranker {
     this.useStructuredOutput = config.config?.useStructuredOutput ?? false;
 
     try {
-      const llmProvider = config.provider || "openai";
+      // "llm" is a generic alias → default to openai backend.
+      // Provider names like "openai", "anthropic", etc. are passed through directly.
+      const genericAliases = new Set(["llm", "default"]);
+      const llmProvider = genericAliases.has(
+        config.provider?.toLowerCase() ?? "",
+      )
+        ? "openai"
+        : config.provider || "openai";
       const llmConfig: any = {
         provider: llmProvider,
         apiKey: config.apiKey,
@@ -196,6 +203,9 @@ export class LLMReranker extends BaseReranker {
     }
     const sequentialMatch = longestMatch / querySet.size;
 
-    return Math.min(1.0, Math.max(0.0, exactMatch * 0.6 + sequentialMatch * 0.4));
+    return Math.min(
+      1.0,
+      Math.max(0.0, exactMatch * 0.6 + sequentialMatch * 0.4),
+    );
   }
 }

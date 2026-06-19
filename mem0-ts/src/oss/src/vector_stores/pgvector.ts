@@ -3,6 +3,7 @@ import pkg from "pg";
 const { Client, escapeIdentifier } = pkg;
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { buildPgFilterConditions } from "../utils/filter_normalizer";
 
 const SAFE_IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]{0,127}$/;
 
@@ -330,11 +331,7 @@ export class PGVector implements VectorStore {
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[] | null> {
     try {
-      const {
-        conditions,
-        values,
-        paramIndex: _,
-      } = buildFilterConditions(filters, 3);
+      const { conditions, values } = buildPgFilterConditions(filters, 3);
       const filterValues: any[] = [query, topK, ...values];
 
       const filterClause =
@@ -368,11 +365,7 @@ export class PGVector implements VectorStore {
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
     const queryVector = `[${query.join(",")}]`;
-    const {
-      conditions,
-      values,
-      paramIndex: _,
-    } = buildFilterConditions(filters, 3);
+    const { conditions, values } = buildPgFilterConditions(filters, 3);
     const filterValues: any[] = [queryVector, topK, ...values];
 
     const filterClause =
@@ -448,14 +441,15 @@ export class PGVector implements VectorStore {
     filters?: SearchFilters,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
-    const {
-      conditions,
-      values: filterValues,
-      paramIndex,
-    } = buildFilterConditions(filters, 1);
+    const { conditions, values: filterValues } = buildPgFilterConditions(
+      filters,
+      1,
+    );
 
     const filterClause =
       conditions.length > 0 ? "WHERE " + conditions.join(" AND ") : "";
+
+    const paramIndex = 1 + filterValues.length;
 
     const listQuery = `
       SELECT id, payload

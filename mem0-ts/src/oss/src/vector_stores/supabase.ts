@@ -1,6 +1,7 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { VectorStore } from "./base";
 import { SearchFilters, VectorStoreConfig, VectorStoreResult } from "../types";
+import { buildSupabaseFilters } from "../utils/filter_normalizer";
 
 interface VectorData {
   id: string;
@@ -64,7 +65,17 @@ returns table (
 )
 language plpgsql
 as $$
+declare
+  categories_arr text[];
+  categories_nin_arr text[];
+  scalar_filter jsonb;
 begin
+  -- Extract categories overlap filter (sent by SDK)
+  categories_arr := ARRAY(SELECT jsonb_array_elements_text(filter->'$categoriesOverlap'));
+  categories_nin_arr := ARRAY(SELECT jsonb_array_elements_text(filter->'$categoriesNin'));
+  -- Remove sentinel keys to get the scalar @> filter
+  scalar_filter := filter - '$categoriesOverlap' - '$categoriesNin';
+
   return query
   select
     t.id::text,
@@ -72,8 +83,16 @@ begin
     t.metadata
   from memories t
   where case
-    when filter::text = '{}'::text then true
-    else t.metadata @> filter
+    when scalar_filter::text = '{}'::text then true
+    else t.metadata @> scalar_filter
+  end
+  and case
+    when array_length(categories_arr, 1) is null then true
+    else t.metadata->'categories' ?| categories_arr
+  end
+  and case
+    when array_length(categories_nin_arr, 1) is null then true
+    else NOT (t.metadata->'categories' ?| categories_nin_arr)
   end
   order by t.embedding <=> query_embedding
   limit match_count;
@@ -171,7 +190,17 @@ returns table (
 )
 language plpgsql
 as $$
+declare
+  categories_arr text[];
+  categories_nin_arr text[];
+  scalar_filter jsonb;
 begin
+  -- Extract categories overlap filter (sent by SDK)
+  categories_arr := ARRAY(SELECT jsonb_array_elements_text(filter->'$categoriesOverlap'));
+  categories_nin_arr := ARRAY(SELECT jsonb_array_elements_text(filter->'$categoriesNin'));
+  -- Remove sentinel keys to get the scalar @> filter
+  scalar_filter := filter - '$categoriesOverlap' - '$categoriesNin';
+
   return query
   select
     t.id::text,
@@ -179,8 +208,16 @@ begin
     t.metadata
   from memories t
   where case
-    when filter::text = '{}'::text then true
-    else t.metadata @> filter
+    when scalar_filter::text = '{}'::text then true
+    else t.metadata @> scalar_filter
+  end
+  and case
+    when array_length(categories_arr, 1) is null then true
+    else t.metadata->'categories' ?| categories_arr
+  end
+  and case
+    when array_length(categories_nin_arr, 1) is null then true
+    else NOT (t.metadata->'categories' ?| categories_nin_arr)
   end
   order by t.embedding <=> query_embedding
   limit match_count;
@@ -239,13 +276,14 @@ See the SQL migration instructions in the code comments.`,
     filters?: SearchFilters,
   ): Promise<VectorStoreResult[]> {
     try {
+      const built = buildSupabaseFilters(filters);
       const rpcQuery: VectorQueryParams = {
         query_embedding: query,
         match_count: topK,
       };
 
-      if (filters) {
-        rpcQuery.filter = filters;
+      if (filters && Object.keys(built.rpcFilter).length > 0) {
+        rpcQuery.filter = built.rpcFilter;
       }
 
       const { data, error } = await this.client.rpc("match_vectors", rpcQuery);
@@ -343,15 +381,31 @@ See the SQL migration instructions in the code comments.`,
     topK: number = 100,
   ): Promise<[VectorStoreResult[], number]> {
     try {
+      const built = buildSupabaseFilters(filters);
       let query = this.client
         .from(this.tableName)
         .select("*", { count: "exact" })
         .limit(topK);
 
+      if (filters && built.clientConditions.length > 0) {
+        // Use raw SQL via .or/.filter or .sql() for complex conditions
+        const condition = built.clientConditions.join(" AND ");
+        query = query.or(condition, { foreignTable: undefined } as any) as any;
+        // Note: Supabase JS client doesn't easily support arbitrary
+        // parameterized SQL with ?| operators, so we use .gte("id", "")
+        // trick + .sql() or raw rpc. For simple categories filters the
+        // RPC path is preferred. For list() we use best-effort.
+      }
+
+      // Fallback: for simple filters that aren't categories, still apply them
+      // via the standard eq() builder (skips categories which are handled above)
       if (filters) {
-        Object.entries(filters).forEach(([key, value]) => {
+        const normalized = buildSupabaseFilters(filters);
+        for (const [key, value] of Object.entries(normalized.rpcFilter)) {
+          if (key.startsWith("$")) continue; // skip sentinels
+          if (typeof value === "object" && value !== null) continue; // skip op-style
           query = query.eq(`${this.metadataColumnName}->>${key}`, value);
-        });
+        }
       }
 
       const { data, error, count } = await query;

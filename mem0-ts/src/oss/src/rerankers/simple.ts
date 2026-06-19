@@ -48,7 +48,8 @@ export class SimpleReranker extends BaseReranker {
       if (this.blendWithOriginalScore) {
         const rerankWeight = 1.0 - this.originalScoreWeight;
         finalScore =
-          relevanceScore * rerankWeight + existingScore * this.originalScoreWeight;
+          relevanceScore * rerankWeight +
+          existingScore * this.originalScoreWeight;
       } else {
         finalScore = relevanceScore;
       }

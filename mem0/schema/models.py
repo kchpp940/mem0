@@ -1,7 +1,10 @@
 """Pydantic models derived from the canonical field definitions.
 
-Server schemas and SDK option types should import these models rather than
-redefining fields with potentially different names, defaults, or validators.
+All Pydantic models used across server, SDK client, and CLI MUST be defined
+here or derived from the field specs in mem0.schema.fields.
+
+This is the single source of truth (SSOT) for memory-related data models.
+TypeScript types are generated from these models via scripts/generate_ts_schema.py.
 """
 
 from __future__ import annotations
@@ -10,15 +13,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from mem0.schema.fields import FIELD_DEFAULTS
+from mem0.schema.fields import FIELD_DEFAULTS, FEEDBACK_VALUES
 
 
-def _spec_to_field_kwargs(spec) -> dict:
-    kw: dict = {"default": spec.default, "description": spec.description}
-    if spec.default is None and not spec.required:
-        kw["default"] = None
-    return kw
-
+# ─── Request models (for server API endpoints) ───────────────────────────────
 
 class AddMemoryRequest(BaseModel):
     messages: List[Dict[str, str]] = Field(..., description="List of messages to store.")
@@ -71,6 +69,82 @@ class DeleteAllMemoryRequest(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Filters containing entity IDs.")
 
 
+class FeedbackRequest(BaseModel):
+    memory_id: str = Field(..., description="ID of the memory to provide feedback for.")
+    feedback: Optional[str] = Field(default=None, description=f"Feedback value ({', '.join(FEEDBACK_VALUES)}).")
+    feedback_reason: Optional[str] = Field(default=None, description="Reason for the feedback.")
+
+
+class CreateMemoryExportRequest(BaseModel):
+    schema: Dict[str, Any] = Field(..., description="JSON schema defining the export structure.")
+    filters: Dict[str, Any] = Field(..., description="Filters to select which memories to export.")
+    export_instructions: Optional[str] = Field(default=None, description="Additional instructions for the export.")
+
+
+class GetMemoryExportRequest(BaseModel):
+    memory_export_id: Optional[str] = Field(default=None, description="ID of the memory export to retrieve.")
+    filters: Optional[Dict[str, Any]] = Field(default=None, description="Filters to identify the export.")
+
+
+# ─── Response models (for API responses and SDK returns) ─────────────────────
+
+class MemoryResponse(BaseModel):
+    """Canonical memory response object.
+
+    Used by:
+    - Server REST API responses
+    - Python SDK memory.get() / search() / get_all()
+    - Vector store result formatting
+    """
+
+    id: str = Field(..., description="Unique identifier of the memory.")
+    memory: str = Field(..., description="The memory content.")
+    hash: Optional[str] = Field(default=None, description="Hash of the memory content.")
+    user_id: Optional[str] = Field(default=None, description="ID of the user associated with the memory.")
+    agent_id: Optional[str] = Field(default=None, description="ID of the agent associated with the memory.")
+    run_id: Optional[str] = Field(default=None, description="ID of the run associated with the memory.")
+    actor_id: Optional[str] = Field(default=None, description="ID of the actor that created the memory.")
+    role: Optional[str] = Field(default=None, description="Role associated with the memory.")
+    categories: Optional[List[str]] = Field(default=None, description="Categories for memory classification.")
+    created_at: Optional[str] = Field(default=None, description="Timestamp when the memory was created.")
+    updated_at: Optional[str] = Field(default=None, description="Timestamp when the memory was last updated.")
+    expires_at: Optional[str] = Field(default=None, description="ISO 8601 timestamp when the memory expires.")
+    ttl_state: Optional[str] = Field(default=None, description='TTL lifecycle state: "active" | "expiring_soon" | "expired" | "permanent".')
+    ttl_source: Optional[str] = Field(default=None, description='Which policy scope produced expires_at: "default" | "category" | "user" | "agent" | "workspace" | "request".')
+    score: Optional[float] = Field(default=None, description="Similarity score (only in search results).")
+    feedback_status: Optional[str] = Field(default=None, description="Feedback status of the memory.")
+    operation_id: Optional[str] = Field(default=None, description="Operation ID associated with the memory.")
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata.")
+    score_details: Optional[Dict[str, Any]] = Field(default=None, description="Detailed score breakdown (when explain=True).")
+
+
+class MemoryHistoryItem(BaseModel):
+    """A single history entry for a memory."""
+
+    id: str = Field(..., description="Unique identifier of the history entry.")
+    memory_id: str = Field(..., description="ID of the memory this history entry belongs to.")
+    old_memory: Optional[str] = Field(default=None, description="Previous memory content.")
+    new_memory: Optional[str] = Field(default=None, description="New memory content.")
+    event: str = Field(..., description="Type of event (ADD, UPDATE, DELETE).")
+    created_at: Optional[str] = Field(default=None, description="Timestamp when the event was created.")
+    updated_at: Optional[str] = Field(default=None, description="Timestamp when the event was last updated.")
+    is_deleted: bool = Field(default=False, description="Whether the memory was deleted.")
+    actor_id: Optional[str] = Field(default=None, description="ID of the actor that performed the change.")
+    role: Optional[str] = Field(default=None, description="Role associated with the change.")
+
+
+class MemoryListResponse(BaseModel):
+    """Response for list/search endpoints that return multiple memories."""
+
+    results: List[MemoryResponse] = Field(..., description="List of memory results.")
+
+
+# ─── SDK option models (for client method parameters) ────────────────────────
+#
+# These are the typed option objects passed to MemoryClient methods.
+# They use "filters" instead of top-level entity IDs, matching the
+# platform client API pattern.
+
 class AddMemoryOptions(BaseModel):
     filters: Optional[Dict[str, Any]] = Field(default=None, description="Filters containing entity IDs (e.g. {'user_id': '...'})")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Additional metadata for the memory")
@@ -111,6 +185,22 @@ class UpdateMemoryOptions(BaseModel):
     text: Optional[str] = Field(default=None, description="New text content for the memory")
     metadata: Optional[Dict[str, Any]] = Field(default=None, description="Updated metadata")
     timestamp: Optional[Union[int, float, str]] = Field(default=None, description="Updated timestamp")
+
+
+class FeedbackOptions(BaseModel):
+    feedback: Optional[str] = Field(default=None, description=f"Feedback value ({', '.join(FEEDBACK_VALUES)})")
+    feedback_reason: Optional[str] = Field(default=None, description="Reason for the feedback")
+
+
+class CreateMemoryExportOptions(BaseModel):
+    schema: Dict[str, Any] = Field(..., description="JSON schema defining the export structure")
+    filters: Dict[str, Any] = Field(..., description="Filters to select which memories to export")
+    export_instructions: Optional[str] = Field(default=None, description="Additional instructions for the export")
+
+
+class GetMemoryExportOptions(BaseModel):
+    memory_export_id: Optional[str] = Field(default=None, description="ID of the memory export to retrieve")
+    filters: Optional[Dict[str, Any]] = Field(default=None, description="Filters to identify the export")
 
 
 class ProjectUpdateOptions(BaseModel):

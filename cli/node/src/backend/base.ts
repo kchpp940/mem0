@@ -4,23 +4,50 @@
 
 import type { Mem0Config } from "../config.js";
 import type {
-	AddOptions,
-	DeleteOptions,
+	AddOptions as BaseAddOptions,
+	DeleteOptions as BaseDeleteOptions,
 	EntityIds,
-	Backend as IBackend,
-	ListOptions,
-	SearchOptions,
+	ListOptions as BaseListOptions,
+	SearchOptions as BaseSearchOptions,
 } from "../schema/index.js";
 import { PlatformBackend } from "./platform.js";
 
-export type {
-	AddOptions,
-	SearchOptions,
-	ListOptions,
-	DeleteOptions,
-	EntityIds,
-};
-export type Backend = IBackend;
+export interface ListOptions extends BaseListOptions {
+	category?: string;
+	after?: string;
+	before?: string;
+}
+
+export interface DeleteOptions extends BaseDeleteOptions {
+	all?: boolean;
+}
+
+export type AddOptions = BaseAddOptions;
+export type SearchOptions = BaseSearchOptions;
+export { type EntityIds };
+
+export interface Backend {
+	add(
+		content?: string,
+		messages?: Record<string, unknown>[],
+		opts?: AddOptions,
+	): Promise<Record<string, unknown>>;
+	search(query: string, opts?: SearchOptions): Promise<Record<string, unknown>[]>;
+	get(memoryId: string): Promise<Record<string, unknown>>;
+	listMemories(opts?: ListOptions): Promise<Record<string, unknown>[]>;
+	update(
+		memoryId: string,
+		content?: string,
+		metadata?: Record<string, unknown>,
+	): Promise<Record<string, unknown>>;
+	delete(memoryId?: string, opts?: DeleteOptions): Promise<Record<string, unknown>>;
+	deleteEntities(opts: EntityIds): Promise<Record<string, unknown>>;
+	ping(): Promise<Record<string, unknown>>;
+	status(opts?: { userId?: string; agentId?: string }): Promise<Record<string, unknown>>;
+	entities(entityType: string): Promise<Record<string, unknown>[]>;
+	listEvents(): Promise<Record<string, unknown>[]>;
+	getEvent(eventId: string): Promise<Record<string, unknown>>;
+}
 
 export class AuthError extends Error {
 	constructor(

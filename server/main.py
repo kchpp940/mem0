@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -170,11 +171,15 @@ app.include_router(entities_router.router)
 app.include_router(requests_router.router)
 
 
-import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))  # noqa: E402
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-
-from mem0.schema.fields import ENTITY_FIELDS, FIELD_DEFAULTS, validate_filters_contain_entity
+from mem0.schema.fields import ENTITY_FIELDS  # noqa: E402
+from mem0.schema.models import (  # noqa: E402
+    AddMemoryRequest,
+    SearchMemoryRequest,
+    UpdateMemoryRequest,
+)
+from mem0.schema.response import format_memory_item  # noqa: E402
 
 
 class Message(BaseModel):
@@ -182,31 +187,16 @@ class Message(BaseModel):
     content: str = Field(..., description="Message content.")
 
 
-class MemoryCreate(BaseModel):
+class MemoryCreate(AddMemoryRequest):
     messages: List[Message] = Field(..., description="List of messages to store.")
-    user_id: Optional[str] = None
-    agent_id: Optional[str] = None
-    run_id: Optional[str] = None
-    metadata: Optional[Dict[str, Any]] = None
-    infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
-    memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
-    prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
 
 
-class MemoryUpdate(BaseModel):
+class MemoryUpdate(UpdateMemoryRequest):
     text: str = Field(..., description="New content to update the memory with.")
-    metadata: Optional[Dict[str, Any]] = Field(None, description="Metadata to update.")
 
 
-class SearchRequest(BaseModel):
-    query: str = Field(..., description="Search query.")
-    user_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
-    run_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
-    agent_id: Optional[str] = Field(None, description="Deprecated: pass inside `filters` instead.", deprecated=True)
-    filters: Optional[Dict[str, Any]] = None
-    top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
-    threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
-    explain: Optional[bool] = Field(None, description="Include score details for each search result.")
+class SearchRequest(SearchMemoryRequest):
+    pass
 
 
 class GenerateInstructionsRequest(BaseModel):
@@ -378,22 +368,12 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at"}
 
 
 def _serialize_memory(row: Any) -> Dict[str, Any]:
     payload = getattr(row, "payload", None) or {}
-    return {
-        "id": getattr(row, "id", None),
-        "memory": payload.get("data"),
-        "user_id": payload.get("user_id"),
-        "agent_id": payload.get("agent_id"),
-        "run_id": payload.get("run_id"),
-        "hash": payload.get("hash"),
-        "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
-        "created_at": payload.get("created_at"),
-        "updated_at": payload.get("updated_at"),
-    }
+    memory_id = getattr(row, "id", None)
+    return format_memory_item(memory_id, payload)
 
 
 def _list_all_memories(limit: int = ALL_MEMORIES_LIMIT) -> Dict[str, Any]:

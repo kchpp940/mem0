@@ -1,14 +1,20 @@
 """Canonical field definitions for memory operations.
 
-This module is the single source of truth for:
+This module is the single source of truth (SSOT) for ALL memory-related field
+definitions across the entire codebase:
 - Field names used across API payload, CLI options, and SDK methods
 - Name mappings between different layers (e.g. CLI camelCase → API snake_case)
 - Default values for optional parameters
 - Validation constraints and error messages
+- Response/payload field classification (core, promoted, metadata)
+- Export / import field definitions
+- Feedback field definitions
+- History field definitions
 
-All consumers (server Pydantic schemas, Python CLI, Node CLI, SDK client types)
-must import from this module rather than hard-coding field names, defaults,
-or validation messages.
+All consumers MUST import from this module rather than hard-coding field names,
+defaults, validation messages, or response formatting logic.
+
+TypeScript side is generated from this file via scripts/generate_ts_schema.py.
 """
 
 from __future__ import annotations
@@ -18,8 +24,13 @@ from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 from pydantic import BaseModel, Field
 
 
+# ─── Entity identifiers ───────────────────────────────────────────────────────
+
 ENTITY_FIELDS: Tuple[str, ...] = ("user_id", "agent_id", "app_id", "run_id")
 ENTITY_FIELD_SET: FrozenSet[str] = frozenset(ENTITY_FIELDS)
+
+
+# ─── CLI ↔ API name mappings ─────────────────────────────────────────────────
 
 CLI_TO_API_MAP: Dict[str, str] = {
     "userId": "user_id",
@@ -29,9 +40,17 @@ CLI_TO_API_MAP: Dict[str, str] = {
     "topK": "top_k",
     "pageSize": "page_size",
     "filterJson": "filters",
+    "feedbackReason": "feedback_reason",
+    "memoryExportId": "memory_export_id",
+    "exportInstructions": "export_instructions",
+    "startDate": "start_date",
+    "endDate": "end_date",
 }
 
 API_TO_CLI_MAP: Dict[str, str] = {v: k for k, v in CLI_TO_API_MAP.items()}
+
+
+# ─── Default values ──────────────────────────────────────────────────────────
 
 FIELD_DEFAULTS: Dict[str, Any] = {
     "top_k": 10,
@@ -44,8 +63,14 @@ FIELD_DEFAULTS: Dict[str, Any] = {
     "immutable": False,
 }
 
+
+# ─── Expires validation ──────────────────────────────────────────────────────
+
 EXPIRES_FORMAT = r"^\d{4}-\d{2}-\d{2}$"
 EXPIRES_FORMAT_DISPLAY = "YYYY-MM-DD"
+
+
+# ─── Field validation rules ──────────────────────────────────────────────────
 
 FIELD_VALIDATION: Dict[str, Dict[str, Any]] = {
     "top_k": {"min": 1, "error": "--top-k must be >= 1."},
@@ -54,10 +79,20 @@ FIELD_VALIDATION: Dict[str, Dict[str, Any]] = {
     "page_size": {"min": 1, "error": "--page-size must be >= 1."},
 }
 
+
+# ─── API field aliases (where the payload key differs from the logical name) ─
+
 ADD_API_FIELD_MAP: Dict[str, str] = {
     "expires": "expiration_date",
     "keyword": "keyword_search",
 }
+
+SEARCH_API_FIELD_MAP: Dict[str, str] = {
+    "keyword": "keyword_search",
+}
+
+
+# ─── Scope display names (for human-readable messages) ───────────────────────
 
 SCOPE_DISPLAY_NAMES: Dict[str, str] = {
     "user_id": "user",
@@ -65,6 +100,116 @@ SCOPE_DISPLAY_NAMES: Dict[str, str] = {
     "app_id": "app",
     "run_id": "run",
 }
+
+
+# ─── Response / payload field classification ─────────────────────────────────
+#
+# Memory payloads stored in vector stores contain many keys.  When building a
+# response dict, we classify them into three groups:
+#
+#   1. CORE_PAYLOAD_KEYS   – always present, directly mapped to response fields
+#   2. PROMOTED_PAYLOAD_KEYS – lifted to top-level response fields (not nested
+#                              under "metadata")
+#   3. Everything else     – collected under the "metadata" key
+#
+# The set CORE_PAYLOAD_KEYS ∪ PROMOTED_PAYLOAD_KEYS is the set of keys that are
+# NOT bundled into the "metadata" dict.
+
+CORE_PAYLOAD_KEYS: Tuple[str, ...] = (
+    "data",
+    "hash",
+    "created_at",
+    "updated_at",
+    "id",
+    "text_lemmatized",
+    "attributed_to",
+    "expires_at",
+    "ttl_source",
+    "ttl_state",
+)
+
+PROMOTED_PAYLOAD_KEYS: Tuple[str, ...] = (
+    "user_id",
+    "agent_id",
+    "run_id",
+    "actor_id",
+    "role",
+    "categories",
+    "feedback_status",
+    "operation_id",
+)
+
+PROMOTED_PAYLOAD_KEY_SET: FrozenSet[str] = frozenset(PROMOTED_PAYLOAD_KEYS)
+
+CORE_AND_PROMOTED_KEY_SET: FrozenSet[str] = frozenset({*CORE_PAYLOAD_KEYS, *PROMOTED_PAYLOAD_KEYS})
+
+
+# ─── Memory response field order (canonical ordering for API responses) ──────
+
+MEMORY_RESPONSE_FIELDS: Tuple[str, ...] = (
+    "id",
+    "memory",
+    "hash",
+    "user_id",
+    "agent_id",
+    "run_id",
+    "actor_id",
+    "role",
+    "categories",
+    "created_at",
+    "updated_at",
+    "expires_at",
+    "ttl_state",
+    "ttl_source",
+    "score",
+    "feedback_status",
+    "operation_id",
+    "metadata",
+)
+
+
+# ─── History response fields ─────────────────────────────────────────────────
+
+HISTORY_RESPONSE_FIELDS: Tuple[str, ...] = (
+    "id",
+    "memory_id",
+    "old_memory",
+    "new_memory",
+    "event",
+    "created_at",
+    "updated_at",
+    "is_deleted",
+    "actor_id",
+    "role",
+)
+
+
+# ─── Feedback ────────────────────────────────────────────────────────────────
+
+FEEDBACK_VALUES: Tuple[str, ...] = ("POSITIVE", "NEGATIVE", "VERY_NEGATIVE")
+FEEDBACK_SET: FrozenSet[str] = frozenset(FEEDBACK_VALUES)
+
+
+# ─── Export / Import ─────────────────────────────────────────────────────────
+
+EXPORT_FIELDS: Tuple[str, ...] = ("schema", "filters", "export_instructions")
+
+IMPORT_FIELDS: Tuple[str, ...] = ("data", "format", "mode")
+
+
+# ─── Payload → response field mapping (payload key → response key) ───────────
+#
+# Most payload keys map directly to response keys with the same name.
+# The "data" key is special — it becomes "memory" in the response.
+
+PAYLOAD_TO_RESPONSE_MAP: Dict[str, str] = {
+    "data": "memory",
+}
+
+
+# ─── FieldSpec model ─────────────────────────────────────────────────────────
+#
+# Describes a single field across all layers (API / CLI / TypeScript).
 
 
 class FieldSpec(BaseModel):
@@ -210,3 +355,118 @@ def validate_filters_contain_entity(filters: Optional[Dict[str, Any]]) -> None:
             f"filters must contain at least one of: {', '.join(ENTITY_FIELDS[:3])}. "
             f"Example: filters={{'user_id': 'u1'}}"
         )
+
+
+# ─── Feedback field specs ────────────────────────────────────────────────────
+
+FEEDBACK_FIELD_SPECS: List[FieldSpec] = [
+    FieldSpec(api_name="memory_id", cli_name="memory-id", ts_name="memoryId", py_type="str", required=True, description="ID of the memory to provide feedback for"),
+    FieldSpec(api_name="feedback", cli_name="feedback", ts_name="feedback", py_type="Optional[str]", description="Feedback value (POSITIVE, NEGATIVE, VERY_NEGATIVE)"),
+    FieldSpec(api_name="feedback_reason", cli_name="feedback-reason", ts_name="feedbackReason", py_type="Optional[str]", description="Reason for the feedback"),
+]
+
+
+# ─── Export field specs ─────────────────────────────────────────────────────
+
+CREATE_EXPORT_FIELD_SPECS: List[FieldSpec] = [
+    FieldSpec(api_name="schema", cli_name="schema", ts_name="schema", py_type="Dict[str, Any]", required=True, description="JSON schema defining the export structure"),
+    FieldSpec(api_name="filters", cli_name="filter", ts_name="filters", py_type="Dict[str, Any]", required=True, description="Filters to select which memories to export"),
+    FieldSpec(api_name="export_instructions", cli_name="export-instructions", ts_name="exportInstructions", py_type="Optional[str]", description="Additional instructions for the export"),
+]
+
+GET_EXPORT_FIELD_SPECS: List[FieldSpec] = [
+    FieldSpec(api_name="memory_export_id", cli_name="memory-export-id", ts_name="memoryExportId", py_type="Optional[str]", description="ID of the memory export to retrieve"),
+    FieldSpec(api_name="filters", cli_name="filter", ts_name="filters", py_type="Optional[Dict[str, Any]]", description="Filters to identify the export"),
+]
+
+
+# ─── Memory response field specs ─────────────────────────────────────────────
+
+MEMORY_RESPONSE_FIELD_SPECS: List[FieldSpec] = [
+    FieldSpec(api_name="id", cli_name="id", ts_name="id", py_type="str", required=True, description="Unique identifier of the memory"),
+    FieldSpec(api_name="memory", cli_name="memory", ts_name="memory", py_type="str", required=True, description="The memory content"),
+    FieldSpec(api_name="hash", cli_name="hash", ts_name="hash", py_type="Optional[str]", description="Hash of the memory content"),
+    FieldSpec(api_name="user_id", cli_name="user-id", ts_name="userId", py_type="Optional[str]", description="ID of the user associated with the memory"),
+    FieldSpec(api_name="agent_id", cli_name="agent-id", ts_name="agentId", py_type="Optional[str]", description="ID of the agent associated with the memory"),
+    FieldSpec(api_name="run_id", cli_name="run-id", ts_name="runId", py_type="Optional[str]", description="ID of the run associated with the memory"),
+    FieldSpec(api_name="actor_id", cli_name="actor-id", ts_name="actorId", py_type="Optional[str]", description="ID of the actor that created the memory"),
+    FieldSpec(api_name="role", cli_name="role", ts_name="role", py_type="Optional[str]", description="Role associated with the memory"),
+    FieldSpec(api_name="categories", cli_name="categories", ts_name="categories", py_type="Optional[List[str]]", description="Categories for memory classification"),
+    FieldSpec(api_name="created_at", cli_name="created-at", ts_name="createdAt", py_type="Optional[str]", description="Timestamp when the memory was created"),
+    FieldSpec(api_name="updated_at", cli_name="updated-at", ts_name="updatedAt", py_type="Optional[str]", description="Timestamp when the memory was last updated"),
+    FieldSpec(api_name="expires_at", cli_name="expires-at", ts_name="expiresAt", py_type="Optional[str]", description="ISO 8601 timestamp when the memory expires"),
+    FieldSpec(api_name="ttl_state", cli_name="ttl-state", ts_name="ttlState", py_type="Optional[str]", description="TTL lifecycle state (active, expiring_soon, expired, permanent)"),
+    FieldSpec(api_name="ttl_source", cli_name="ttl-source", ts_name="ttlSource", py_type="Optional[str]", description="Which policy scope produced expires_at"),
+    FieldSpec(api_name="score", cli_name="score", ts_name="score", py_type="Optional[float]", description="Similarity score (only in search results)"),
+    FieldSpec(api_name="feedback_status", cli_name="feedback-status", ts_name="feedbackStatus", py_type="Optional[str]", description="Feedback status of the memory"),
+    FieldSpec(api_name="operation_id", cli_name="operation-id", ts_name="operationId", py_type="Optional[str]", description="Operation ID associated with the memory"),
+    FieldSpec(api_name="metadata", cli_name="metadata", ts_name="metadata", py_type="Optional[Dict[str, Any]]", description="Additional metadata"),
+]
+
+
+# ─── History response field specs ────────────────────────────────────────────
+
+HISTORY_FIELD_SPECS: List[FieldSpec] = [
+    FieldSpec(api_name="id", cli_name="id", ts_name="id", py_type="str", required=True, description="Unique identifier of the history entry"),
+    FieldSpec(api_name="memory_id", cli_name="memory-id", ts_name="memoryId", py_type="str", required=True, description="ID of the memory this history entry belongs to"),
+    FieldSpec(api_name="old_memory", cli_name="old-memory", ts_name="oldMemory", py_type="Optional[str]", description="Previous memory content"),
+    FieldSpec(api_name="new_memory", cli_name="new-memory", ts_name="newMemory", py_type="Optional[str]", description="New memory content"),
+    FieldSpec(api_name="event", cli_name="event", ts_name="event", py_type="str", required=True, description="Type of event (ADD, UPDATE, DELETE)"),
+    FieldSpec(api_name="created_at", cli_name="created-at", ts_name="createdAt", py_type="Optional[str]", description="Timestamp when the event was created"),
+    FieldSpec(api_name="updated_at", cli_name="updated-at", ts_name="updatedAt", py_type="Optional[str]", description="Timestamp when the event was last updated"),
+    FieldSpec(api_name="is_deleted", cli_name="is-deleted", ts_name="isDeleted", py_type="bool", default=False, description="Whether the memory was deleted"),
+    FieldSpec(api_name="actor_id", cli_name="actor-id", ts_name="actorId", py_type="Optional[str]", description="ID of the actor that performed the change"),
+    FieldSpec(api_name="role", cli_name="role", ts_name="role", py_type="Optional[str]", description="Role associated with the change"),
+]
+
+
+# ─── Additional helper functions ─────────────────────────────────────────────
+
+def validate_feedback_value(feedback: str) -> str:
+    """Validate that a feedback value is one of the allowed values.
+
+    Args:
+        feedback: The feedback value to validate.
+
+    Returns:
+        The uppercased feedback value if valid.
+
+    Raises:
+        ValueError: If the feedback value is not valid.
+    """
+    upper = feedback.upper()
+    if upper not in FEEDBACK_SET:
+        raise ValueError(
+            f"Invalid feedback value '{feedback}'. Must be one of: {', '.join(FEEDBACK_VALUES)}."
+        )
+    return upper
+
+
+def payload_to_response_key(payload_key: str) -> str:
+    """Map a payload key to the corresponding response key.
+
+    Most keys map to themselves, but some have different names in the response
+    (e.g. "data" → "memory").
+
+    Args:
+        payload_key: The key as it appears in the vector store payload.
+
+    Returns:
+        The key as it should appear in the API response.
+    """
+    return PAYLOAD_TO_RESPONSE_MAP.get(payload_key, payload_key)
+
+
+def response_to_payload_key(response_key: str) -> str:
+    """Map a response key back to the corresponding payload key.
+
+    Args:
+        response_key: The key as it appears in the API response.
+
+    Returns:
+        The key as it should appear in the vector store payload.
+    """
+    for payload_key, resp_key in PAYLOAD_TO_RESPONSE_MAP.items():
+        if resp_key == response_key:
+            return payload_key
+    return response_key

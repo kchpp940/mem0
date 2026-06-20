@@ -14,8 +14,9 @@ from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
 
-from mem0.configs.base import MemoryConfig, MemoryItem
+from mem0.configs.base import MemoryConfig
 from mem0.configs.enums import MemoryType
+from mem0.schema.response import format_memory_item
 from mem0.configs.prompts import (
     ADDITIVE_EXTRACTION_PROMPT,
     AGENT_CONTEXT_SUFFIX,
@@ -1117,38 +1118,7 @@ class Memory(MemoryBase):
             display_first_run_notice(self, "sync", "get")
             return None
 
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-        ]
-
-        core_and_promoted_keys = {
-            "data", "hash", "created_at", "updated_at", "id",
-            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
-            *promoted_payload_keys,
-        }
-
-        result_item = MemoryItem(
-            id=memory.id,
-            memory=memory.payload.get("data", ""),
-            hash=memory.payload.get("hash"),
-            created_at=memory.payload.get("created_at"),
-            updated_at=memory.payload.get("updated_at"),
-            expires_at=memory.payload.get("expires_at"),
-            ttl_source=memory.payload.get("ttl_source"),
-        ).model_dump()
-
-        for key in promoted_payload_keys:
-            if key in memory.payload:
-                result_item[key] = memory.payload[key]
-
-        additional_metadata = {k: v for k, v in memory.payload.items() if k not in core_and_promoted_keys}
-        if additional_metadata:
-            result_item["metadata"] = additional_metadata
-
+        result_item = format_memory_item(memory.id, memory.payload)
         annotate_memory_result(result_item)
 
         display_first_run_notice(self, "sync", "get")
@@ -1238,41 +1208,10 @@ class Memory(MemoryBase):
         else:
             actual_memories = memories_result
 
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-        ]
-        core_and_promoted_keys = {
-            "data", "hash", "created_at", "updated_at", "id",
-            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
-            *promoted_payload_keys,
-        }
-
         formatted_memories = []
         for mem in actual_memories:
-            memory_item_dict = MemoryItem(
-                id=mem.id,
-                memory=mem.payload.get("data", ""),
-                hash=mem.payload.get("hash"),
-                created_at=mem.payload.get("created_at"),
-                updated_at=mem.payload.get("updated_at"),
-                expires_at=mem.payload.get("expires_at"),
-                ttl_source=mem.payload.get("ttl_source"),
-            ).model_dump(exclude={"score"})
-
-            for key in promoted_payload_keys:
-                if key in mem.payload:
-                    memory_item_dict[key] = mem.payload[key]
-
-            additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
-            if additional_metadata:
-                memory_item_dict["metadata"] = additional_metadata
-
+            memory_item_dict = format_memory_item(mem.id, mem.payload)
             annotate_memory_result(memory_item_dict)
-
             formatted_memories.append(memory_item_dict)
 
         return formatted_memories
@@ -1581,19 +1520,6 @@ class Memory(MemoryBase):
         )
 
         # Step 9: Format results
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-        ]
-        core_and_promoted_keys = {
-            "data", "hash", "created_at", "updated_at", "id",
-            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
-            *promoted_payload_keys,
-        }
-
         original_memories = []
         for scored in scored_results:
             payload = scored.get("payload") or {}
@@ -1601,29 +1527,13 @@ class Memory(MemoryBase):
             if not payload.get("data"):
                 continue  # Skip candidates with no payload data
 
-            memory_item_dict = MemoryItem(
-                id=scored["id"],
-                memory=payload.get("data", ""),
-                hash=payload.get("hash"),
-                created_at=payload.get("created_at"),
-                updated_at=payload.get("updated_at"),
-                expires_at=payload.get("expires_at"),
-                ttl_source=payload.get("ttl_source"),
-                score=scored["score"],
-            ).model_dump()
-
-            for key in promoted_payload_keys:
-                if key in payload:
-                    memory_item_dict[key] = payload[key]
-
-            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
-            if additional_metadata:
-                if not memory_item_dict.get("metadata"):
-                    memory_item_dict["metadata"] = {}
-                memory_item_dict["metadata"].update(additional_metadata)
-            if explain and "score_details" in scored:
-                memory_item_dict["score_details"] = scored["score_details"]
-
+            memory_item_dict = format_memory_item(
+                scored["id"],
+                payload,
+                score=scored.get("score"),
+                score_details=scored.get("score_details") if explain else None,
+                include_score=True,
+            )
             annotate_memory_result(memory_item_dict)
 
             original_memories.append(memory_item_dict)
@@ -2647,31 +2557,7 @@ class AsyncMemory(MemoryBase):
             await display_first_run_notice_async(self, "async", "get")
             return None
 
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-        ]
-
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
-
-        result_item = MemoryItem(
-            id=memory.id,
-            memory=memory.payload.get("data", ""),
-            hash=memory.payload.get("hash"),
-            created_at=memory.payload.get("created_at"),
-            updated_at=memory.payload.get("updated_at"),
-        ).model_dump()
-
-        for key in promoted_payload_keys:
-            if key in memory.payload:
-                result_item[key] = memory.payload[key]
-
-        additional_metadata = {k: v for k, v in memory.payload.items() if k not in core_and_promoted_keys}
-        if additional_metadata:
-            result_item["metadata"] = additional_metadata
+        result_item = format_memory_item(memory.id, memory.payload)
 
         await display_first_run_notice_async(self, "async", "get")
         return result_item
@@ -2760,33 +2646,9 @@ class AsyncMemory(MemoryBase):
         else:
             actual_memories = memories_result
 
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-        ]
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
-
         formatted_memories = []
         for mem in actual_memories:
-            memory_item_dict = MemoryItem(
-                id=mem.id,
-                memory=mem.payload.get("data", ""),
-                hash=mem.payload.get("hash"),
-                created_at=mem.payload.get("created_at"),
-                updated_at=mem.payload.get("updated_at"),
-            ).model_dump(exclude={"score"})
-
-            for key in promoted_payload_keys:
-                if key in mem.payload:
-                    memory_item_dict[key] = mem.payload[key]
-
-            additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
-            if additional_metadata:
-                memory_item_dict["metadata"] = additional_metadata
-
+            memory_item_dict = format_memory_item(mem.id, mem.payload)
             formatted_memories.append(memory_item_dict)
 
         return formatted_memories
@@ -3101,42 +2963,19 @@ class AsyncMemory(MemoryBase):
         )
 
         # Step 9: Format results
-        promoted_payload_keys = [
-            "user_id",
-            "agent_id",
-            "run_id",
-            "actor_id",
-            "role",
-        ]
-        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
-
         original_memories = []
         for scored in scored_results:
             payload = scored.get("payload") or {}
             if not payload.get("data"):
                 continue
 
-            memory_item_dict = MemoryItem(
-                id=scored["id"],
-                memory=payload.get("data", ""),
-                hash=payload.get("hash"),
-                created_at=payload.get("created_at"),
-                updated_at=payload.get("updated_at"),
-                score=scored["score"],
-            ).model_dump()
-
-            for key in promoted_payload_keys:
-                if key in payload:
-                    memory_item_dict[key] = payload[key]
-
-            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
-            if additional_metadata:
-                if not memory_item_dict.get("metadata"):
-                    memory_item_dict["metadata"] = {}
-                memory_item_dict["metadata"].update(additional_metadata)
-            if explain and "score_details" in scored:
-                memory_item_dict["score_details"] = scored["score_details"]
-
+            memory_item_dict = format_memory_item(
+                scored["id"],
+                payload,
+                score=scored.get("score"),
+                score_details=scored.get("score_details") if explain else None,
+                include_score=True,
+            )
             original_memories.append(memory_item_dict)
 
         return original_memories

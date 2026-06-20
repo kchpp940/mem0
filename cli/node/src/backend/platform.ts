@@ -4,21 +4,25 @@
 
 import type { PlatformConfig } from "../config.js";
 import {
-	type AddOptions,
-	type Backend,
-	type DeleteOptions,
 	ENTITY_FIELDS,
-	type EntityIds,
 	FIELD_DEFAULTS,
-	type ListOptions,
 	SCOPE_DISPLAY_NAMES,
-	type SearchOptions,
 	getAddApiKey,
 	getSearchApiKey,
 } from "../schema/index.js";
 import { captureNotice, isAgentMode } from "../state.js";
 import { CLI_VERSION } from "../version.js";
-import { APIError, AuthError, NotFoundError } from "./base.js";
+import {
+	APIError,
+	AuthError,
+	NotFoundError,
+	type AddOptions,
+	type Backend,
+	type DeleteOptions,
+	type EntityIds,
+	type ListOptions,
+	type SearchOptions,
+} from "./base.js";
 
 export class PlatformBackend implements Backend {
 	private baseUrl: string;

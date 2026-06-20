@@ -250,7 +250,7 @@ export async function cmdSearch(
 		: undefined;
 
 	if (opts.topK < 1) {
-		printError(VALIDATION_RULES.top_k.error);
+		printError(VALIDATION_RULES.topK.error);
 		process.exit(1);
 	}
 	if (opts.threshold < 0 || opts.threshold > 1) {

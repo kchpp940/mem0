@@ -13,8 +13,11 @@ server, CLI, and SDK.
 
 from mem0.schema.models import (
     AddMemoryOptions,
+    CreateMemoryExportOptions,
     DeleteAllMemoryOptions,
+    FeedbackOptions,
     GetAllMemoryOptions,
+    GetMemoryExportOptions,
     ProjectUpdateOptions,
     SearchMemoryOptions,
     UpdateMemoryOptions,
@@ -26,5 +29,8 @@ __all__ = [
     "GetAllMemoryOptions",
     "DeleteAllMemoryOptions",
     "UpdateMemoryOptions",
+    "FeedbackOptions",
+    "CreateMemoryExportOptions",
+    "GetMemoryExportOptions",
     "ProjectUpdateOptions",
 ]

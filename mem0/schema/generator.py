@@ -1,18 +1,37 @@
-"""TypeScript schema code generator.
+"""TypeScript schema code generator and contract verifier.
 
-Generates TypeScript type definitions and runtime constants from the Python
-schema definitions in ``mem0.schema.fields`` and ``mem0.schema.models``.
+Generates TypeScript type definitions, runtime constants, and JSON schema
+contracts from the Python schema definitions in ``mem0.schema.fields`` and
+``mem0.schema.models``. This ensures the TypeScript side (Node CLI, TypeScript
+SDK), JSON contracts, and Python side stay in sync with a single source of
+truth.
 
-This ensures the TypeScript side (Node CLI, TypeScript SDK) stays in sync
-with the Python single source of truth.
+Generated files are tagged with a ``SOURCE_HASH`` derived from the canonical
+Python source (fields.py + models.py + response.py). The companion
+``verify_schema()`` function can re-derive the expected hash and reject
+stale / hand-edited output before typecheck/lint runs.
 
 Usage:
+    # Generate (or regenerate) TypeScript files
     python -m mem0.schema.generator --output cli/node/src/schema/
+
+    # Verify generated files are up-to-date (CI / pre-commit / pretypecheck)
+    python -m mem0.schema.generator --check --output cli/node/src/schema/
+
+    # Also emit payload_contract.json (equivalent to the old hand-written file)
+    python -m mem0.schema.generator --output cli/node/src/schema/ --emit-json
+
+    # Export full JSON contract to stdout
+    python -m mem0.schema.generator --export-json
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sys
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from mem0.schema.fields import (
@@ -41,39 +60,88 @@ from mem0.schema.fields import (
 )
 
 
-# ─── Public API ───────────────────────────────────────────────────────────────
+# ─── Source files that define the canonical contract ─────────────────────────
+
+_SCHEMA_DIR = Path(__file__).resolve().parent
+_CANONICAL_SOURCE_FILES: Tuple[Path, ...] = (
+    _SCHEMA_DIR / "fields.py",
+    _SCHEMA_DIR / "models.py",
+    _SCHEMA_DIR / "response.py",
+    _SCHEMA_DIR / "__init__.py",
+    _SCHEMA_DIR / "generator.py",
+)
+
+_HASH_ALGO = "sha256"
+_HASH_PREFIX = "SOURCE_HASH:"
+_MANIFEST_FILENAME = "MANIFEST.json"
 
 
-def generate_ts_schema(output_dir: str) -> Dict[str, str]:
-    """Generate TypeScript schema files from Python definitions.
+# ─── Source hash ─────────────────────────────────────────────────────────────
+
+
+def compute_source_hash() -> str:
+    """Derive a stable hash of the Python canonical schema sources.
+
+    The hash covers all files that contribute to the contract definition.
+    It is intentionally content-based (not mtime-based) so that it yields
+    identical values across machines when the schema is identical.
+    """
+    hasher = hashlib.new(_HASH_ALGO)
+    for path in sorted(_CANONICAL_SOURCE_FILES):
+        hasher.update(path.name.encode("utf-8"))
+        hasher.update(b"\x00")
+        hasher.update(path.read_bytes())
+        hasher.update(b"\x00")
+    return hasher.hexdigest()[:16]
+
+
+# ─── Public API ──────────────────────────────────────────────────────────────
+
+
+def generate_ts_schema(
+    output_dir: str,
+    *,
+    emit_json_contract: bool = False,
+) -> Dict[str, str]:
+    """Generate TypeScript schema files (and optional JSON contract) from Python definitions.
 
     Args:
         output_dir: Directory to write generated files to.
+        emit_json_contract: If True, also emit ``payload_contract.json``.
 
     Returns:
         Dict mapping filename -> file contents.
     """
-    fields_ts = _generate_fields_ts()
-    index_ts = _generate_index_ts()
+    source_hash = compute_source_hash()
 
-    return {
+    fields_ts = _generate_fields_ts(source_hash)
+    index_ts = _generate_index_ts(source_hash)
+
+    files: Dict[str, str] = {
         "fields.ts": fields_ts,
         "index.ts": index_ts,
     }
+
+    manifest = _build_manifest(source_hash, list(files.keys()))
+    files[_MANIFEST_FILENAME] = json.dumps(manifest, indent=2) + "\n"
+
+    if emit_json_contract:
+        files["payload_contract.json"] = json.dumps(export_payload_contract(), indent=2) + "\n"
+
+    return files
 
 
 def export_json_schema() -> Dict[str, Any]:
     """Export the full schema contract as a JSON-serializable dict.
 
     This can be used for validation, documentation, or generating code
-    in other languages.
-
-    Returns:
-        Dict with the complete schema contract.
+    in other languages. Covers *all* contract dimensions — not just the
+    fields that the old payload_contract.json captured.
     """
     return {
         "$version": 2,
-        "description": "Canonical schema contract for Mem0 memory operations. Generated from Python Pydantic models.",
+        "$sourceHash": compute_source_hash(),
+        "description": "Canonical schema contract for Mem0 memory operations. Generated from Python Pydantic models — DO NOT EDIT by hand.",
         "entityFields": list(ENTITY_FIELDS),
         "defaults": dict(FIELD_DEFAULTS),
         "cliToApiMap": dict(CLI_TO_API_MAP),
@@ -90,7 +158,231 @@ def export_json_schema() -> Dict[str, Any]:
         "feedbackValues": list(FEEDBACK_VALUES),
         "exportFields": list(EXPORT_FIELDS),
         "importFields": list(IMPORT_FIELDS),
+        "fieldSpecs": {
+            "entity": [s.model_dump() for s in ENTITY_FIELD_SPECS],
+            "add": [s.model_dump() for s in ADD_FIELD_SPECS],
+            "search": [s.model_dump() for s in SEARCH_FIELD_SPECS],
+            "getAll": [s.model_dump() for s in GET_ALL_FIELD_SPECS],
+            "deleteAll": [s.model_dump() for s in DELETE_ALL_FIELD_SPECS],
+        },
     }
+
+
+def export_payload_contract() -> Dict[str, Any]:
+    """Export the CLI payload contract — equivalent to the old hand-written
+    ``payload_contract.json``, but derived from the Python SSOT.
+
+    This is a compatibility shim. New code should consume ``export_json_schema()``
+    which is richer and versioned.
+    """
+    return {
+        "$version": 2,
+        "$sourceHash": compute_source_hash(),
+        "description": (
+            "Canonical payload contract for Mem0 CLI operations. "
+            "AUTO-GENERATED from mem0/schema/*.py — DO NOT EDIT by hand. "
+            "Regenerate with `python -m mem0.schema.generator --emit-json`."
+        ),
+        "source": "CLI",
+        "defaults": {
+            "top_k": FIELD_DEFAULTS["top_k"],
+            "threshold": FIELD_DEFAULTS["threshold"],
+            "infer": FIELD_DEFAULTS["infer"],
+            "immutable": False,
+            "rerank": False,
+            "keyword": False,
+        },
+        "fieldMapping": dict(ADD_API_FIELD_MAP) | dict(SEARCH_API_FIELD_MAP),
+        "payloadRules": {
+            "immutable": "includeWhenTrue",
+            "infer": "includeWhenFalse",
+            "source": "always",
+        },
+        "addFields": [
+            {"api": "messages", "from": "messages", "type": "messages_or_content"},
+            *[{"api": f, "from": f} for f in list(ENTITY_FIELDS)],
+            {"api": "metadata", "from": "metadata"},
+            {"api": "immutable", "from": "immutable", "rule": "includeWhenTrue"},
+            {"api": "infer", "from": "infer", "rule": "includeWhenFalse"},
+            {"api": "expiration_date", "from": "expires", "mapped": True},
+            {"api": "categories", "from": "categories"},
+            {"api": "source", "literal": "CLI"},
+        ],
+        "searchFields": [
+            {"api": "query", "from": "query", "required": True},
+            {"api": "top_k", "from": "top_k", "hasDefault": True},
+            {"api": "threshold", "from": "threshold", "hasDefault": True},
+            {"api": "filters", "from": "filters", "built": True},
+            {"api": "rerank", "from": "rerank", "rule": "includeWhenTrue"},
+            {"api": "keyword_search", "from": "keyword", "mapped": True, "rule": "includeWhenTrue"},
+            {"api": "fields", "from": "fields"},
+            {"api": "source", "literal": "CLI"},
+        ],
+        "listFields": [
+            {"api": "filters", "from": "filters", "built": True},
+            {"api": "source", "literal": "CLI"},
+        ],
+        "addMessageRole": "user",
+        "validation": {
+            "categories": {"arrayError": "--categories JSON must be an array."},
+            "expires": {
+                "pattern": EXPIRES_FORMAT,
+                "formatError": f"Invalid date format for --expires. Use {EXPIRES_FORMAT_DISPLAY}.",
+                "futureError": "--expires date must be in the future.",
+            },
+            "filters": {
+                "objectError": "--filter must be a JSON object.",
+                "jsonError": "Invalid JSON in --filter: {error}",
+            },
+            **{
+                k: {"min": v.get("min"), "max": v.get("max"), "error": v.get("error")}
+                for k, v in FIELD_VALIDATION.items()
+            },
+        },
+        "filterBuilding": {
+            "entityOrder": list(ENTITY_FIELDS),
+            "passthroughKeys": ["AND", "OR"],
+            "combineOperator": "AND",
+            "listExtra": {
+                "category": {"field": "categories", "op": "contains"},
+                "after": {"field": "created_at", "op": "gte"},
+                "before": {"field": "created_at", "op": "lte"},
+            },
+        },
+        "pendingDedup": {
+            "statusKey": "status",
+            "pendingValue": "PENDING",
+            "dedupKey": "event_id",
+        },
+        "agentPickFields": {
+            "add": {
+                "pending": ["status", "event_id"],
+                "normal": ["id", "memory", "event"],
+            },
+            "search": ["id", "memory", "score", "created_at", "categories"],
+            "list": ["id", "memory", "created_at", "categories"],
+            "get": ["id", "memory", "created_at", "updated_at", "categories", "metadata"],
+            "update": ["id", "memory"],
+            "event_list": ["id", "event_type", "status", "latency", "created_at"],
+            "event_status": ["id", "event_type", "status", "latency", "created_at", "updated_at"],
+        },
+    }
+
+
+# ─── Verification ────────────────────────────────────────────────────────────
+
+
+class VerificationError(Exception):
+    """Raised when generated schema files fail verification."""
+
+
+def verify_schema(output_dir: str) -> Tuple[bool, List[str]]:
+    """Verify that generated schema files match the current Python source.
+
+    Checks performed:
+      1. MANIFEST.json exists and contains a ``SOURCE_HASH``.
+      2. Expected hash (re-derived from Python) matches manifest hash.
+      3. Every generated file listed in the manifest:
+         - exists on disk
+         - contains the same ``SOURCE_HASH`` marker in its header
+      4. Files were NOT hand-edited after generation (detected via content
+         hash inside MANIFEST.json).
+
+    Args:
+        output_dir: Directory containing generated schema files.
+
+    Returns:
+        Tuple of ``(ok, errors)`` where ``ok`` is True when everything
+        matches and ``errors`` is a list of human-readable problem
+        descriptions (empty when ``ok``).
+    """
+    errors: List[str] = []
+    out_path = Path(output_dir)
+
+    expected_hash = compute_source_hash()
+
+    manifest_path = out_path / _MANIFEST_FILENAME
+    if not manifest_path.is_file():
+        errors.append(
+            f"Missing {_MANIFEST_FILENAME} — schema was never generated. "
+            "Run `python -m mem0.schema.generator --output {output_dir}`."
+        )
+        return False, errors
+
+    try:
+        manifest: Dict[str, Any] = json.loads(manifest_path.read_text())
+    except json.JSONDecodeError as exc:
+        errors.append(f"{_MANIFEST_FILENAME} is not valid JSON: {exc}")
+        return False, errors
+
+    manifest_hash = manifest.get("sourceHash")
+    if not manifest_hash:
+        errors.append(f"{_MANIFEST_FILENAME} is missing the 'sourceHash' field.")
+        return False, errors
+
+    if manifest_hash != expected_hash:
+        errors.append(
+            "Source hash mismatch. Python schema changed but generated files are stale.\n"
+            f"  Expected (from Python SSOT): {expected_hash}\n"
+            f"  Found (in MANIFEST):       {manifest_hash}\n"
+            f"  Fix: re-run `python -m mem0.schema.generator --output {output_dir}`."
+        )
+        return False, errors
+
+    for filename, file_meta in manifest.get("files", {}).items():
+        file_path = out_path / filename
+        if not file_path.is_file():
+            errors.append(f"Missing generated file listed in MANIFEST: {filename}")
+            continue
+
+        content = file_path.read_text()
+
+        marker = f"{_HASH_PREFIX}{manifest_hash}"
+        if marker not in content:
+            errors.append(
+                f"File {filename} does not contain the expected {_HASH_PREFIX} marker.\n"
+                "This usually means the file was hand-edited after generation or is out of date.\n"
+                f"Expected marker: {marker}\n"
+                f"Fix: re-run `python -m mem0.schema.generator --output {output_dir}`."
+            )
+            continue
+
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        expected_content_hash = file_meta.get("contentHash") if isinstance(file_meta, dict) else None
+        if expected_content_hash and content_hash != expected_content_hash:
+            errors.append(
+                f"File {filename} was modified after generation (content hash mismatch).\n"
+                f"  Expected: {expected_content_hash}\n"
+                f"  Actual:   {content_hash}\n"
+                f"Fix: re-run `python -m mem0.schema.generator --output {output_dir}`."
+            )
+
+    return len(errors) == 0, errors
+
+
+def _build_manifest(source_hash: str, filenames: List[str]) -> Dict[str, Any]:
+    """Build the MANIFEST structure (does not write to disk)."""
+    return {
+        "generatedBy": "mem0.schema.generator",
+        "sourceHash": source_hash,
+        "hashAlgorithm": _HASH_ALGO,
+        "canonicalSources": [str(p.relative_to(_SCHEMA_DIR.parent.parent)) for p in _CANONICAL_SOURCE_FILES],
+        "regenerateCommand": "python -m mem0.schema.generator --output cli/node/src/schema/",
+        "files": {f: None for f in filenames},
+    }
+
+
+def _finalize_manifest_with_content_hashes(manifest: Dict[str, Any], contents: Dict[str, str]) -> Dict[str, Any]:
+    """Fill in per-file content hashes in the manifest so later edits are detectable."""
+    new_manifest = dict(manifest)
+    file_meta: Dict[str, Any] = {}
+    for filename, content in contents.items():
+        if filename == _MANIFEST_FILENAME:
+            continue
+        content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+        file_meta[filename] = {"contentHash": content_hash}
+    new_manifest["files"] = file_meta
+    return new_manifest
 
 
 # ─── TypeScript generation helpers ───────────────────────────────────────────
@@ -101,12 +393,12 @@ _TS_TYPE_MAP = {
     "int": "number",
     "float": "number",
     "bool": "boolean",
-    "Dict[str, Any]": "Record<string, any>",
+    "Dict[str, Any]": "Record<string, unknown>",
     "Dict[str, str]": "Record<string, string>",
     "List[str]": "string[]",
-    "List[Dict[str, Any]]": "Record<string, any>[]",
-    "List[Any]": "any[]",
-    "Any": "any",
+    "List[Dict[str, Any]]": "Record<string, unknown>[]",
+    "List[Any]": "unknown[]",
+    "Any": "unknown",
 }
 
 
@@ -160,25 +452,13 @@ def _generate_spec_array(name: str, specs: List[FieldSpec], description: str) ->
     return _tsdoc([description]) + f"export const {name} = [\n{body},\n] as const;\n"
 
 
-def _generate_interface(name: str, specs: List[FieldSpec], description: str) -> str:
-    """Generate a TypeScript interface from field specs."""
-    lines = [description, ""]
-    for spec in specs:
-        ts_type = _py_type_to_ts(spec.py_type)
-        q = "" if spec.required else "?"
-        lines.append(f"@param {spec.ts_name} {spec.description}")
-        lines.append(f"{spec.ts_name}{q}: {ts_type};")
-    body = "\n  ".join(lines)
-    return _tsdoc([description]) + f"export interface {name} {{\n  {body}\n}}\n"
-
-
 # ─── fields.ts generation ────────────────────────────────────────────────────
 
 
-def _generate_fields_ts() -> str:
+def _generate_fields_ts(source_hash: str) -> str:
     """Generate the complete fields.ts file."""
     sections: List[str] = []
-    sections.append(_header())
+    sections.append(_header(source_hash, "fields.ts"))
 
     sections.append("// ─── Entity identifiers ───────────────────────────────────────────────")
     sections.append(
@@ -513,9 +793,9 @@ export function validateFeedbackValue(feedback: string): string {
 # ─── index.ts generation ─────────────────────────────────────────────────────
 
 
-def _generate_index_ts() -> str:
+def _generate_index_ts(source_hash: str) -> str:
     """Generate the index.ts barrel file."""
-    return _header() + """
+    return _header(source_hash, "index.ts") + """
 export {
   ENTITY_FIELDS,
   CLI_TO_API_MAP,
@@ -554,12 +834,28 @@ export type {
 """
 
 
-def _header() -> str:
-    """Generate the auto-generated file header."""
+def _header(source_hash: str, filename: str) -> str:
+    """Generate the auto-generated file header with hash marker and loud warnings.
+
+    Marker format (picked up by :func:`verify_schema`):
+
+        // SOURCE_HASH:<16-char-hex>
+    """
     return (
-        "// AUTO-GENERATED FILE — DO NOT EDIT DIRECTLY\n"
-        "// Generated from mem0/schema/ (Python single source of truth)\n"
-        "// Run `python -m mem0.schema.generator --output cli/node/src/schema/` to regenerate\n"
+        "// ================================================================\n"
+        "// 🔒 AUTO-GENERATED FILE — DO NOT EDIT DIRECTLY UNDER ANY CIRCUMSTANCES\n"
+        f"// 📄 Source:   mem0/schema/*.py (Python single source of truth for {filename})\n"
+        f"// 🔑 {_HASH_PREFIX}{source_hash}\n"
+        "// 🛠️  Regenerate: python -m mem0.schema.generator --output cli/node/src/schema/\n"
+        "// 🧪  Verify:     python -m mem0.schema.generator --check --output cli/node/src/schema/\n"
+        "//\n"
+        "// Hand-edits will be REJECTED by the CI / pretypecheck / prelint\n"
+        "// pipeline (MANIFEST.json + content hashes). If something here is\n"
+        "// wrong, fix the Python schema in mem0/schema/ and regenerate.\n"
+        "// ================================================================\n"
+        "// biome-ignore format: auto-generated file, formatting is controlled by Python generator\n"
+        "// biome-ignore lint/suspicious/noExplicitAny: any/unknown types come from Python's flexible dict types\n"
+        "// biome-ignore lint/style/useNamingConvention: const names follow Python convention\n"
         "\n"
     )
 
@@ -568,30 +864,90 @@ def _header() -> str:
 
 
 def main() -> None:
-    """CLI entry point for generating TypeScript schema files."""
+    """CLI entry point for generating and verifying schema files."""
     import argparse
-    import os
 
-    parser = argparse.ArgumentParser(description="Generate TypeScript schema from Python definitions")
+    parser = argparse.ArgumentParser(
+        description="Generate / verify TypeScript schema from Python definitions (SSOT)"
+    )
     parser.add_argument(
         "--output",
         "-o",
         default="cli/node/src/schema",
-        help="Output directory for generated TypeScript files (default: cli/node/src/schema)",
+        help="Output directory for generated files (default: cli/node/src/schema)",
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Verify generated files match the Python source instead of writing them.",
+    )
+    parser.add_argument(
+        "--export-json",
+        action="store_true",
+        help="Print the full JSON schema contract to stdout and exit.",
+    )
+    parser.add_argument(
+        "--emit-json",
+        action="store_true",
+        help="Also emit payload_contract.json into the output directory.",
+    )
+    parser.add_argument(
+        "--hash",
+        action="store_true",
+        help="Print the current source hash and exit.",
     )
     args = parser.parse_args()
 
+    if args.hash:
+        print(compute_source_hash())
+        return
+
+    if args.export_json:
+        json.dump(export_json_schema(), sys.stdout, indent=2)
+        sys.stdout.write("\n")
+        return
+
     output_dir = args.output
+
+    if args.check:
+        ok, errors = verify_schema(output_dir)
+        if ok:
+            source_hash = compute_source_hash()
+            print(f"✅ Schema verification passed. Source hash: {source_hash}")
+            sys.exit(0)
+        else:
+            print("❌ Schema verification FAILED — generated files are stale or hand-edited:\n", file=sys.stderr)
+            for i, err in enumerate(errors, 1):
+                print(f"  {i}. {err}\n", file=sys.stderr)
+            print(
+                f"👉  Fix: re-run `python -m mem0.schema.generator --output {output_dir}`\n",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
     os.makedirs(output_dir, exist_ok=True)
 
-    files = generate_ts_schema(output_dir)
+    files = generate_ts_schema(output_dir, emit_json_contract=args.emit_json)
+
+    # Compute content hashes AFTER we know the final file contents
+    manifest = json.loads(files[_MANIFEST_FILENAME])
+    manifest = _finalize_manifest_with_content_hashes(manifest, files)
+    files[_MANIFEST_FILENAME] = json.dumps(manifest, indent=2) + "\n"
+
+    written_paths: List[str] = []
     for filename, content in files.items():
         filepath = os.path.join(output_dir, filename)
         with open(filepath, "w") as f:
             f.write(content)
+        written_paths.append(filepath)
         print(f"Generated {filepath}")
 
-    print(f"\nDone. Generated {len(files)} files in {output_dir}/")
+    print(
+        f"\nDone. Generated {len(files)} files in {output_dir}/ "
+        f"(source hash: {compute_source_hash()})"
+    )
+    if args.emit_json:
+        print("Included payload_contract.json (auto-derived, not hand-written).")
 
 
 if __name__ == "__main__":

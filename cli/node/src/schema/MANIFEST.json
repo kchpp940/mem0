@@ -1,0 +1,21 @@
+{
+  "generatedBy": "mem0.schema.generator",
+  "sourceHash": "396b6fca5444a196",
+  "hashAlgorithm": "sha256",
+  "canonicalSources": [
+    "mem0/schema/fields.py",
+    "mem0/schema/models.py",
+    "mem0/schema/response.py",
+    "mem0/schema/__init__.py",
+    "mem0/schema/generator.py"
+  ],
+  "regenerateCommand": "python -m mem0.schema.generator --output cli/node/src/schema/",
+  "files": {
+    "fields.ts": {
+      "contentHash": "794d0e588223394e"
+    },
+    "index.ts": {
+      "contentHash": "693404a9b8255de6"
+    }
+  }
+}

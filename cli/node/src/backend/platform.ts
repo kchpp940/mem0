@@ -14,13 +14,13 @@ import { captureNotice, isAgentMode } from "../state.js";
 import { CLI_VERSION } from "../version.js";
 import {
 	APIError,
-	AuthError,
-	NotFoundError,
 	type AddOptions,
+	AuthError,
 	type Backend,
 	type DeleteOptions,
 	type EntityIds,
 	type ListOptions,
+	NotFoundError,
 	type SearchOptions,
 } from "./base.js";
 

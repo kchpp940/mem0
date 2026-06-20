@@ -1,6 +1,17 @@
-// AUTO-GENERATED FILE — DO NOT EDIT DIRECTLY
-// Generated from mem0/schema/ (Python single source of truth)
-// Run `python -m mem0.schema.generator --output cli/node/src/schema/` to regenerate
+// ================================================================
+// 🔒 AUTO-GENERATED FILE — DO NOT EDIT DIRECTLY UNDER ANY CIRCUMSTANCES
+// 📄 Source:   mem0/schema/*.py (Python single source of truth for fields.ts)
+// 🔑 SOURCE_HASH:396b6fca5444a196
+// 🛠️  Regenerate: python -m mem0.schema.generator --output cli/node/src/schema/
+// 🧪  Verify:     python -m mem0.schema.generator --check --output cli/node/src/schema/
+//
+// Hand-edits will be REJECTED by the CI / pretypecheck / prelint
+// pipeline (MANIFEST.json + content hashes). If something here is
+// wrong, fix the Python schema in mem0/schema/ and regenerate.
+// ================================================================
+// biome-ignore format: auto-generated file, formatting is controlled by Python generator
+// biome-ignore lint/suspicious/noExplicitAny: any/unknown types come from Python's flexible dict types
+// biome-ignore lint/style/useNamingConvention: const names follow Python convention
 
 
 // ─── Entity identifiers ───────────────────────────────────────────────
@@ -152,7 +163,7 @@ export interface AddOptions {
   runId?: string;
   /** Additional metadata for the memory */
 
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   /** Whether to infer memories from the input */
 
   infer?: boolean;
@@ -167,7 +178,7 @@ export interface AddOptions {
   categories?: string[];
   /** Custom categories for memory classification */
 
-  customCategories?: Record<string, any>[];
+  customCategories?: Record<string, unknown>[];
   /** Custom instructions for fact extraction */
 
   customInstructions?: string;
@@ -195,7 +206,7 @@ export interface SearchOptions {
   runId?: string;
   /** Filters for the search */
 
-  filters?: Record<string, any>;
+  filters?: Record<string, unknown>;
   /** Number of results to return */
 
   topK?: number;
@@ -235,7 +246,7 @@ export interface ListOptions {
   runId?: string;
   /** Filters for retrieval */
 
-  filters?: Record<string, any>;
+  filters?: Record<string, unknown>;
   /** Page number */
 
   page?: number;

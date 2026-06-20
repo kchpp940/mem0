@@ -260,19 +260,21 @@ class TraceCollector:
         result = {"results": [...], **tracer.get_trace_dict()}
     """
 
-    def __init__(self, operation_type: str, enabled: bool = True):
+    def __init__(self, operation_type: str, enabled: bool = True, operation_id: Optional[str] = None):
         """Initialize the trace collector.
 
         Args:
             operation_type: "add", "search", or "list"
             enabled: Whether tracing is enabled (can be disabled for hot paths)
+            operation_id: Optional external operation ID (e.g. from X-Operation-ID header).
+                          If not provided, a UUID will be generated.
         """
         self.enabled = enabled
         self.operation_type = operation_type
         self.trace: Optional[OperationTrace] = None
         if enabled:
             self.trace = OperationTrace(
-                operation_id=str(uuid.uuid4()),
+                operation_id=operation_id if operation_id else str(uuid.uuid4()),
                 operation_type=operation_type,
                 created_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             )
@@ -341,14 +343,24 @@ class TraceCollector:
         return self.trace.format_compact()
 
 
-def create_trace_collector(operation_type: str, enabled: bool = True) -> TraceCollector:
+def create_trace_collector(
+    operation_type: str,
+    enabled: bool = True,
+    operation_id: Optional[str] = None,
+) -> TraceCollector:
     """Factory function to create a TraceCollector.
 
     Args:
         operation_type: "add", "search", or "list"
         enabled: Whether tracing should be enabled
+        operation_id: Optional external operation ID (e.g. from X-Operation-ID header).
+                      If not provided, a UUID will be generated.
 
     Returns:
         A new TraceCollector instance
     """
-    return TraceCollector(operation_type=operation_type, enabled=enabled)
+    return TraceCollector(
+        operation_type=operation_type,
+        enabled=enabled,
+        operation_id=operation_id,
+    )

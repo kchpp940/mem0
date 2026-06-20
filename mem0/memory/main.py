@@ -684,6 +684,7 @@ class Memory(MemoryBase):
         expires: Optional[Any] = None,
         ttl_days: Optional[int] = None,
         trace_enabled: bool = False,
+        operation_id: Optional[str] = None,
     ):
         """
         Create a new memory.
@@ -797,16 +798,16 @@ class Memory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        with create_trace_collector("add", enabled=trace_enabled) as tracer:
+        with create_trace_collector("add", enabled=trace_enabled, operation_id=operation_id) as tracer:
             vector_store_result = self._add_to_vector_store(
                 messages, processed_metadata, effective_filters, infer, prompt=prompt, tracer=tracer
             )
             result = {"results": vector_store_result}
             if trace_enabled:
                 result.update(tracer.get_trace_dict())
-                operation_id = tracer.get_operation_id()
-                if operation_id:
-                    result["operation_id"] = operation_id
+                _op_id = tracer.get_operation_id()
+                if _op_id:
+                    result["operation_id"] = _op_id
 
         scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
         if temporal_usage_notice:
@@ -1276,6 +1277,7 @@ class Memory(MemoryBase):
         filters: Optional[Dict[str, Any]] = None,
         top_k: int = 20,
         trace_enabled: bool = False,
+        operation_id: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1332,15 +1334,15 @@ class Memory(MemoryBase):
             "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"}
         )
 
-        with create_trace_collector("get_all", enabled=trace_enabled) as tracer:
+        with create_trace_collector("get_all", enabled=trace_enabled, operation_id=operation_id) as tracer:
             all_memories_result = self._get_all_from_vector_store(effective_filters, limit, tracer=tracer)
 
             result = {"results": all_memories_result}
             if trace_enabled:
                 result.update(tracer.get_trace_dict())
-                operation_id = tracer.get_operation_id()
-                if operation_id:
-                    result["operation_id"] = operation_id
+                _op_id = tracer.get_operation_id()
+                if _op_id:
+                    result["operation_id"] = _op_id
 
         if scale_threshold_notice:
             display_scale_threshold_notice(self, "sync", "get_all", *scale_threshold_notice)
@@ -1422,6 +1424,7 @@ class Memory(MemoryBase):
         explain: bool = False,
         reference_date: Optional[Any] = None,
         trace_enabled: bool = False,
+        operation_id: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -1527,7 +1530,7 @@ class Memory(MemoryBase):
             },
         )
 
-        with create_trace_collector("search", enabled=trace_enabled) as tracer:
+        with create_trace_collector("search", enabled=trace_enabled, operation_id=operation_id) as tracer:
             search_start = time.perf_counter()
             original_memories = self._search_vector_store(
                 query, effective_filters, limit, threshold, explain=explain, tracer=tracer
@@ -1545,9 +1548,9 @@ class Memory(MemoryBase):
             result = {"results": original_memories}
             if trace_enabled:
                 result.update(tracer.get_trace_dict())
-                operation_id = tracer.get_operation_id()
-                if operation_id:
-                    result["operation_id"] = operation_id
+                _op_id = tracer.get_operation_id()
+                if _op_id:
+                    result["operation_id"] = _op_id
 
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
@@ -2437,6 +2440,7 @@ class AsyncMemory(MemoryBase):
         prompt: Optional[str] = None,
         llm=None,
         trace_enabled: bool = False,
+        operation_id: Optional[str] = None,
     ):
         """
         Create a new memory asynchronously.
@@ -2502,16 +2506,16 @@ class AsyncMemory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        with create_trace_collector("add", enabled=trace_enabled) as tracer:
+        with create_trace_collector("add", enabled=trace_enabled, operation_id=operation_id) as tracer:
             vector_store_result = await self._add_to_vector_store(
                 messages, processed_metadata, effective_filters, infer, prompt=prompt, tracer=tracer
             )
             result = {"results": vector_store_result}
             if trace_enabled:
                 result.update(tracer.get_trace_dict())
-                operation_id = tracer.get_operation_id()
-                if operation_id:
-                    result["operation_id"] = operation_id
+                _op_id = tracer.get_operation_id()
+                if _op_id:
+                    result["operation_id"] = _op_id
 
         scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
         if temporal_usage_notice:
@@ -2970,6 +2974,7 @@ class AsyncMemory(MemoryBase):
         filters: Optional[Dict[str, Any]] = None,
         top_k: int = 20,
         trace_enabled: bool = False,
+        operation_id: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -3026,15 +3031,15 @@ class AsyncMemory(MemoryBase):
             "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"}
         )
 
-        with create_trace_collector("get_all", enabled=trace_enabled) as tracer:
+        with create_trace_collector("get_all", enabled=trace_enabled, operation_id=operation_id) as tracer:
             all_memories_result = await self._get_all_from_vector_store(effective_filters, limit, tracer=tracer)
 
             result = {"results": all_memories_result}
             if trace_enabled:
                 result.update(tracer.get_trace_dict())
-                operation_id = tracer.get_operation_id()
-                if operation_id:
-                    result["operation_id"] = operation_id
+                _op_id = tracer.get_operation_id()
+                if _op_id:
+                    result["operation_id"] = _op_id
 
         if scale_threshold_notice:
             await display_scale_threshold_notice_async(self, "async", "get_all", *scale_threshold_notice)
@@ -3108,6 +3113,7 @@ class AsyncMemory(MemoryBase):
         explain: bool = False,
         reference_date: Optional[Any] = None,
         trace_enabled: bool = False,
+        operation_id: Optional[str] = None,
         **kwargs,
     ):
         """
@@ -3215,7 +3221,7 @@ class AsyncMemory(MemoryBase):
             },
         )
 
-        with create_trace_collector("search", enabled=trace_enabled) as tracer:
+        with create_trace_collector("search", enabled=trace_enabled, operation_id=operation_id) as tracer:
             search_start = time.perf_counter()
             original_memories = await self._search_vector_store(
                 query, effective_filters, limit, threshold, explain=explain, tracer=tracer
@@ -3236,9 +3242,9 @@ class AsyncMemory(MemoryBase):
             result = {"results": original_memories}
             if trace_enabled:
                 result.update(tracer.get_trace_dict())
-                operation_id = tracer.get_operation_id()
-                if operation_id:
-                    result["operation_id"] = operation_id
+                _op_id = tracer.get_operation_id()
+                if _op_id:
+                    result["operation_id"] = _op_id
 
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)

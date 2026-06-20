@@ -48,6 +48,97 @@ STAGE_NAMES = {
 }
 
 
+_SAFE_VALUE_TYPES = (int, float, bool)
+_SAFE_ENUM_STRINGS = {
+    # mode values
+    "search", "batch_add", "add",
+    # operation values
+    "search", "insert", "list", "semantic_search", "search_existing",
+    # generic
+    "true", "false",
+}
+
+
+ALLOWED_METADATA_KEYS = {
+    # counts / quantities
+    "count",
+    "inserted",
+    "processed",
+    "failed",
+    "records_saved",
+    "existing_retrieved",
+    "extracted_count",
+    "duplicates_skipped",
+    "memories_added",
+    "memories_updated",
+    "memories_skipped",
+    "entities_extracted",
+    "entities_linked",
+    "entity_matches",
+    "semantic_candidates",
+    "keyword_candidates",
+    "candidates_ranked",
+    "candidates_passed_threshold",
+    "results_filtered",
+    "results_returned",
+    "last_messages_count",
+    "existing_memories",
+    # flags / booleans
+    "batch",
+    "infer",
+    "supported",
+    "has_bm25",
+    "has_entity_boost",
+    # configuration / parameters
+    "mode",
+    "operation",
+    "threshold",
+    "internal_limit",
+}
+
+
+def sanitize_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Centralized metadata sanitizer for trace stages.
+
+    Policy:
+      - Only keys in ALLOWED_METADATA_KEYS are retained.
+      - Only values of type int, float, bool, or short enum-like strings are retained.
+      - All other keys are silently dropped — no sensitive data ever reaches trace output.
+      - Returns a new dict; the input is never mutated.
+    """
+    if not metadata:
+        return {}
+
+    clean: Dict[str, Any] = {}
+    for key, value in metadata.items():
+        if key not in ALLOWED_METADATA_KEYS:
+            continue
+        if isinstance(value, _SAFE_VALUE_TYPES):
+            clean[key] = value
+        elif isinstance(value, str):
+            # Only accept short, enum-like strings (<= 32 chars).
+            # If it looks like free-form text (contains spaces, long, etc.), drop it.
+            lowered = value.lower()
+            if len(value) <= 32 and (" " not in value) and lowered in _SAFE_ENUM_STRINGS:
+                clean[key] = lowered
+        # dict/list and everything else (embeddings, raw text, objects) are dropped
+    return clean
+
+
+def sanitize_error(error: Optional[str]) -> Optional[str]:
+    """Sanitize an error message so it never contains user content.
+
+    Policy: keep only the exception class name or very short predefined tokens.
+    Long or free-form strings are replaced with "[redacted]".
+    """
+    if not error:
+        return None
+    if len(error) <= 64 and " " not in error and ("." not in error or error.count(".") < 2):
+        # Looks like an exception class name (e.g. "LLMError", "ValueError")
+        return error
+    return "[redacted]"
+
+
 @dataclass
 class TraceStage:
     """A single stage within a memory operation trace.
@@ -64,30 +155,40 @@ class TraceStage:
     metadata: Dict[str, Any] = field(default_factory=dict)
     error_message: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        """Sanitize any metadata that was passed in via dataclass construction."""
+        if self.metadata:
+            self.metadata = sanitize_metadata(self.metadata)
+        if self.error_message:
+            self.error_message = sanitize_error(self.error_message)
+
     def finish(self, status: str = "success", metadata: Optional[Dict[str, Any]] = None, error: Optional[str] = None) -> None:
         """Mark the stage as finished and record duration.
 
         Args:
             status: "success", "skipped", or "error"
-            metadata: Non-sensitive statistics about this stage
-            error: Error message if status is "error" (keep brief, no sensitive data)
+            metadata: Non-sensitive statistics about this stage (will be sanitized)
+            error: Error message if status is "error" (will be sanitized)
         """
         self.end_time = time.perf_counter()
         self.duration_ms = round((self.end_time - self.start_time) * 1000, 2)
         self.status = status
         if metadata:
-            self.metadata.update(metadata)
+            self.metadata.update(sanitize_metadata(metadata))
         if error:
-            self.error_message = error
+            self.error_message = sanitize_error(error)
 
     def to_dict(self) -> Dict[str, Any]:
-        """Convert to a serializable dictionary."""
+        """Convert to a serializable dictionary.
+
+        Metadata is always sanitized at the output boundary for defense in depth.
+        """
         return {
             "name": self.name,
             "duration_ms": self.duration_ms,
             "status": self.status,
-            "metadata": self.metadata,
-            "error": self.error_message,
+            "metadata": sanitize_metadata(self.metadata),
+            "error": sanitize_error(self.error_message),
         }
 
 
@@ -159,6 +260,7 @@ class OperationTrace:
 
         Returns:
             Dictionary with total duration, stage breakdown, and key statistics.
+            Only whitelisted metadata keys are included in the decisions section.
         """
         total_ms = round(sum(s.duration_ms for s in self.stages), 2)
         stage_breakdown = {s.name: s.duration_ms for s in self.stages}
@@ -166,21 +268,26 @@ class OperationTrace:
         skipped = sum(1 for s in self.stages if s.status == "skipped")
         errors = sum(1 for s in self.stages if s.status == "error")
 
-        # Collect key decision statistics from stage metadata
+        _SUMMARY_DECISION_KEYS = {
+            "extracted_count",
+            "duplicates_skipped",
+            "semantic_candidates",
+            "keyword_candidates",
+            "entity_matches",
+            "entities_extracted",
+            "entities_linked",
+            "candidates_ranked",
+            "results_filtered",
+            "results_returned",
+            "candidates_passed_threshold",
+        }
+
+        # Collect key decision statistics from stage metadata — only whitelisted keys
         decisions: Dict[str, Any] = {}
         for s in self.stages:
-            for k, v in s.metadata.items():
-                if k in {
-                    "extracted_count",
-                    "duplicates_skipped",
-                    "semantic_candidates",
-                    "keyword_candidates",
-                    "entity_matches",
-                    "entities_extracted",
-                    "candidates_ranked",
-                    "results_filtered",
-                    "candidates_passed_threshold",
-                }:
+            clean_meta = sanitize_metadata(s.metadata)
+            for k, v in clean_meta.items():
+                if k in _SUMMARY_DECISION_KEYS:
                     decisions[f"{s.name}_{k}"] = v
 
         self.summary = {

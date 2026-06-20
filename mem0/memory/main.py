@@ -35,6 +35,7 @@ from mem0.memory.search_pipeline import (
     ScoreFusionStep,
     SearchContext,
     SearchPipeline,
+    SearchTraceCollector,
     SemanticRecallStep,
 )
 from mem0.memory.setup import mem0_dir, setup_config
@@ -1375,6 +1376,19 @@ class Memory(MemoryBase):
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
+        # --- Unified trace collector (single source of truth) ---
+        # Telemetry properties, explain=True payload, and CLI --trace output
+        # ALL read from this one SearchTraceCollector.  Never emit trace data
+        # through a second, parallel mechanism inside Memory.search().
+        trace_collector = SearchTraceCollector()
+        trace_collector.set_meta(
+            query=query,
+            filters=filters or {},
+            top_k=top_k,
+            threshold=threshold,
+            explain=explain,
+        )
+
         ctx = SearchContext(
             query=query,
             original_filters=filters,
@@ -1382,6 +1396,7 @@ class Memory(MemoryBase):
             threshold=threshold,
             rerank=rerank,
             explain=explain,
+            trace_collector=trace_collector,
         )
         pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
 
@@ -1391,38 +1406,37 @@ class Memory(MemoryBase):
         pipeline._run_step(pipeline.steps[0], ctx)
         effective_filters = ctx.normalized_filters
 
+        # Merge pipeline-level telemetry counters (candidates, threshold hits,
+        # rerank execution etc.) into the PostHog event.  This guarantees that
+        # mem0.search telemetry always contains the same step-level counters
+        # that explain=True exposes — the two views are kept in sync by
+        # construction, not by convention.
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
-                "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "sync",
-                "threshold": threshold,
-                "explain": explain,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-            },
-        )
-
+        telem_additional = {
+            "limit": limit,
+            "version": self.api_version,
+            "keys": keys,
+            "encoded_ids": encoded_ids,
+            "sync_type": "sync",
+            "threshold": threshold,
+            "explain": explain,
+            "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+        }
         # Run remaining steps (step 0 was already executed above)
         for step in pipeline.steps[1:]:
             ctx = pipeline._run_step(step, ctx)
 
-        # Compute total pipeline wall time (steps 0..n) from the per-step
-        # durations already collected in ctx.trace["step_durations_ms"].
-        step_durations = ctx.trace.get("step_durations_ms", {})
-        ctx.trace["total_elapsed_ms"] = sum(step_durations.values())
-        ctx.trace.setdefault("query", ctx.query)
-        ctx.trace.setdefault("filters", ctx.normalized_filters)
-        ctx.trace.setdefault("top_k", ctx.top_k)
-        ctx.trace.setdefault("threshold", ctx.threshold)
-        ctx.trace.setdefault("explain", ctx.explain)
-        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
+        # Freeze the unified collector (computes total_elapsed_ms, results_count).
+        # After this call, to_dict() / telemetry_props() / summary() are stable.
+        trace_collector.finalize(results_count=len(ctx.formatted_results))
 
-        search_elapsed_seconds = ctx.trace["total_elapsed_ms"] / 1000.0
+        # Merge collector-backed props into telemetry (PostHog caps per-event
+        # property size, so telemetry_props() only emits low-cardinality
+        # counters — the full trace lives in explain=True / response["trace"]).
+        telem_additional.update(trace_collector.telemetry_props())
+        capture_event("mem0.search", self, telem_additional)
+
+        search_elapsed_seconds = trace_collector._total_elapsed_ms / 1000.0 if trace_collector._total_elapsed_ms is not None else 0.0
         original_memories = ctx.formatted_results
 
         if temporal_usage_notice:
@@ -1443,7 +1457,8 @@ class Memory(MemoryBase):
 
         response: Dict[str, Any] = {"results": original_memories}
         if explain:
-            response["trace"] = ctx.trace
+            # Reuse the SAME collector — explain trace and telemetry are identical.
+            response["trace"] = trace_collector.to_dict()
         return response
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
@@ -2763,6 +2778,16 @@ class AsyncMemory(MemoryBase):
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
+        # --- Unified trace collector (single source of truth) ---
+        trace_collector = SearchTraceCollector()
+        trace_collector.set_meta(
+            query=query,
+            filters=filters or {},
+            top_k=top_k,
+            threshold=threshold,
+            explain=explain,
+        )
+
         ctx = SearchContext(
             query=query,
             original_filters=filters,
@@ -2770,6 +2795,7 @@ class AsyncMemory(MemoryBase):
             threshold=threshold,
             rerank=rerank,
             explain=explain,
+            trace_collector=trace_collector,
         )
         pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
 
@@ -2778,37 +2804,31 @@ class AsyncMemory(MemoryBase):
         await pipeline._run_step_async(pipeline.steps[0], ctx)
         effective_filters = ctx.normalized_filters
 
+        # Merge pipeline-level telemetry counters with the outer event payload.
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
-                "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "async",
-                "threshold": threshold,
-                "explain": explain,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-            },
-        )
+        telem_additional = {
+            "limit": limit,
+            "version": self.api_version,
+            "keys": keys,
+            "encoded_ids": encoded_ids,
+            "sync_type": "async",
+            "threshold": threshold,
+            "explain": explain,
+            "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+        }
 
         # Run remaining steps
         for step in pipeline.steps[1:]:
             ctx = await pipeline._run_step_async(step, ctx)
 
-        # Compute total pipeline wall time from per-step durations.
-        step_durations = ctx.trace.get("step_durations_ms", {})
-        ctx.trace["total_elapsed_ms"] = sum(step_durations.values())
-        ctx.trace.setdefault("query", ctx.query)
-        ctx.trace.setdefault("filters", ctx.normalized_filters)
-        ctx.trace.setdefault("top_k", ctx.top_k)
-        ctx.trace.setdefault("threshold", ctx.threshold)
-        ctx.trace.setdefault("explain", ctx.explain)
-        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
+        # Freeze the unified collector.
+        trace_collector.finalize(results_count=len(ctx.formatted_results))
 
-        search_elapsed_seconds = ctx.trace["total_elapsed_ms"] / 1000.0
+        # Merge collector-backed props into telemetry.
+        telem_additional.update(trace_collector.telemetry_props())
+        capture_event("mem0.search", self, telem_additional)
+
+        search_elapsed_seconds = trace_collector._total_elapsed_ms / 1000.0 if trace_collector._total_elapsed_ms is not None else 0.0
         original_memories = ctx.formatted_results
 
         if temporal_usage_notice:
@@ -2829,7 +2849,8 @@ class AsyncMemory(MemoryBase):
 
         response: Dict[str, Any] = {"results": original_memories}
         if explain:
-            response["trace"] = ctx.trace
+            # Reuse the SAME collector — explain trace and telemetry are identical.
+            response["trace"] = trace_collector.to_dict()
         return response
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:

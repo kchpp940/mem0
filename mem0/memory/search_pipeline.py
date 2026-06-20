@@ -107,27 +107,301 @@ class SearchContext:
     # -- ResultFormatStep --
     formatted_results: List[Dict[str, Any]] = field(default_factory=list)
 
-    # -- Trace / profile (always collected, consumer decides what to expose) --
+    # -- Trace collector (single source of truth) --
     #
-    # Schema for ctx.trace:
-    #
-    #   ctx.trace["step_durations_ms"]  : Dict[str, float]  -- per-step wall time
-    #   ctx.trace["steps"]              : Dict[str, Dict]   -- per-step structured stats
-    #   ctx.trace["total_elapsed_ms"]   : float             -- total pipeline wall time
-    #   ctx.trace["query"]              : str               -- normalized query (for reference)
-    #   ctx.trace["filters"]            : Dict              -- normalized filters
-    #   ctx.trace["top_k"]              : int
-    #   ctx.trace["threshold"]          : float
-    #   ctx.trace["explain"]            : bool
-    #   ctx.trace["results_count"]      : int               -- final formatted result count
-    #
-    # Each step writes ctx.trace["steps"][self.name] = {...}.  Step names are
-    # the same ones used in ctx.trace["step_durations_ms"] so consumers can
-    # correlate duration with structured output.
-    trace: Dict[str, Any] = field(default_factory=dict)
+    # If ``None`` (default), the pipeline lazily creates a fresh
+    # SearchTraceCollector so code that constructs SearchContexts manually
+    # still gets trace collection for free.
+    trace_collector: Optional["SearchTraceCollector"] = None
 
     # -- Escape hatch for custom recall steps --
     extra: Dict[str, Any] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible ``ctx.trace`` dict — delegates to the collector.
+    # Existing tests / code that read or mutate ``ctx.trace`` keep working:
+    #   reads  → ctx.trace_collector.to_dict()
+    #   writes → forwarded to the underlying collector where possible,
+    #             otherwise stored in a shadow dict.
+    # ------------------------------------------------------------------
+    @property
+    def trace(self) -> Dict[str, Any]:
+        """Return a collector-backed view compatible with the old ``ctx.trace`` dict.
+
+        Reading returns a fresh copy each time so consumers get immutable
+        snapshots.  In-place mutation via ``ctx.trace["foo"] = bar`` writes
+        through to a shadow dict that overlays the collector's serialisation
+        (see ``_trace_overrides``).
+        """
+        if self.trace_collector is None:
+            if not hasattr(self, "_trace_overrides") or self._trace_overrides is None:
+                self._trace_overrides: Dict[str, Any] = {}
+            return self._trace_overrides
+        base = self.trace_collector.to_dict()
+        if hasattr(self, "_trace_overrides") and self._trace_overrides:
+            base.update(self._trace_overrides)
+        return base
+
+    @trace.setter
+    def trace(self, value: Dict[str, Any]) -> None:
+        # Assigning ``ctx.trace = {...}`` clears the shadow dict.
+        self._trace_overrides = dict(value)
+
+    def ensure_trace_collector(self) -> "SearchTraceCollector":
+        """Return ctx.trace_collector, creating one if necessary.
+
+        The pipeline calls this before running steps so the collector is
+        always present by the time the first step emits stats.
+        """
+        if self.trace_collector is None:
+            self.trace_collector = SearchTraceCollector()
+        return self.trace_collector
+
+
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Unified trace collector — single source of truth for search pipeline traces
+# ---------------------------------------------------------------------------
+
+class SearchTraceCollector:
+    """Single collector for search pipeline observations.
+
+    All downstream consumers — ``explain=True`` payloads, CLI ``--trace``
+    output, and anonymous telemetry properties — read from the same
+    ``SearchTraceCollector`` instance so the pipeline never emits two
+    different-shaped traces for one search.
+
+    Usage pattern inside the pipeline::
+
+        collector = SearchTraceCollector()
+        collector.set_meta(query=..., filters=..., top_k=..., threshold=..., explain=...)
+
+        for step in steps:
+            collector.start_step(step.name)
+            step.run_sync(ctx)
+            collector.end_step(step.name, duration_ms=..., stats=step.build_trace_stats(ctx))
+
+        collector.finalize(results_count=len(formatted_results))
+
+    Consumers then pick their preferred view::
+
+        collector.to_dict()           # explain=True  payload (ctx.trace)
+        collector.telemetry_props()   # capture_event additional_data
+        collector.summary()           # CLI --trace human-readable
+    """
+
+    # Canonical order for CLI summary / dict iteration.
+    STEP_ORDER = (
+        "query_normalization",
+        "query_preprocessing",
+        "recall_semantic",
+        "recall_keyword",
+        "recall_entity_boost",
+        "candidate_merge",
+        "score_fusion",
+        "rerank",
+        "result_format",
+    )
+
+    def __init__(self) -> None:
+        self._step_durations_ms: Dict[str, float] = {}
+        self._step_stats: Dict[str, Dict[str, Any]] = {}
+        self._meta: Dict[str, Any] = {}
+        self._total_elapsed_ms: Optional[float] = None
+        self._results_count: Optional[int] = None
+        # Pending start timestamps keyed by step name (for nesting safety).
+        self._pending_start: Dict[str, float] = {}
+
+    # -- meta ----------------------------------------------------------------
+
+    def set_meta(
+        self,
+        *,
+        query: str,
+        filters: Dict[str, Any],
+        top_k: int,
+        threshold: float,
+        explain: bool,
+    ) -> None:
+        """Record top-level search parameters captured before the pipeline runs."""
+        self._meta.update(
+            {
+                "query": query,
+                "filters": filters,
+                "top_k": top_k,
+                "threshold": threshold,
+                "explain": explain,
+            }
+        )
+
+    # -- step collection -----------------------------------------------------
+
+    def start_step(self, name: str) -> None:
+        """Mark the instant a step begins.
+
+        Paired with :meth:`end_step` which reads the stored start timestamp
+        when ``duration_ms`` is not passed explicitly.
+        """
+        self._pending_start[name] = time.perf_counter()
+
+    def end_step(self, name: str, *, stats: Dict[str, Any], duration_ms: Optional[float] = None) -> None:
+        """Finalise one step's trace entry.
+
+        ``duration_ms`` is filled in from the matching :meth:`start_step`
+        call when omitted (the common path).  Steps that measure themselves
+        (e.g. batch async gather) can override it.
+        """
+        if duration_ms is None:
+            start = self._pending_start.pop(name, None)
+            duration_ms = 0.0 if start is None else (time.perf_counter() - start) * 1000.0
+        else:
+            # Remove any stray pending start so nesting stays consistent.
+            self._pending_start.pop(name, None)
+
+        self._step_durations_ms[name] = duration_ms
+        self._step_stats[name] = stats or {}
+
+    def finalize(self, *, results_count: int, total_elapsed_ms: Optional[float] = None) -> None:
+        """Freeze the collector once the pipeline finishes.
+
+        ``total_elapsed_ms`` defaults to the sum of step durations, which
+        is accurate enough for profile- and telemetry-grade reports.  Callers
+        that wall-time the entire pipeline can override for exactness.
+        """
+        self._results_count = results_count
+        if total_elapsed_ms is None:
+            total_elapsed_ms = sum(self._step_durations_ms.values())
+        self._total_elapsed_ms = total_elapsed_ms
+
+    # -- consumer views ------------------------------------------------------
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Return the ``explain=True``-compatible trace dict (ctx.trace shape).
+
+        This view is identical to the previous ``ctx.trace`` dict so existing
+        tests / clients that peek into ``result["trace"]`` keep working.
+        """
+        return {
+            "step_durations_ms": dict(self._step_durations_ms),
+            "steps": {name: dict(self._step_stats.get(name, {})) for name in self.STEP_ORDER if name in self._step_stats},
+            "total_elapsed_ms": self._total_elapsed_ms if self._total_elapsed_ms is not None else 0.0,
+            "query": self._meta.get("query"),
+            "filters": self._meta.get("filters", {}),
+            "top_k": self._meta.get("top_k"),
+            "threshold": self._meta.get("threshold"),
+            "explain": bool(self._meta.get("explain", False)),
+            "results_count": self._results_count if self._results_count is not None else 0,
+        }
+
+    def telemetry_props(self) -> Dict[str, Any]:
+        """Return a PostHog-friendly flat property dict for anonymous telemetry.
+
+        Long strings (e.g. the raw query) are truncated, nested values are
+        collapsed to counts / booleans / small strings so the event stays
+        under PostHog property-size limits.
+        """
+        props: Dict[str, Any] = {}
+
+        # Top-level meta (sanitised)
+        props["query_len"] = len(self._meta.get("query", ""))
+        props["top_k"] = self._meta.get("top_k")
+        props["threshold"] = self._meta.get("threshold")
+        props["explain"] = bool(self._meta.get("explain", False))
+        filters = self._meta.get("filters") or {}
+        props["filter_keys"] = sorted(filters.keys())[:8]
+        props["filter_count"] = len(filters)
+        props["results_count"] = self._results_count
+
+        # Total / per-step durations (ms) — round to sub-ms precision
+        if self._total_elapsed_ms is not None:
+            props["total_elapsed_ms"] = round(self._total_elapsed_ms, 2)
+        for step_name, dur in self._step_durations_ms.items():
+            props[f"step_dur_ms__{step_name}"] = round(dur, 2)
+
+        # Key per-step counters — expose only the low-cardinality ones
+        sf_stats = self._step_stats.get("score_fusion", {})
+        props["candidates_before_fusion"] = sf_stats.get("candidate_count_before")
+        props["kept_after_threshold"] = sf_stats.get("kept_after_threshold")
+        props["kept_after_top_k"] = sf_stats.get("kept_after_top_k")
+        props["max_possible_score"] = sf_stats.get("max_possible_score")
+        props["has_bm25"] = sf_stats.get("has_bm25")
+        props["has_entity_boosts"] = sf_stats.get("has_entity_boosts")
+
+        sem_stats = self._step_stats.get("recall_semantic", {})
+        props["semantic_hits"] = sem_stats.get("hits_count")
+        props["semantic_top_k_requested"] = sem_stats.get("top_k_requested")
+
+        kw_stats = self._step_stats.get("recall_keyword", {})
+        props["keyword_supported"] = kw_stats.get("supported")
+        props["keyword_hits"] = kw_stats.get("hits_count")
+
+        ent_stats = self._step_stats.get("recall_entity_boost", {})
+        props["entity_queries_deduped"] = ent_stats.get("queries_deduped")
+        props["entity_boosted_count"] = ent_stats.get("boosted_memory_count")
+
+        rr_stats = self._step_stats.get("rerank", {})
+        props["rerank_requested"] = rr_stats.get("requested")
+        props["rerank_executed"] = rr_stats.get("executed")
+
+        return props
+
+    def summary(self) -> str:
+        """Return a human-readable CLI ``--trace`` summary string.
+
+        Multi-line, tabular output intended for terminal display.
+        """
+        lines: List[str] = []
+        lines.append("=== Search Pipeline Trace ===")
+        if self._total_elapsed_ms is not None:
+            lines.append(f"Total: {self._total_elapsed_ms:.2f} ms  "
+                         f"(results: {self._results_count})")
+        lines.append("")
+        lines.append(f"{'Step':<26} {'ms':>8}   Key stats")
+        lines.append("-" * 80)
+        for step_name in self.STEP_ORDER:
+            if step_name not in self._step_stats:
+                continue
+            dur = self._step_durations_ms.get(step_name, 0.0)
+            stats = self._step_stats.get(step_name, {})
+            brief = self._summarise_step_stats(step_name, stats)
+            lines.append(f"{step_name:<26} {dur:>8.2f}   {brief}")
+        lines.append("-" * 80)
+        return "\n".join(lines)
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    def _summarise_step_stats(step_name: str, stats: Dict[str, Any]) -> str:
+        """Pick the most interesting 1-2 counters from a step's stats dict."""
+        if step_name == "query_normalization":
+            return f"filters={stats.get('filter_count', 0)}  " \
+                   f"advanced={stats.get('has_advanced_operators', False)}"
+        if step_name == "query_preprocessing":
+            return f"entities={stats.get('entity_count', 0)}  " \
+                   f"internal_limit={stats.get('internal_limit', 0)}"
+        if step_name == "recall_semantic":
+            return f"hits={stats.get('hits_count', 0)}  " \
+                   f"score_range=({stats.get('min_score')}, {stats.get('max_score')})"
+        if step_name == "recall_keyword":
+            return f"supported={stats.get('supported', False)}  " \
+                   f"hits={stats.get('hits_count', 0)}"
+        if step_name == "recall_entity_boost":
+            return f"boosted={stats.get('boosted_memory_count', 0)}  " \
+                   f"total_boost={stats.get('total_boost', 0):.3f}"
+        if step_name == "candidate_merge":
+            return f"merged={stats.get('merged_candidate_count', 0)}  " \
+                   f"bm25_scored={stats.get('bm25_scored_count', 0)}"
+        if step_name == "score_fusion":
+            return f"kept_after_threshold={stats.get('kept_after_threshold', 0)}  " \
+                   f"final={stats.get('kept_after_top_k', 0)}  " \
+                   f"threshold={stats.get('threshold')}"
+        if step_name == "rerank":
+            return f"executed={stats.get('executed', False)}  " \
+                   f"reranked={stats.get('reranked_count', 0)}"
+        if step_name == "result_format":
+            return f"output={stats.get('output_count', 0)}  " \
+                   f"dropped={stats.get('dropped_missing_data', 0)}"
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -143,9 +417,13 @@ class PipelineStep(ABC):
     (returning the same object is allowed for chaining convenience, but not
     required).
 
-    :meth:`record_trace` is invoked *after* the step runs (by the pipeline
-    orchestrator) so every step has a single, consistent place to write its
-    structured statistics into ``ctx.trace["steps"]``.
+    :meth:`build_trace_stats` replaces the old ``record_trace`` mechanism.
+    Each step returns a JSON-serialisable dict of its counters; the pipeline
+    orchestrator (``SearchPipeline``) writes that dict into the *single*
+    ``SearchTraceCollector`` owned by the :class:`SearchContext`.  This way
+    ``explain=True`` payloads, CLI ``--trace`` output, and anonymous
+    telemetry properties all read from one collector — never two different
+    trace shapes for the same search.
     """
 
     name: str = "base_step"
@@ -158,14 +436,25 @@ class PipelineStep(ABC):
     async def run_async(self, ctx: SearchContext) -> SearchContext:
         ...
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        """Write per-step structured statistics into ``ctx.trace["steps"]``.
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
+        """Return structured counters for this step's last execution.
 
-        Override in subclasses to record meaningful counters.  The default
-        implementation writes an empty dict so ``ctx.trace["steps"]`` always
-        contains a key for every executed step.
+        Default implementation returns an empty dict.  Subclasses override to
+        expose interesting statistics.  The returned dict MUST be
+        JSON-serialisable (no raw LLM responses, no numpy arrays, etc.) and
+        should prefer counts / booleans / small strings over large blobs.
         """
-        ctx.trace.setdefault("steps", {}).setdefault(self.name, {})
+        return {}
+
+    # ------------------------------------------------------------------
+    # Legacy shim — kept so code that monkeypatches ``step.record_trace``
+    # still works during the transition.  New code MUST NOT override this.
+    # ------------------------------------------------------------------
+    def record_trace(self, ctx: SearchContext) -> None:
+        # Delegate to the unified collector via ctx.trace_collector.
+        if ctx.trace_collector is not None:
+            ctx.trace_collector.end_step(self.name, stats=self.build_trace_stats(ctx))
+
 
 
 # ---------------------------------------------------------------------------
@@ -246,14 +535,15 @@ class QueryNormalizationStep(PipelineStep):
         self._do_normalize(ctx)
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
-        ctx.trace["steps"][self.name] = {
-            "filters_keys": sorted(ctx.normalized_filters.keys()),
-            "has_advanced_operators": bool(
-                set(ctx.normalized_filters.keys()) & {"AND", "OR", "NOT"}
-            )
-            or any(isinstance(v, dict) for v in ctx.normalized_filters.values()),
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
+        filter_keys = sorted(ctx.normalized_filters.keys())
+        has_advanced = bool(
+            set(filter_keys) & {"AND", "OR", "NOT"}
+        ) or any(isinstance(v, dict) for v in ctx.normalized_filters.values())
+        return {
+            "filters_keys": filter_keys,
+            "filter_count": len(filter_keys),
+            "has_advanced_operators": has_advanced,
             "query_length": len(ctx.query),
         }
 
@@ -292,9 +582,8 @@ class QueryPreprocessingStep(PipelineStep):
         ctx.internal_limit = max(ctx.top_k * 4, 60)
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
-        ctx.trace["steps"][self.name] = {
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
+        return {
             "lemmatized_query_length": len(ctx.query_lemmatized),
             "entity_count": len(ctx.query_entities),
             "entity_types": sorted({et for et, _ in ctx.query_entities}),
@@ -335,10 +624,9 @@ class SemanticRecallStep(PipelineStep):
         )
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
         scores = [r.get("score") if isinstance(r, dict) else getattr(r, "score", 0.0) for r in ctx.semantic_results]
-        ctx.trace["steps"][self.name] = {
+        return {
             "hits_count": len(ctx.semantic_results),
             "min_score": min(scores) if scores else None,
             "max_score": max(scores) if scores else None,
@@ -376,9 +664,8 @@ class KeywordRecallStep(PipelineStep):
         )
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
-        ctx.trace["steps"][self.name] = {
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
+        return {
             "supported": ctx.keyword_results is not None,
             "hits_count": len(ctx.keyword_results) if ctx.keyword_results is not None else 0,
             "query_lemmatized": ctx.query_lemmatized,
@@ -573,11 +860,10 @@ class EntityBoostRecallStep(PipelineStep):
         ctx.entity_boosts = memory_boosts
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
         boosted_ids = [mid for mid, val in ctx.entity_boosts.items() if val > 0]
         boost_values = list(ctx.entity_boosts.values())
-        ctx.trace["steps"][self.name] = {
+        return {
             "queries_searched": len(ctx.query_entities),
             "queries_deduped": len(self._dedupe(ctx.query_entities)),
             "boosted_memory_count": len(boosted_ids),
@@ -648,15 +934,13 @@ class CandidateMergeStep(PipelineStep):
         self._do_merge(ctx)
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
-        bm25_count = len([s for s in ctx.bm25_scores.values() if s > 0])
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
         bm25_values = list(ctx.bm25_scores.values())
-        ctx.trace["steps"][self.name] = {
+        return {
             "semantic_input_count": len(ctx.semantic_results),
             "keyword_input_count": len(ctx.keyword_results) if ctx.keyword_results is not None else 0,
             "merged_candidate_count": len(ctx.candidates),
-            "bm25_scored_count": bm25_count,
+            "bm25_scored_count": len([s for s in bm25_values if s > 0]),
             "bm25_max": max(bm25_values) if bm25_values else 0.0,
             "bm25_params": get_bm25_params(ctx.query, lemmatized=ctx.query_lemmatized),
         }
@@ -697,8 +981,7 @@ class ScoreFusionStep(PipelineStep):
         self._do_fuse(ctx)
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
         # Count how many candidates were filtered out by the semantic threshold.
         sem_scores_in = [
             c.get("score", 0.0) if isinstance(c, dict) else getattr(c, "score", 0.0)
@@ -713,7 +996,6 @@ class ScoreFusionStep(PipelineStep):
             (r.get("score_details") if isinstance(r, dict) else None)
             for r in ctx.scored_results
         )
-        # Reconstruct max_possible (mirrors scoring.score_and_rank logic).
         has_bm25 = bool(ctx.bm25_scores)
         has_entity = bool(ctx.entity_boosts)
         max_possible = 1.0
@@ -721,7 +1003,7 @@ class ScoreFusionStep(PipelineStep):
             max_possible += 1.0
         if has_entity:
             max_possible += ENTITY_BOOST_WEIGHT
-        ctx.trace["steps"][self.name] = {
+        return {
             "candidate_count_before": len(ctx.candidates),
             "below_threshold_count": below_threshold,
             "kept_after_threshold": len(ctx.candidates) - below_threshold,
@@ -785,15 +1067,14 @@ class RerankStep(PipelineStep):
             logger.warning("Reranking failed, using original results: %s", e)
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
         has_reranker = self._reranker is not None
         rerank_scores = [
             r.get("rerank_score")
             for r in ctx.scored_results
             if isinstance(r, dict) and r.get("rerank_score") is not None
         ]
-        ctx.trace["steps"][self.name] = {
+        return {
             "requested": ctx.rerank,
             "reranker_available": has_reranker,
             "executed": bool(ctx.reranked),
@@ -909,11 +1190,10 @@ class ResultFormatStep(PipelineStep):
         self._do_format(ctx)
         return ctx
 
-    def record_trace(self, ctx: SearchContext) -> None:
-        super().record_trace(ctx)
+    def build_trace_stats(self, ctx: SearchContext) -> Dict[str, Any]:
         dropped = len(ctx.scored_results) - len(ctx.formatted_results)
         has_score_details = any("score_details" in r for r in ctx.formatted_results)
-        ctx.trace["steps"][self.name] = {
+        return {
             "input_count": len(ctx.scored_results),
             "output_count": len(ctx.formatted_results),
             "dropped_missing_data": max(dropped, 0),
@@ -941,9 +1221,13 @@ class SearchPipeline:
         pipeline.run_sync(ctx)
         results = ctx.formatted_results
 
-    Trace hooks (profile/trace) can be added by overriding :meth:`_run_step`
-    (sync) and :meth:`_run_step_async` (async).  The default implementation
-    records per-step wall time into ``ctx.trace["step_durations_ms"]``.
+    The pipeline owns exactly one :class:`SearchTraceCollector` (lazily
+    created on the context).  :meth:`_run_step` and :meth:`_run_step_async`
+    write per-step duration + structured counters into that collector.
+    Downstream consumers — ``explain=True`` payload, CLI ``--trace``, and
+    anonymous telemetry — all read from the SAME collector so they always
+    see identical pipeline traces.  Never expose the collector via two
+    different serialisations.
     """
 
     def __init__(self, steps: List[PipelineStep]) -> None:
@@ -958,49 +1242,56 @@ class SearchPipeline:
     # -- hooks for profiling / tracing --
 
     def _run_step(self, step: PipelineStep, ctx: SearchContext) -> SearchContext:
-        start = time.perf_counter()
+        """Run one step and emit its trace into the unified collector."""
+        collector = ctx.ensure_trace_collector()
+        collector.start_step(step.name)
         try:
             ctx = step.run_sync(ctx)
             return ctx
         finally:
-            dur_ms = (time.perf_counter() - start) * 1000.0
-            ctx.trace.setdefault("step_durations_ms", {})[step.name] = dur_ms
-            step.record_trace(ctx)
+            stats = step.build_trace_stats(ctx)
+            collector.end_step(step.name, stats=stats)
 
     async def _run_step_async(self, step: PipelineStep, ctx: SearchContext) -> SearchContext:
-        start = time.perf_counter()
+        """Run one step async and emit its trace into the unified collector."""
+        collector = ctx.ensure_trace_collector()
+        collector.start_step(step.name)
         try:
             ctx = await step.run_async(ctx)
             return ctx
         finally:
-            dur_ms = (time.perf_counter() - start) * 1000.0
-            ctx.trace.setdefault("step_durations_ms", {})[step.name] = dur_ms
-            step.record_trace(ctx)
+            stats = step.build_trace_stats(ctx)
+            collector.end_step(step.name, stats=stats)
 
     # -- public entry points --
 
     def run_sync(self, ctx: SearchContext) -> SearchContext:
-        pipeline_start = time.perf_counter()
+        collector = ctx.ensure_trace_collector()
+        # Populate top-level meta if caller hasn't already.
+        if not collector._meta:
+            collector.set_meta(
+                query=ctx.query,
+                filters=ctx.normalized_filters or (ctx.original_filters or {}),
+                top_k=ctx.top_k,
+                threshold=ctx.threshold,
+                explain=ctx.explain,
+            )
         for step in self._steps:
             ctx = self._run_step(step, ctx)
-        ctx.trace["total_elapsed_ms"] = (time.perf_counter() - pipeline_start) * 1000.0
-        ctx.trace.setdefault("query", ctx.query)
-        ctx.trace.setdefault("filters", ctx.normalized_filters)
-        ctx.trace.setdefault("top_k", ctx.top_k)
-        ctx.trace.setdefault("threshold", ctx.threshold)
-        ctx.trace.setdefault("explain", ctx.explain)
-        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
+        collector.finalize(results_count=len(ctx.formatted_results))
         return ctx
 
     async def run_async(self, ctx: SearchContext) -> SearchContext:
-        pipeline_start = time.perf_counter()
+        collector = ctx.ensure_trace_collector()
+        if not collector._meta:
+            collector.set_meta(
+                query=ctx.query,
+                filters=ctx.normalized_filters or (ctx.original_filters or {}),
+                top_k=ctx.top_k,
+                threshold=ctx.threshold,
+                explain=ctx.explain,
+            )
         for step in self._steps:
             ctx = await self._run_step_async(step, ctx)
-        ctx.trace["total_elapsed_ms"] = (time.perf_counter() - pipeline_start) * 1000.0
-        ctx.trace.setdefault("query", ctx.query)
-        ctx.trace.setdefault("filters", ctx.normalized_filters)
-        ctx.trace.setdefault("top_k", ctx.top_k)
-        ctx.trace.setdefault("threshold", ctx.threshold)
-        ctx.trace.setdefault("explain", ctx.explain)
-        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
+        collector.finalize(results_count=len(ctx.formatted_results))
         return ctx

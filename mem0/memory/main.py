@@ -1371,20 +1371,6 @@ class Memory(MemoryBase):
         if reference_date is not None:
             raise ValueError(get_temporal_feature_error_message("sync", "search", "reference_date"))
 
-        # --- Backward-compat path: tests often mock `_search_vector_store`
-        # directly on instances created via __new__ (no __init__). Detect that
-        # and route through the legacy path so mocks still intercept. ---
-        if self._search_vector_store is not Memory._search_vector_store:
-            return self._search_legacy_path_sync(
-                query=query,
-                top_k=top_k,
-                filters=filters,
-                threshold=threshold,
-                rerank=rerank,
-                explain=explain,
-                **kwargs,
-            )
-
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
@@ -1428,105 +1414,6 @@ class Memory(MemoryBase):
         search_elapsed_seconds = time.perf_counter() - search_start
 
         original_memories = ctx.formatted_results
-
-        if temporal_usage_notice:
-            display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
-        elif scale_threshold_notice:
-            display_scale_threshold_notice(self, "sync", "search", *scale_threshold_notice)
-        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-            display_performance_slow_query_notice(
-                self,
-                "sync",
-                "search",
-                search_elapsed_seconds,
-                top_k,
-                len(original_memories),
-            )
-        else:
-            display_first_run_notice(self, "sync", "search")
-        return {"results": original_memories}
-
-    def _search_legacy_path_sync(
-        self,
-        query: str,
-        *,
-        top_k: int = 20,
-        filters: Optional[Dict[str, Any]] = None,
-        threshold: float = 0.1,
-        rerank: bool = False,
-        explain: bool = False,
-        **kwargs,
-    ):
-        """Original search code path, retained for instances where
-        ``_search_vector_store`` has been mocked/overridden on a per-object basis
-        (common in test suites that create Memory via ``__new__``).
-        """
-        _reject_top_level_entity_params(kwargs, "search")
-        _validate_search_params(threshold=threshold, top_k=top_k)
-        query = _validate_and_trim_search_query(query)
-        temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
-
-        effective_filters = filters.copy() if filters else {}
-        if "user_id" in effective_filters:
-            effective_filters["user_id"] = _validate_and_trim_entity_id(
-                effective_filters["user_id"], "user_id"
-            )
-        if "agent_id" in effective_filters:
-            effective_filters["agent_id"] = _validate_and_trim_entity_id(
-                effective_filters["agent_id"], "agent_id"
-            )
-        if "run_id" in effective_filters:
-            effective_filters["run_id"] = _validate_and_trim_entity_id(
-                effective_filters["run_id"], "run_id"
-            )
-        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
-            raise ValueError(
-                "filters must contain at least one of: user_id, agent_id, run_id. "
-                "Example: filters={'user_id': 'u1'}"
-            )
-
-        limit = top_k
-        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
-
-        if self._has_advanced_operators(effective_filters):
-            processed_filters = self._process_metadata_filters(effective_filters)
-            for logical_key in ("AND", "OR", "NOT"):
-                effective_filters.pop(logical_key, None)
-            for fk in list(effective_filters.keys()):
-                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(
-                    effective_filters.get(fk), dict
-                ):
-                    effective_filters.pop(fk, None)
-            effective_filters.update(processed_filters)
-
-        keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
-                "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "sync",
-                "threshold": threshold,
-                "explain": explain,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-            },
-        )
-
-        search_start = time.perf_counter()
-        original_memories = self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain
-        )
-        search_elapsed_seconds = time.perf_counter() - search_start
-
-        if rerank and self.reranker and original_memories:
-            try:
-                reranked_memories = self.reranker.rerank(query, original_memories, limit)
-                original_memories = reranked_memories
-            except Exception as e:
-                logger.warning(f"Reranking failed, using original results: {e}")
 
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
@@ -2854,18 +2741,6 @@ class AsyncMemory(MemoryBase):
                 await get_temporal_feature_error_message_async("async", "search", "reference_date")
             )
 
-        # --- Backward-compat path (see Memory.search for rationale) ---
-        if self._search_vector_store is not AsyncMemory._search_vector_store:
-            return await self._search_legacy_path_async(
-                query=query,
-                top_k=top_k,
-                filters=filters,
-                threshold=threshold,
-                rerank=rerank,
-                explain=explain,
-                **kwargs,
-            )
-
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
@@ -2907,106 +2782,6 @@ class AsyncMemory(MemoryBase):
         search_elapsed_seconds = time.perf_counter() - search_start
 
         original_memories = ctx.formatted_results
-
-        if temporal_usage_notice:
-            await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
-        elif scale_threshold_notice:
-            await display_scale_threshold_notice_async(self, "async", "search", *scale_threshold_notice)
-        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-            await display_performance_slow_query_notice_async(
-                self,
-                "async",
-                "search",
-                search_elapsed_seconds,
-                top_k,
-                len(original_memories),
-            )
-        else:
-            await display_first_run_notice_async(self, "async", "search")
-        return {"results": original_memories}
-
-    async def _search_legacy_path_async(
-        self,
-        query: str,
-        *,
-        top_k: int = 20,
-        filters: Optional[Dict[str, Any]] = None,
-        threshold: float = 0.1,
-        rerank: bool = False,
-        explain: bool = False,
-        **kwargs,
-    ):
-        """Original async search code path, retained for instances where
-        ``_search_vector_store`` has been mocked/overridden on a per-object basis.
-        """
-        _reject_top_level_entity_params(kwargs, "search")
-        _validate_search_params(threshold=threshold, top_k=top_k)
-        query = _validate_and_trim_search_query(query)
-        temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
-
-        effective_filters = filters.copy() if filters else {}
-        if "user_id" in effective_filters:
-            effective_filters["user_id"] = _validate_and_trim_entity_id(
-                effective_filters["user_id"], "user_id"
-            )
-        if "agent_id" in effective_filters:
-            effective_filters["agent_id"] = _validate_and_trim_entity_id(
-                effective_filters["agent_id"], "agent_id"
-            )
-        if "run_id" in effective_filters:
-            effective_filters["run_id"] = _validate_and_trim_entity_id(
-                effective_filters["run_id"], "run_id"
-            )
-        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
-            raise ValueError(
-                "filters must contain at least one of: user_id, agent_id, run_id. "
-                "Example: filters={'user_id': 'u1'}"
-            )
-
-        limit = top_k
-        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
-
-        if self._has_advanced_operators(effective_filters):
-            processed_filters = self._process_metadata_filters(effective_filters)
-            for logical_key in ("AND", "OR", "NOT"):
-                effective_filters.pop(logical_key, None)
-            for fk in list(effective_filters.keys()):
-                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(
-                    effective_filters.get(fk), dict
-                ):
-                    effective_filters.pop(fk, None)
-            effective_filters.update(processed_filters)
-
-        keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
-                "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "async",
-                "threshold": threshold,
-                "explain": explain,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-            },
-        )
-
-        search_start = time.perf_counter()
-        original_memories = await self._search_vector_store(
-            query, effective_filters, limit, threshold, explain=explain
-        )
-        search_elapsed_seconds = time.perf_counter() - search_start
-
-        if rerank and self.reranker and original_memories:
-            try:
-                reranked_memories = await asyncio.to_thread(
-                    self.reranker.rerank, query, original_memories, limit
-                )
-                original_memories = reranked_memories
-            except Exception as e:
-                logger.warning(f"Reranking failed, using original results: {e}")
 
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)

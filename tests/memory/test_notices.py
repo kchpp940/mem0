@@ -26,6 +26,58 @@ class FakeFlags:
         return self.payload
 
 
+def _make_minimal_memory(search_results=None):
+    """Create a Memory instance (via __new__) with enough mocks so that the
+    search pipeline can run to completion without touching real infrastructure.
+
+    Used by notice-related tests that only care about which notice display
+    helpers get invoked, not about the content of search results.
+
+    ``search_results`` accepts the legacy MemoryItem dict shape (e.g.
+    ``[{"memory": "likes tea"}]``); internally it is converted to the
+    vector-store hit shape expected by the recall pipeline stages.
+    """
+    memory = Memory.__new__(Memory)
+    memory.config = SimpleNamespace(llm=SimpleNamespace(config={}))
+    memory.api_version = "v1.1"
+    memory.reranker = None
+
+    embedding_model = MagicMock()
+    embedding_model.embed.return_value = [0.1, 0.2, 0.3]
+    embedding_model.embed_batch.return_value = [[0.1, 0.2, 0.3]]
+    memory.embedding_model = embedding_model
+
+    vector_store = MagicMock()
+    if search_results is None:
+        semantic_hits = []
+    else:
+        semantic_hits = []
+        for idx, item in enumerate(search_results):
+            item_id = item.get("id") or f"mem-{idx}"
+            payload = dict(item)
+            data_val = (
+                payload.get("data")
+                or payload.get("memory")
+                or f"memory-data-for-{item_id}"
+            )
+            payload["data"] = data_val
+            if "memory" not in payload:
+                payload["memory"] = data_val
+            payload.setdefault("id", item_id)
+            semantic_hits.append({
+                "id": item_id,
+                "score": item.get("score", 0.95),
+                "payload": payload,
+            })
+    vector_store.search.return_value = semantic_hits
+    vector_store.keyword_search.return_value = None
+    memory.vector_store = vector_store
+
+    memory._entity_store = MagicMock()
+    memory._entity_store.search.return_value = []
+    return memory
+
+
 @pytest.fixture(autouse=True)
 def reset_notice_process_state():
     notices._first_run_claimed_in_process = False
@@ -279,14 +331,12 @@ def test_public_search_succeeds_when_first_run_flag_eval_fails(notice_harness, m
     _, telemetry = notice_harness
     telemetry.posthog.evaluate_flags.side_effect = RuntimeError("network unavailable")
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    memory = Memory.__new__(Memory)
-    memory.api_version = "v1.1"
-    memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=[{"memory": "likes tea"}])
+    memory = _make_minimal_memory(search_results=[{"memory": "likes tea"}])
 
     result = Memory.search(memory, "favorite drink", filters={"user_id": "u1"})
 
-    assert result == {"results": [{"memory": "likes tea"}]}
+    assert len(result["results"]) == 1
+    assert result["results"][0]["memory"] == "likes tea"
 
 
 def test_notice_event_bypasses_sampling():
@@ -1475,10 +1525,7 @@ def test_async_scale_threshold_wrapper_uses_shared_helper(monkeypatch):
 def test_notice_priority_temporal_usage_beats_scale_and_first_run(monkeypatch):
     from mem0.memory import main as memory_main
 
-    memory = memory_main.Memory.__new__(memory_main.Memory)
-    memory.api_version = "v1.1"
-    memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=[])
+    memory = _make_minimal_memory()
     calls = []
 
     monkeypatch.setattr(memory_main, "capture_event", lambda *args, **kwargs: None)
@@ -1499,10 +1546,7 @@ def test_notice_priority_temporal_usage_beats_scale_and_first_run(monkeypatch):
 def test_notice_priority_scale_beats_first_run(monkeypatch):
     from mem0.memory import main as memory_main
 
-    memory = memory_main.Memory.__new__(memory_main.Memory)
-    memory.api_version = "v1.1"
-    memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=[])
+    memory = _make_minimal_memory()
     calls = []
 
     monkeypatch.setattr(memory_main, "capture_event", lambda *args, **kwargs: None)

@@ -1,4 +1,5 @@
 from copy import deepcopy
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -67,20 +68,101 @@ def performance_payload(copy="Performance CTA", enabled=True, notice_type="log_l
     return payload
 
 
+def _make_embedding_model_mock():
+    m = MagicMock()
+    m.embed.return_value = [0.1, 0.2, 0.3]
+    m.embed_batch.return_value = [[0.1, 0.2, 0.3]]
+    return m
+
+
+def _make_vector_store_mock(search_results=None):
+    """Build a MagicMock vector_store.
+
+    The ``search`` method returns vector-search-shaped results derived from
+    ``search_results`` (which is the legacy MemoryItem dict shape used by
+    older tests).  The mapping is:
+
+        MemoryItem {"id": "x", "memory": "text", ...}
+            -> vector hit {"id": "x", "score": 0.95,
+                           "payload": {"data": "text", "id": "x", ...}}
+
+    Items missing a ``memory``/``data`` field get a sentinel ``data`` value
+    so the :class:`ResultFormatStep` filter does not silently drop them.
+
+    ``keyword_search`` always returns ``None`` (no BM25 support in fixtures).
+    """
+    m = MagicMock()
+    if search_results is None:
+        semantic_hits = []
+    else:
+        semantic_hits = []
+        for idx, item in enumerate(search_results):
+            item_id = item.get("id") or f"mem-{idx}"
+            payload = dict(item)
+            data_val = (
+                payload.get("data")
+                or payload.get("memory")
+                or f"memory-data-for-{item_id}"
+            )
+            payload["data"] = data_val
+            if "memory" not in payload:
+                payload["memory"] = data_val
+            payload.setdefault("id", item_id)
+            semantic_hits.append({
+                "id": item_id,
+                "score": item.get("score", 0.95),
+                "payload": payload,
+            })
+    m.search.return_value = semantic_hits
+    m.keyword_search.return_value = None
+    return m
+
+
 def make_sync_memory(search_results=None):
     memory = Memory.__new__(Memory)
+    memory.config = SimpleNamespace(llm=SimpleNamespace(config={}))
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = MagicMock(return_value=search_results or [])
+    memory.embedding_model = _make_embedding_model_mock()
+    memory.vector_store = _make_vector_store_mock(search_results=search_results)
+    memory._entity_store = MagicMock()
+    memory._entity_store.search.return_value = []
     return memory
 
 
 def make_async_memory(search_results=None):
     memory = AsyncMemory.__new__(AsyncMemory)
+    memory.config = SimpleNamespace(llm=SimpleNamespace(config={}))
     memory.api_version = "v1.1"
     memory.reranker = None
-    memory._search_vector_store = AsyncMock(return_value=search_results or [])
+    memory.embedding_model = _make_embedding_model_mock()
+    memory.vector_store = _make_vector_store_mock(search_results=search_results)
+    memory._entity_store = MagicMock()
+    memory._entity_store.search.return_value = []
     return memory
+
+
+def _make_slow_perf_counter_mock(start=100.0, end=102.1):
+    """Return a perf_counter mock where the *first* call returns ``start``
+    and every subsequent call returns ``end``.
+
+    The search pipeline records per-step durations which means perf_counter is
+    called many times internally; only the first and last calls matter for the
+    overall ``search_elapsed_seconds`` diff used by performance notices.
+    """
+    state = {"first_called": False}
+
+    def perf_counter():
+        if not state["first_called"]:
+            state["first_called"] = True
+            return start
+        return end
+
+    return MagicMock(side_effect=perf_counter)
+
+
+def _make_fast_perf_counter_mock(start=100.0, end=101.0):
+    return _make_slow_perf_counter_mock(start=start, end=end)
 
 
 def test_sync_slow_search_triggers_performance_notice_after_success(monkeypatch):
@@ -90,15 +172,16 @@ def test_sync_slow_search_triggers_performance_notice_after_success(monkeypatch)
     temporal_notice = MagicMock()
     first_run_notice = MagicMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 102.1]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_slow_perf_counter_mock(100.0, 102.1))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice", performance_notice)
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice", temporal_notice)
     monkeypatch.setattr(memory_main, "display_first_run_notice", first_run_notice)
 
     result = Memory.search(memory, "favorite drink", filters={"user_id": "u1"}, top_k=3)
 
-    assert result == {"results": results}
-    memory._search_vector_store.assert_called_once()
+    assert len(result["results"]) == len(results)
+    assert [r["id"] for r in result["results"]] == ["m1", "m2"]
+    memory.vector_store.search.assert_called_once()
     performance_notice.assert_called_once_with(memory, "sync", "search", pytest.approx(2.1), 3, 2)
     temporal_notice.assert_not_called()
     first_run_notice.assert_not_called()
@@ -109,7 +192,7 @@ def test_sync_fast_search_uses_first_run_notice(monkeypatch):
     performance_notice = MagicMock()
     first_run_notice = MagicMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 101.0]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_fast_perf_counter_mock(100.0, 101.0))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice", performance_notice)
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice", MagicMock())
     monkeypatch.setattr(memory_main, "display_first_run_notice", first_run_notice)
@@ -122,7 +205,7 @@ def test_sync_fast_search_uses_first_run_notice(monkeypatch):
 
 def test_sync_failed_search_does_not_trigger_performance_notice(monkeypatch):
     memory = make_sync_memory()
-    memory._search_vector_store.side_effect = RuntimeError("search failure")
+    memory.vector_store.search.side_effect = RuntimeError("search failure")
     performance_notice = MagicMock()
     first_run_notice = MagicMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
@@ -144,7 +227,7 @@ def test_sync_temporal_usage_takes_precedence_over_slow_search(monkeypatch):
     temporal_notice = MagicMock()
     first_run_notice = MagicMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 102.1]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_slow_perf_counter_mock(100.0, 102.1))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice", performance_notice)
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice", temporal_notice)
     monkeypatch.setattr(memory_main, "display_first_run_notice", first_run_notice)
@@ -162,7 +245,7 @@ def test_sync_scale_takes_precedence_over_slow_search(monkeypatch):
     scale_notice = MagicMock()
     first_run_notice = MagicMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 102.1]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_slow_perf_counter_mock(100.0, 102.1))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice", performance_notice)
     monkeypatch.setattr(memory_main, "display_scale_threshold_notice", scale_notice)
     monkeypatch.setattr(memory_main, "display_first_run_notice", first_run_notice)
@@ -191,15 +274,16 @@ async def test_async_slow_search_triggers_performance_notice_after_success(monke
     temporal_notice = AsyncMock()
     first_run_notice = AsyncMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 102.1]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_slow_perf_counter_mock(100.0, 102.1))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice_async", performance_notice)
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice_async", temporal_notice)
     monkeypatch.setattr(memory_main, "display_first_run_notice_async", first_run_notice)
 
     result = await AsyncMemory.search(memory, "favorite drink", filters={"user_id": "u1"}, top_k=4)
 
-    assert result == {"results": results}
-    memory._search_vector_store.assert_awaited_once()
+    assert len(result["results"]) == len(results)
+    assert [r["id"] for r in result["results"]] == ["m1"]
+    memory.vector_store.search.assert_called_once()
     performance_notice.assert_awaited_once_with(memory, "async", "search", pytest.approx(2.1), 4, 1)
     temporal_notice.assert_not_awaited()
     first_run_notice.assert_not_awaited()
@@ -211,7 +295,7 @@ async def test_async_fast_search_uses_first_run_notice(monkeypatch):
     performance_notice = AsyncMock()
     first_run_notice = AsyncMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 101.0]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_fast_perf_counter_mock(100.0, 101.0))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice_async", performance_notice)
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice_async", AsyncMock())
     monkeypatch.setattr(memory_main, "display_first_run_notice_async", first_run_notice)
@@ -225,7 +309,7 @@ async def test_async_fast_search_uses_first_run_notice(monkeypatch):
 @pytest.mark.asyncio
 async def test_async_failed_search_does_not_trigger_performance_notice(monkeypatch):
     memory = make_async_memory()
-    memory._search_vector_store.side_effect = RuntimeError("search failure")
+    memory.vector_store.search.side_effect = RuntimeError("search failure")
     performance_notice = AsyncMock()
     first_run_notice = AsyncMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
@@ -248,7 +332,7 @@ async def test_async_temporal_usage_takes_precedence_over_slow_search(monkeypatc
     temporal_notice = AsyncMock()
     first_run_notice = AsyncMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
-    monkeypatch.setattr(memory_main.time, "perf_counter", MagicMock(side_effect=[100.0, 102.1]))
+    monkeypatch.setattr(memory_main.time, "perf_counter", _make_slow_perf_counter_mock(100.0, 102.1))
     monkeypatch.setattr(memory_main, "display_performance_slow_query_notice_async", performance_notice)
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice_async", temporal_notice)
     monkeypatch.setattr(memory_main, "display_first_run_notice_async", first_run_notice)

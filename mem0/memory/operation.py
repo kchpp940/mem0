@@ -304,10 +304,14 @@ class PayloadNormalizer:
                 processed_metadata["expires_at"] = effective_expires_at
                 processed_metadata["ttl_source"] = effective_ttl_source
 
+        trimmed_user_id = effective_filters.get("user_id")
+        trimmed_agent_id = effective_filters.get("agent_id")
+        trimmed_run_id = effective_filters.get("run_id")
+
         return MemoryRequestContext(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
+            user_id=trimmed_user_id,
+            agent_id=trimmed_agent_id,
+            run_id=trimmed_run_id,
             filters=effective_filters,
             metadata=processed_metadata,
             operation="add",
@@ -487,7 +491,7 @@ class ResultFormatter:
                 ResultFormatter.format_memory_item(
                     payload=payload,
                     memory_id=memory_id,
-                    include_score=False,
+                    include_score=True,
                 )
             )
         return formatted
@@ -518,11 +522,25 @@ class OperationLifecycle:
     @staticmethod
     def detect_add_notices(memory_instance, results: list, temporal_notice: Optional[tuple] = None):
         """Detect and return the appropriate notice for an add operation."""
-        from mem0.memory.notices import detect_scale_threshold_from_add_result
+        from mem0.memory.main import detect_scale_threshold_from_add_result
 
         if temporal_notice:
             return "temporal", temporal_notice
         scale_notice = detect_scale_threshold_from_add_result(memory_instance, results)
+        if scale_notice:
+            return "scale", scale_notice
+        return "first_run", None
+
+    @staticmethod
+    async def detect_add_notices_async(memory_instance, results: list, temporal_notice: Optional[tuple] = None):
+        """Detect and return the appropriate notice for an async add operation (scale detection in thread)."""
+        import asyncio
+
+        from mem0.memory.main import detect_scale_threshold_from_add_result
+
+        if temporal_notice:
+            return "temporal", temporal_notice
+        scale_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, memory_instance, results)
         if scale_notice:
             return "scale", scale_notice
         return "first_run", None
@@ -536,7 +554,7 @@ class OperationLifecycle:
         temporal_notice: Optional[tuple] = None,
     ):
         """Detect and return the appropriate notice for a search operation."""
-        from mem0.memory.notices import (
+        from mem0.memory.main import (
             PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,
             detect_scale_threshold_from_top_k,
         )
@@ -553,7 +571,7 @@ class OperationLifecycle:
     @staticmethod
     def detect_get_all_notices(memory_instance, top_k: int):
         """Detect and return the appropriate notice for a get_all operation."""
-        from mem0.memory.notices import detect_scale_threshold_from_top_k
+        from mem0.memory.main import detect_scale_threshold_from_top_k
 
         scale_notice = detect_scale_threshold_from_top_k(top_k)
         if scale_notice:
@@ -583,7 +601,7 @@ class OperationLifecycle:
         operation: str,
     ) -> None:
         """Dispatch a notice to the appropriate display function (sync)."""
-        from mem0.memory.notices import (
+        from mem0.memory.main import (
             display_decay_usage_notice,
             display_first_run_notice,
             display_performance_slow_query_notice,
@@ -612,7 +630,7 @@ class OperationLifecycle:
     ) -> None:
         """Dispatch a notice to the appropriate display function (async)."""
         import asyncio
-        from mem0.memory.notices import (
+        from mem0.memory.main import (
             display_decay_usage_notice_async,
             display_first_run_notice_async,
             display_performance_slow_query_notice_async,

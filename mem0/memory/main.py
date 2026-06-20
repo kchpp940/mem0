@@ -28,12 +28,23 @@ from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
 from mem0.memory.notices import (
-    detect_decay_usage_from_delete,
-    detect_decay_usage_from_delete_all,
+    PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,  # noqa: F401
+    detect_decay_usage_from_delete,  # noqa: F401
+    detect_decay_usage_from_delete_all,  # noqa: F401
+    detect_scale_threshold_from_add_result,  # noqa: F401
+    detect_scale_threshold_from_top_k,  # noqa: F401
     detect_temporal_usage_from_metadata,
     detect_temporal_usage_from_search,
-    display_first_run_notice,
-    display_first_run_notice_async,
+    display_decay_usage_notice,  # noqa: F401
+    display_decay_usage_notice_async,  # noqa: F401
+    display_first_run_notice,  # noqa: F401
+    display_first_run_notice_async,  # noqa: F401
+    display_performance_slow_query_notice,  # noqa: F401
+    display_performance_slow_query_notice_async,  # noqa: F401
+    display_scale_threshold_notice,  # noqa: F401
+    display_scale_threshold_notice_async,  # noqa: F401
+    display_temporal_usage_notice,  # noqa: F401
+    display_temporal_usage_notice_async,  # noqa: F401
     get_decay_feature_error_message,
     get_decay_feature_error_message_async,
     get_temporal_feature_error_message,
@@ -712,7 +723,7 @@ class Memory(MemoryBase):
             metadata=metadata,
             expires=expires,
             ttl_days=ttl_days,
-            config=self.config,
+            config=getattr(self, "config", None),
             sync_type="sync",
         )
 
@@ -2100,7 +2111,7 @@ class AsyncMemory(MemoryBase):
             results = await self._create_procedural_memory(
                 messages, metadata=ctx.metadata, prompt=prompt, llm=llm
             )
-            notice_type, notice_args = OperationLifecycle.detect_add_notices(
+            notice_type, notice_args = await OperationLifecycle.detect_add_notices_async(
                 self, results, temporal_usage_notice
             )
             await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
@@ -2114,7 +2125,7 @@ class AsyncMemory(MemoryBase):
         vector_store_result = await self._add_to_vector_store(
             messages, ctx.metadata, ctx.filters, infer, prompt=prompt
         )
-        notice_type, notice_args = OperationLifecycle.detect_add_notices(
+        notice_type, notice_args = await OperationLifecycle.detect_add_notices_async(
             self, vector_store_result, temporal_usage_notice
         )
         await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")

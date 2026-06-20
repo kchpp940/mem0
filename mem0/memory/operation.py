@@ -19,6 +19,7 @@ from mem0.memory.lifecycle import (
     annotate_memory_result,
     resolve_expiration,
 )
+from mem0.memory.operation_hooks import MemoryHooks, get_default_hooks
 from mem0.memory.utils import process_telemetry_filters
 
 
@@ -509,44 +510,41 @@ class OperationLifecycle:
     - Capturing telemetry events with consistent payloads
     - Displaying usage notices (first run, scale thresholds, temporal/decay features)
     - Timing operations for performance monitoring
+
+    Uses the MemoryHooks interface to avoid circular imports with main.py.
+    The default hooks implementation lives in operation_hooks.py.
     """
 
-    @staticmethod
-    def capture_event(event_name: str, memory_instance, ctx: MemoryRequestContext, **extra) -> None:
+    def __init__(self, hooks: Optional[MemoryHooks] = None):
+        self._hooks = hooks or get_default_hooks()
+
+    @property
+    def hooks(self) -> MemoryHooks:
+        return self._hooks
+
+    def capture_event(
+        self, event_name: str, memory_instance, ctx: MemoryRequestContext, **extra
+    ) -> None:
         """Capture a telemetry event with context-derived payload."""
-        from mem0.memory.telemetry import capture_event
-
         payload = ctx.telemetry_payload(**extra)
-        capture_event(event_name, memory_instance, payload)
+        self._hooks.capture_telemetry(event_name, memory_instance, payload)
 
-    @staticmethod
-    def detect_add_notices(memory_instance, results: list, temporal_notice: Optional[tuple] = None):
+    def detect_add_notices(
+        self, memory_instance, results: list, temporal_notice: Optional[tuple] = None
+    ):
         """Detect and return the appropriate notice for an add operation."""
-        from mem0.memory.main import detect_scale_threshold_from_add_result
+        return self._hooks.detect_add_notice(memory_instance, results, temporal_notice)
 
-        if temporal_notice:
-            return "temporal", temporal_notice
-        scale_notice = detect_scale_threshold_from_add_result(memory_instance, results)
-        if scale_notice:
-            return "scale", scale_notice
-        return "first_run", None
-
-    @staticmethod
-    async def detect_add_notices_async(memory_instance, results: list, temporal_notice: Optional[tuple] = None):
+    async def detect_add_notices_async(
+        self, memory_instance, results: list, temporal_notice: Optional[tuple] = None
+    ):
         """Detect and return the appropriate notice for an async add operation (scale detection in thread)."""
-        import asyncio
+        return await self._hooks.detect_add_notice_async(
+            memory_instance, results, temporal_notice
+        )
 
-        from mem0.memory.main import detect_scale_threshold_from_add_result
-
-        if temporal_notice:
-            return "temporal", temporal_notice
-        scale_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, memory_instance, results)
-        if scale_notice:
-            return "scale", scale_notice
-        return "first_run", None
-
-    @staticmethod
     def detect_search_notices(
+        self,
         memory_instance,
         top_k: int,
         elapsed_seconds: float,
@@ -554,46 +552,24 @@ class OperationLifecycle:
         temporal_notice: Optional[tuple] = None,
     ):
         """Detect and return the appropriate notice for a search operation."""
-        from mem0.memory.main import (
-            PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,
-            detect_scale_threshold_from_top_k,
+        return self._hooks.detect_search_notice(
+            memory_instance, top_k, elapsed_seconds, result_count, temporal_notice
         )
 
-        if temporal_notice:
-            return "temporal", temporal_notice
-        scale_notice = detect_scale_threshold_from_top_k(top_k)
-        if scale_notice:
-            return "scale", scale_notice
-        if elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-            return "performance", (elapsed_seconds, top_k, result_count)
-        return "first_run", None
-
-    @staticmethod
-    def detect_get_all_notices(memory_instance, top_k: int):
+    def detect_get_all_notices(self, memory_instance, top_k: int):
         """Detect and return the appropriate notice for a get_all operation."""
-        from mem0.memory.main import detect_scale_threshold_from_top_k
+        return self._hooks.detect_get_all_notice(memory_instance, top_k)
 
-        scale_notice = detect_scale_threshold_from_top_k(top_k)
-        if scale_notice:
-            return "scale", scale_notice
-        return "first_run", None
-
-    @staticmethod
-    def detect_delete_notices(decay_notice: Optional[tuple] = None):
+    def detect_delete_notices(self, decay_notice: Optional[tuple] = None):
         """Detect and return the appropriate notice for a delete operation."""
-        if decay_notice:
-            return "decay", decay_notice
-        return "first_run", None
+        return self._hooks.detect_delete_notice(decay_notice)
 
-    @staticmethod
-    def detect_delete_all_notices(decay_notice: Optional[tuple] = None):
+    def detect_delete_all_notices(self, decay_notice: Optional[tuple] = None):
         """Detect and return the appropriate notice for a delete_all operation."""
-        if decay_notice:
-            return "decay", decay_notice
-        return "first_run", None
+        return self._hooks.detect_delete_all_notice(decay_notice)
 
-    @staticmethod
     def dispatch_notice(
+        self,
         memory_instance,
         notice_type: str,
         notice_args: tuple,
@@ -601,27 +577,12 @@ class OperationLifecycle:
         operation: str,
     ) -> None:
         """Dispatch a notice to the appropriate display function (sync)."""
-        from mem0.memory.main import (
-            display_decay_usage_notice,
-            display_first_run_notice,
-            display_performance_slow_query_notice,
-            display_scale_threshold_notice,
-            display_temporal_usage_notice,
+        self._hooks.dispatch_notice(
+            memory_instance, notice_type, notice_args, sync_type, operation
         )
 
-        if notice_type == "temporal":
-            display_temporal_usage_notice(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "scale":
-            display_scale_threshold_notice(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "performance":
-            display_performance_slow_query_notice(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "decay":
-            display_decay_usage_notice(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "first_run":
-            display_first_run_notice(memory_instance, sync_type, operation)
-
-    @staticmethod
     async def dispatch_notice_async(
+        self,
         memory_instance,
         notice_type: str,
         notice_args: tuple,
@@ -629,29 +590,6 @@ class OperationLifecycle:
         operation: str,
     ) -> None:
         """Dispatch a notice to the appropriate display function (async)."""
-        import asyncio
-        from mem0.memory.main import (
-            display_decay_usage_notice_async,
-            display_first_run_notice_async,
-            display_performance_slow_query_notice_async,
-            display_scale_threshold_notice_async,
-            display_temporal_usage_notice_async,
-            detect_scale_threshold_from_add_result,
+        await self._hooks.dispatch_notice_async(
+            memory_instance, notice_type, notice_args, sync_type, operation
         )
-
-        if notice_type == "temporal":
-            await display_temporal_usage_notice_async(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "scale":
-            scale_notice = await asyncio.to_thread(
-                detect_scale_threshold_from_add_result, memory_instance, notice_args
-            ) if isinstance(notice_args, list) else notice_args
-            if isinstance(notice_args, list):
-                await display_scale_threshold_notice_async(memory_instance, sync_type, operation, *scale_notice)
-            else:
-                await display_scale_threshold_notice_async(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "performance":
-            await display_performance_slow_query_notice_async(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "decay":
-            await display_decay_usage_notice_async(memory_instance, sync_type, operation, *notice_args)
-        elif notice_type == "first_run":
-            await display_first_run_notice_async(memory_instance, sync_type, operation)

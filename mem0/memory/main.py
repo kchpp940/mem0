@@ -414,6 +414,7 @@ class _AsyncOSSProject:
 class Memory(MemoryBase):
     def __init__(self, config: MemoryConfig = MemoryConfig()):
         self.config = config
+        self._lifecycle = OperationLifecycle()
 
         self.embedding_model = EmbedderFactory.create(
             self.config.embedder.provider,
@@ -477,6 +478,22 @@ class Memory(MemoryBase):
             )
 
         capture_event("mem0.init", self, {"sync_type": "sync"})
+
+    @property
+    def _lifecycle(self) -> OperationLifecycle:
+        """Lazily initialized OperationLifecycle instance.
+
+        This property ensures that _lifecycle is always available, even when
+        the instance is created via __new__ (bypassing __init__) as some
+        tests do. The instance is cached after first access.
+        """
+        if not hasattr(self, "_lifecycle_instance"):
+            object.__setattr__(self, "_lifecycle_instance", OperationLifecycle())
+        return self._lifecycle_instance
+
+    @_lifecycle.setter
+    def _lifecycle(self, value: OperationLifecycle) -> None:
+        object.__setattr__(self, "_lifecycle_instance", value)
 
     @property
     def project(self):
@@ -751,10 +768,10 @@ class Memory(MemoryBase):
 
         if ctx.agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
             results = self._create_procedural_memory(messages, metadata=ctx.metadata, prompt=prompt)
-            notice_type, notice_args = OperationLifecycle.detect_add_notices(
+            notice_type, notice_args = self._lifecycle.detect_add_notices(
                 self, results, temporal_usage_notice
             )
-            OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "add")
+            self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "add")
             return results
 
         if self.config.llm.config.get("enable_vision"):
@@ -765,10 +782,10 @@ class Memory(MemoryBase):
         vector_store_result = self._add_to_vector_store(
             messages, ctx.metadata, ctx.filters, infer, prompt=prompt
         )
-        notice_type, notice_args = OperationLifecycle.detect_add_notices(
+        notice_type, notice_args = self._lifecycle.detect_add_notices(
             self, vector_store_result, temporal_usage_notice
         )
-        OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "add")
+        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "add")
         return ResultFormatter.wrap_results(vector_store_result)
 
     def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
@@ -1167,12 +1184,12 @@ class Memory(MemoryBase):
         )
         limit = ctx.extra["top_k"]
 
-        OperationLifecycle.capture_event("mem0.get_all", self, ctx, limit=limit)
+        self._lifecycle.capture_event("mem0.get_all", self, ctx, limit=limit)
 
         all_memories_result = self._get_all_from_vector_store(ctx.filters, limit)
 
-        notice_type, notice_args = OperationLifecycle.detect_get_all_notices(self, top_k)
-        OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "get_all")
+        notice_type, notice_args = self._lifecycle.detect_get_all_notices(self, top_k)
+        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "get_all")
         return ResultFormatter.wrap_results(all_memories_result)
 
     def _get_all_from_vector_store(self, filters, limit):
@@ -1257,7 +1274,7 @@ class Memory(MemoryBase):
                     effective_filters.pop(fk, None)
             effective_filters.update(processed_filters)
 
-        OperationLifecycle.capture_event(
+        self._lifecycle.capture_event(
             "mem0.search",
             self,
             ctx,
@@ -1279,10 +1296,10 @@ class Memory(MemoryBase):
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
 
-        notice_type, notice_args = OperationLifecycle.detect_search_notices(
+        notice_type, notice_args = self._lifecycle.detect_search_notices(
             self, top_k, search_elapsed_seconds, len(original_memories), temporal_usage_notice
         )
-        OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "search")
+        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "search")
         return ResultFormatter.wrap_results(original_memories)
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
@@ -1553,8 +1570,8 @@ class Memory(MemoryBase):
         existing_embeddings = {data: self.embedding_model.embed(data, "update")}
 
         self._update_memory(memory_id, data, existing_embeddings, metadata)
-        notice_type, notice_args = OperationLifecycle.detect_delete_notices()
-        OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "update")
+        notice_type, notice_args = self._lifecycle.detect_delete_notices()
+        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "update")
         return {"message": "Memory updated successfully!"}
 
     def delete(self, memory_id):
@@ -1572,8 +1589,8 @@ class Memory(MemoryBase):
 
         self._delete_memory(memory_id, existing_memory)
         decay_usage_notice = detect_decay_usage_from_delete()
-        notice_type, notice_args = OperationLifecycle.detect_delete_notices(decay_usage_notice)
-        OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "delete")
+        notice_type, notice_args = self._lifecycle.detect_delete_notices(decay_usage_notice)
+        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "delete")
         return {"message": "Memory deleted successfully!"}
 
     def delete_all(self, user_id: Optional[str] = None, agent_id: Optional[str] = None, run_id: Optional[str] = None):
@@ -1598,7 +1615,7 @@ class Memory(MemoryBase):
             operation="delete_all",
             sync_type="sync",
         )
-        OperationLifecycle.capture_event("mem0.delete_all", self, ctx)
+        self._lifecycle.capture_event("mem0.delete_all", self, ctx)
 
         memories = self.vector_store.list(filters=effective_filters)[0]
         for memory in memories:
@@ -1607,8 +1624,8 @@ class Memory(MemoryBase):
         logger.info(f"Deleted {len(memories)} memories")
 
         decay_usage_notice = detect_decay_usage_from_delete_all(len(memories))
-        notice_type, notice_args = OperationLifecycle.detect_delete_all_notices(decay_usage_notice)
-        OperationLifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "delete_all")
+        notice_type, notice_args = self._lifecycle.detect_delete_all_notices(decay_usage_notice)
+        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "delete_all")
         return {"message": "Memories deleted successfully!"}
 
     def history(self, memory_id):
@@ -1833,6 +1850,7 @@ class Memory(MemoryBase):
 class AsyncMemory(MemoryBase):
     def __init__(self, config: MemoryConfig = MemoryConfig()):
         self.config = config
+        self._lifecycle = OperationLifecycle()
 
         self.embedding_model = EmbedderFactory.create(
             self.config.embedder.provider,
@@ -1876,6 +1894,22 @@ class AsyncMemory(MemoryBase):
             )
 
         capture_event("mem0.init", self, {"sync_type": "async"})
+
+    @property
+    def _lifecycle(self) -> OperationLifecycle:
+        """Lazily initialized OperationLifecycle instance.
+
+        This property ensures that _lifecycle is always available, even when
+        the instance is created via __new__ (bypassing __init__) as some
+        tests do. The instance is cached after first access.
+        """
+        if not hasattr(self, "_lifecycle_instance"):
+            object.__setattr__(self, "_lifecycle_instance", OperationLifecycle())
+        return self._lifecycle_instance
+
+    @_lifecycle.setter
+    def _lifecycle(self, value: OperationLifecycle) -> None:
+        object.__setattr__(self, "_lifecycle_instance", value)
 
     @property
     def project(self):
@@ -2111,10 +2145,10 @@ class AsyncMemory(MemoryBase):
             results = await self._create_procedural_memory(
                 messages, metadata=ctx.metadata, prompt=prompt, llm=llm
             )
-            notice_type, notice_args = await OperationLifecycle.detect_add_notices_async(
+            notice_type, notice_args = await self._lifecycle.detect_add_notices_async(
                 self, results, temporal_usage_notice
             )
-            await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
+            await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
             return results
 
         if self.config.llm.config.get("enable_vision"):
@@ -2125,10 +2159,10 @@ class AsyncMemory(MemoryBase):
         vector_store_result = await self._add_to_vector_store(
             messages, ctx.metadata, ctx.filters, infer, prompt=prompt
         )
-        notice_type, notice_args = await OperationLifecycle.detect_add_notices_async(
+        notice_type, notice_args = await self._lifecycle.detect_add_notices_async(
             self, vector_store_result, temporal_usage_notice
         )
-        await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
+        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
         return ResultFormatter.wrap_results(vector_store_result)
 
     async def _add_to_vector_store(
@@ -2526,12 +2560,12 @@ class AsyncMemory(MemoryBase):
         )
         limit = ctx.extra["top_k"]
 
-        OperationLifecycle.capture_event("mem0.get_all", self, ctx, limit=limit)
+        self._lifecycle.capture_event("mem0.get_all", self, ctx, limit=limit)
 
         all_memories_result = await self._get_all_from_vector_store(ctx.filters, limit)
 
-        notice_type, notice_args = OperationLifecycle.detect_get_all_notices(self, top_k)
-        await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "get_all")
+        notice_type, notice_args = self._lifecycle.detect_get_all_notices(self, top_k)
+        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "get_all")
         return ResultFormatter.wrap_results(all_memories_result)
 
     async def _get_all_from_vector_store(self, filters, limit):
@@ -2618,7 +2652,7 @@ class AsyncMemory(MemoryBase):
                     effective_filters.pop(fk, None)
             effective_filters.update(processed_filters)
 
-        OperationLifecycle.capture_event(
+        self._lifecycle.capture_event(
             "mem0.search",
             self,
             ctx,
@@ -2642,10 +2676,10 @@ class AsyncMemory(MemoryBase):
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
 
-        notice_type, notice_args = OperationLifecycle.detect_search_notices(
+        notice_type, notice_args = self._lifecycle.detect_search_notices(
             self, top_k, search_elapsed_seconds, len(original_memories), temporal_usage_notice
         )
-        await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "search")
+        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "search")
         return ResultFormatter.wrap_results(original_memories)
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
@@ -2908,8 +2942,8 @@ class AsyncMemory(MemoryBase):
         existing_embeddings = {data: embeddings}
 
         await self._update_memory(memory_id, data, existing_embeddings, metadata)
-        notice_type, notice_args = OperationLifecycle.detect_delete_notices()
-        await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "update")
+        notice_type, notice_args = self._lifecycle.detect_delete_notices()
+        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "update")
         return {"message": "Memory updated successfully!"}
 
     async def delete(self, memory_id):
@@ -2927,8 +2961,8 @@ class AsyncMemory(MemoryBase):
 
         await self._delete_memory(memory_id, existing_memory)
         decay_usage_notice = detect_decay_usage_from_delete()
-        notice_type, notice_args = OperationLifecycle.detect_delete_notices(decay_usage_notice)
-        await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "delete")
+        notice_type, notice_args = self._lifecycle.detect_delete_notices(decay_usage_notice)
+        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "delete")
         return {"message": "Memory deleted successfully!"}
 
     async def delete_all(self, user_id=None, agent_id=None, run_id=None):
@@ -2953,7 +2987,7 @@ class AsyncMemory(MemoryBase):
             operation="delete_all",
             sync_type="async",
         )
-        OperationLifecycle.capture_event("mem0.delete_all", self, ctx)
+        self._lifecycle.capture_event("mem0.delete_all", self, ctx)
 
         memories = await asyncio.to_thread(self.vector_store.list, filters=effective_filters)
 
@@ -2972,8 +3006,8 @@ class AsyncMemory(MemoryBase):
         logger.info(f"Deleted {len(results) - len(errors)} memories")
 
         decay_usage_notice = detect_decay_usage_from_delete_all(len(memories[0]))
-        notice_type, notice_args = OperationLifecycle.detect_delete_all_notices(decay_usage_notice)
-        await OperationLifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "delete_all")
+        notice_type, notice_args = self._lifecycle.detect_delete_all_notices(decay_usage_notice)
+        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "delete_all")
         return {"message": "Memories deleted successfully!"}
 
     async def history(self, memory_id):
@@ -3217,3 +3251,11 @@ class AsyncMemory(MemoryBase):
 
     async def chat(self, query):
         raise NotImplementedError("Chat function not implemented yet.")
+
+
+# Configure the default hooks to look up notice functions from this module.
+# This enables test compatibility: tests can use monkeypatch on
+# mem0.memory.main to intercept notice function calls.
+from mem0.memory.operation_hooks import DefaultMemoryHooks  # noqa: E402
+
+DefaultMemoryHooks.set_notice_module("mem0.memory.main")

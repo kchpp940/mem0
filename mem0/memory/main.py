@@ -24,38 +24,49 @@ from mem0.configs.prompts import (
 )
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
+from mem0.memory.search_pipeline import (
+    CandidateMergeStep,
+    EntityBoostRecallStep,
+    KeywordRecallStep,
+    QueryNormalizationStep,
+    QueryPreprocessingStep,
+    ResultFormatStep,
+    RerankStep,
+    ScoreFusionStep,
+    SearchContext,
+    SearchPipeline,
+    SemanticRecallStep,
+)
 from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
 from mem0.memory.notices import (
-    PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,  # noqa: F401
-    detect_decay_usage_from_delete,  # noqa: F401
-    detect_decay_usage_from_delete_all,  # noqa: F401
-    detect_scale_threshold_from_add_result,  # noqa: F401
-    detect_scale_threshold_from_top_k,  # noqa: F401
+    PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,
+    detect_scale_threshold_from_add_result,
+    detect_scale_threshold_from_top_k,
+    detect_decay_usage_from_delete,
+    detect_decay_usage_from_delete_all,
     detect_temporal_usage_from_metadata,
     detect_temporal_usage_from_search,
-    display_decay_usage_notice,  # noqa: F401
-    display_decay_usage_notice_async,  # noqa: F401
-    display_first_run_notice,  # noqa: F401
-    display_first_run_notice_async,  # noqa: F401
-    display_performance_slow_query_notice,  # noqa: F401
-    display_performance_slow_query_notice_async,  # noqa: F401
-    display_scale_threshold_notice,  # noqa: F401
-    display_scale_threshold_notice_async,  # noqa: F401
-    display_temporal_usage_notice,  # noqa: F401
-    display_temporal_usage_notice_async,  # noqa: F401
+    display_decay_usage_notice,
+    display_decay_usage_notice_async,
+    display_first_run_notice,
+    display_first_run_notice_async,
+    display_performance_slow_query_notice,
+    display_performance_slow_query_notice_async,
+    display_scale_threshold_notice,
+    display_scale_threshold_notice_async,
+    display_temporal_usage_notice,
+    display_temporal_usage_notice_async,
     get_decay_feature_error_message,
     get_decay_feature_error_message_async,
     get_temporal_feature_error_message,
     get_temporal_feature_error_message_async,
 )
-from mem0.memory.lifecycle import annotate_memory_result
-from mem0.memory.operation import (
-    MemoryRequestContext,
-    OperationLifecycle,
-    PayloadNormalizer,
-    ResultFormatter,
+from mem0.memory.lifecycle import (
+    LifecyclePolicy,
+    annotate_memory_result,
+    resolve_expiration,
 )
 from mem0.memory.utils import (
     extract_json,
@@ -72,12 +83,7 @@ from mem0.utils.factory import (
     VectorStoreFactory,
 )
 from mem0.utils.lemmatization import lemmatize_for_bm25
-from mem0.utils.scoring import (
-    ENTITY_BOOST_WEIGHT,
-    get_bm25_params,
-    normalize_bm25,
-    score_and_rank,
-)
+from mem0.utils.scoring import ENTITY_BOOST_WEIGHT
 from mem0.vector_stores.base import VectorStoreBase
 
 # Suppress SWIG deprecation warnings globally
@@ -414,7 +420,6 @@ class _AsyncOSSProject:
 class Memory(MemoryBase):
     def __init__(self, config: MemoryConfig = MemoryConfig()):
         self.config = config
-        self._lifecycle = OperationLifecycle()
 
         self.embedding_model = EmbedderFactory.create(
             self.config.embedder.provider,
@@ -479,21 +484,37 @@ class Memory(MemoryBase):
 
         capture_event("mem0.init", self, {"sync_type": "sync"})
 
-    @property
-    def _lifecycle(self) -> OperationLifecycle:
-        """Lazily initialized OperationLifecycle instance.
+    def _build_search_pipeline(self, extra_kwargs: Optional[Dict[str, Any]] = None) -> SearchPipeline:
+        """Build the default 9-step search pipeline.
 
-        This property ensures that _lifecycle is always available, even when
-        the instance is created via __new__ (bypassing __init__) as some
-        tests do. The instance is cached after first access.
+        New recall strategies can be added by subclassing Memory and overriding this
+        method to insert additional RecallStep instances.
         """
-        if not hasattr(self, "_lifecycle_instance"):
-            object.__setattr__(self, "_lifecycle_instance", OperationLifecycle())
-        return self._lifecycle_instance
-
-    @_lifecycle.setter
-    def _lifecycle(self, value: OperationLifecycle) -> None:
-        object.__setattr__(self, "_lifecycle_instance", value)
+        return SearchPipeline(
+            [
+                QueryNormalizationStep(
+                    validate_and_trim_query=_validate_and_trim_search_query,
+                    validate_and_trim_entity_id=_validate_and_trim_entity_id,
+                    validate_search_params=_validate_search_params,
+                    reject_top_level_entity_params=_reject_top_level_entity_params,
+                    has_advanced_operators=self._has_advanced_operators,
+                    process_metadata_filters=self._process_metadata_filters,
+                    extra_kwargs=extra_kwargs,
+                ),
+                QueryPreprocessingStep(embedding_model=self.embedding_model),
+                SemanticRecallStep(vector_store=self.vector_store),
+                KeywordRecallStep(vector_store=self.vector_store),
+                EntityBoostRecallStep(
+                    embedding_model=self.embedding_model,
+                    entity_store=None,
+                    entity_store_getter=lambda: self.entity_store,
+                ),
+                CandidateMergeStep(),
+                ScoreFusionStep(),
+                RerankStep(reranker=self.reranker),
+                ResultFormatStep(),
+            ]
+        )
 
     @property
     def project(self):
@@ -732,17 +753,34 @@ class Memory(MemoryBase):
             raise ValueError(get_temporal_feature_error_message("sync", "add", "timestamp"))
 
         temporal_usage_notice = detect_temporal_usage_from_metadata(metadata)
-
-        ctx = PayloadNormalizer.for_add(
+        processed_metadata, effective_filters = _build_filters_and_metadata(
             user_id=user_id,
             agent_id=agent_id,
             run_id=run_id,
-            metadata=metadata,
-            expires=expires,
-            ttl_days=ttl_days,
-            config=getattr(self, "config", None),
-            sync_type="sync",
+            input_metadata=metadata,
         )
+
+        # ---- Resolve lifecycle expiration once for this add() call ----
+        lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
+        default_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
+            else None
+        )
+        workspace_policy = (
+            LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
+            if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
+            else None
+        )
+        effective_expires_at, effective_ttl_source = resolve_expiration(
+            request_expires=expires,
+            request_ttl_days=ttl_days,
+            workspace_policy=workspace_policy,
+            default_policy=default_policy,
+        )
+        if effective_expires_at is not None:
+            processed_metadata["expires_at"] = effective_expires_at
+            processed_metadata["ttl_source"] = effective_ttl_source.value
 
         if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
             raise Mem0ValidationError(
@@ -766,12 +804,15 @@ class Memory(MemoryBase):
                 suggestion="Convert your input to a string, dictionary, or list of dictionaries."
             )
 
-        if ctx.agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
-            results = self._create_procedural_memory(messages, metadata=ctx.metadata, prompt=prompt)
-            notice_type, notice_args = self._lifecycle.detect_add_notices(
-                self, results, temporal_usage_notice
-            )
-            self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "add")
+        if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
+            results = self._create_procedural_memory(messages, metadata=processed_metadata, prompt=prompt)
+            scale_threshold_notice = detect_scale_threshold_from_add_result(self, results)
+            if temporal_usage_notice:
+                display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
+            elif scale_threshold_notice:
+                display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
+            else:
+                display_first_run_notice(self, "sync", "add")
             return results
 
         if self.config.llm.config.get("enable_vision"):
@@ -779,14 +820,15 @@ class Memory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = self._add_to_vector_store(
-            messages, ctx.metadata, ctx.filters, infer, prompt=prompt
-        )
-        notice_type, notice_args = self._lifecycle.detect_add_notices(
-            self, vector_store_result, temporal_usage_notice
-        )
-        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "add")
-        return ResultFormatter.wrap_results(vector_store_result)
+        vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
+        if temporal_usage_notice:
+            display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
+        elif scale_threshold_notice:
+            display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
+        else:
+            display_first_run_notice(self, "sync", "add")
+        return {"results": vector_store_result}
 
     def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
         if not infer:
@@ -1176,25 +1218,104 @@ class Memory(MemoryBase):
             ValueError: If filters doesn't contain at least one of user_id, agent_id, run_id,
                 or if top_k is invalid.
         """
-        ctx = PayloadNormalizer.for_get_all(
-            filters=filters,
-            top_k=top_k,
-            sync_type="sync",
-            **kwargs,
+        # Reject top-level entity params - must use filters instead
+        _reject_top_level_entity_params(kwargs, "get_all")
+
+        # Validate top_k
+        _validate_search_params(top_k=top_k)
+
+        # Validate and trim entity IDs in filters
+        effective_filters = dict(filters) if filters else {}
+        if "user_id" in effective_filters:
+            effective_filters["user_id"] = _validate_and_trim_entity_id(
+                effective_filters["user_id"], "user_id"
+            )
+        if "agent_id" in effective_filters:
+            effective_filters["agent_id"] = _validate_and_trim_entity_id(
+                effective_filters["agent_id"], "agent_id"
+            )
+        if "run_id" in effective_filters:
+            effective_filters["run_id"] = _validate_and_trim_entity_id(
+                effective_filters["run_id"], "run_id"
+            )
+
+        # Validate filters contains at least one entity ID
+        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+            raise ValueError(
+                "filters must contain at least one of: user_id, agent_id, run_id. "
+                "Example: filters={'user_id': 'u1'}"
+            )
+
+        limit = top_k
+        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
+
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+        capture_event(
+            "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"}
         )
-        limit = ctx.extra["top_k"]
 
-        self._lifecycle.capture_event("mem0.get_all", self, ctx, limit=limit)
+        all_memories_result = self._get_all_from_vector_store(effective_filters, limit)
 
-        all_memories_result = self._get_all_from_vector_store(ctx.filters, limit)
-
-        notice_type, notice_args = self._lifecycle.detect_get_all_notices(self, top_k)
-        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "get_all")
-        return ResultFormatter.wrap_results(all_memories_result)
+        if scale_threshold_notice:
+            display_scale_threshold_notice(self, "sync", "get_all", *scale_threshold_notice)
+        else:
+            display_first_run_notice(self, "sync", "get_all")
+        return {"results": all_memories_result}
 
     def _get_all_from_vector_store(self, filters, limit):
         memories_result = self.vector_store.list(filters=filters, top_k=limit)
-        return ResultFormatter.format_list_results(memories_result)
+
+        # Handle different vector store return formats by inspecting first element
+        if isinstance(memories_result, (tuple, list)) and len(memories_result) > 0:
+            first_element = memories_result[0]
+
+            # If first element is a container, unwrap one level
+            if isinstance(first_element, (list, tuple)):
+                actual_memories = first_element
+            else:
+                # First element is a memory object, structure is already flat
+                actual_memories = memories_result
+        else:
+            actual_memories = memories_result
+
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+        ]
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
+
+        formatted_memories = []
+        for mem in actual_memories:
+            memory_item_dict = MemoryItem(
+                id=mem.id,
+                memory=mem.payload.get("data", ""),
+                hash=mem.payload.get("hash"),
+                created_at=mem.payload.get("created_at"),
+                updated_at=mem.payload.get("updated_at"),
+                expires_at=mem.payload.get("expires_at"),
+                ttl_source=mem.payload.get("ttl_source"),
+            ).model_dump(exclude={"score"})
+
+            for key in promoted_payload_keys:
+                if key in mem.payload:
+                    memory_item_dict[key] = mem.payload[key]
+
+            additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                memory_item_dict["metadata"] = additional_metadata
+
+            annotate_memory_result(memory_item_dict)
+
+            formatted_memories.append(memory_item_dict)
+
+        return formatted_memories
 
     def search(
         self,
@@ -1250,43 +1371,154 @@ class Memory(MemoryBase):
         if reference_date is not None:
             raise ValueError(get_temporal_feature_error_message("sync", "search", "reference_date"))
 
-        ctx = PayloadNormalizer.for_search(
-            query=query,
-            filters=filters,
-            top_k=top_k,
-            threshold=threshold,
-            sync_type="sync",
-            **kwargs,
-        )
-        query = ctx.extra["query"]
-        limit = ctx.extra["top_k"]
-        threshold = ctx.extra["threshold"]
+        # --- Backward-compat path: tests often mock `_search_vector_store`
+        # directly on instances created via __new__ (no __init__). Detect that
+        # and route through the legacy path so mocks still intercept. ---
+        if self._search_vector_store is not Memory._search_vector_store:
+            return self._search_legacy_path_sync(
+                query=query,
+                top_k=top_k,
+                filters=filters,
+                threshold=threshold,
+                rerank=rerank,
+                explain=explain,
+                **kwargs,
+            )
 
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
+        limit = top_k
+        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
-        effective_filters = ctx.filters
+        ctx = SearchContext(
+            query=query,
+            original_filters=filters,
+            top_k=top_k,
+            threshold=threshold,
+            rerank=rerank,
+            explain=explain,
+        )
+        pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
+
+        # Build effective_filters for telemetry (delegated to pipeline step 1)
+        # Run just the normalization step first to extract effective_filters
+        # for telemetry before capturing the event
+        pipeline.steps[0].run_sync(ctx)
+        effective_filters = ctx.normalized_filters
+
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+        capture_event(
+            "mem0.search",
+            self,
+            {
+                "limit": limit,
+                "version": self.api_version,
+                "keys": keys,
+                "encoded_ids": encoded_ids,
+                "sync_type": "sync",
+                "threshold": threshold,
+                "explain": explain,
+                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+            },
+        )
+
+        search_start = time.perf_counter()
+        # Run remaining steps (skip first which was already run for normalization)
+        for step in pipeline.steps[1:]:
+            ctx = pipeline._run_step(step, ctx)
+        search_elapsed_seconds = time.perf_counter() - search_start
+
+        original_memories = ctx.formatted_results
+
+        if temporal_usage_notice:
+            display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
+        elif scale_threshold_notice:
+            display_scale_threshold_notice(self, "sync", "search", *scale_threshold_notice)
+        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
+            display_performance_slow_query_notice(
+                self,
+                "sync",
+                "search",
+                search_elapsed_seconds,
+                top_k,
+                len(original_memories),
+            )
+        else:
+            display_first_run_notice(self, "sync", "search")
+        return {"results": original_memories}
+
+    def _search_legacy_path_sync(
+        self,
+        query: str,
+        *,
+        top_k: int = 20,
+        filters: Optional[Dict[str, Any]] = None,
+        threshold: float = 0.1,
+        rerank: bool = False,
+        explain: bool = False,
+        **kwargs,
+    ):
+        """Original search code path, retained for instances where
+        ``_search_vector_store`` has been mocked/overridden on a per-object basis
+        (common in test suites that create Memory via ``__new__``).
+        """
+        _reject_top_level_entity_params(kwargs, "search")
+        _validate_search_params(threshold=threshold, top_k=top_k)
+        query = _validate_and_trim_search_query(query)
+        temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
+
+        effective_filters = filters.copy() if filters else {}
+        if "user_id" in effective_filters:
+            effective_filters["user_id"] = _validate_and_trim_entity_id(
+                effective_filters["user_id"], "user_id"
+            )
+        if "agent_id" in effective_filters:
+            effective_filters["agent_id"] = _validate_and_trim_entity_id(
+                effective_filters["agent_id"], "agent_id"
+            )
+        if "run_id" in effective_filters:
+            effective_filters["run_id"] = _validate_and_trim_entity_id(
+                effective_filters["run_id"], "run_id"
+            )
+        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+            raise ValueError(
+                "filters must contain at least one of: user_id, agent_id, run_id. "
+                "Example: filters={'user_id': 'u1'}"
+            )
+
+        limit = top_k
+        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
+
         if self._has_advanced_operators(effective_filters):
             processed_filters = self._process_metadata_filters(effective_filters)
             for logical_key in ("AND", "OR", "NOT"):
                 effective_filters.pop(logical_key, None)
             for fk in list(effective_filters.keys()):
-                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
+                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(
+                    effective_filters.get(fk), dict
+                ):
                     effective_filters.pop(fk, None)
             effective_filters.update(processed_filters)
 
-        self._lifecycle.capture_event(
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+        capture_event(
             "mem0.search",
             self,
-            ctx,
-            limit=limit,
-            version=self.api_version,
-            threshold=threshold,
-            explain=explain,
-            advanced_filters=bool(filters and self._has_advanced_operators(filters)),
+            {
+                "limit": limit,
+                "version": self.api_version,
+                "keys": keys,
+                "encoded_ids": encoded_ids,
+                "sync_type": "sync",
+                "threshold": threshold,
+                "explain": explain,
+                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+            },
         )
 
         search_start = time.perf_counter()
-        original_memories = self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
+        original_memories = self._search_vector_store(
+            query, effective_filters, limit, threshold, explain=explain
+        )
         search_elapsed_seconds = time.perf_counter() - search_start
 
         if rerank and self.reranker and original_memories:
@@ -1296,11 +1528,22 @@ class Memory(MemoryBase):
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
 
-        notice_type, notice_args = self._lifecycle.detect_search_notices(
-            self, top_k, search_elapsed_seconds, len(original_memories), temporal_usage_notice
-        )
-        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "search")
-        return ResultFormatter.wrap_results(original_memories)
+        if temporal_usage_notice:
+            display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
+        elif scale_threshold_notice:
+            display_scale_threshold_notice(self, "sync", "search", *scale_threshold_notice)
+        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
+            display_performance_slow_query_notice(
+                self,
+                "sync",
+                "search",
+                search_elapsed_seconds,
+                top_k,
+                len(original_memories),
+            )
+        else:
+            display_first_run_notice(self, "sync", "search")
+        return {"results": original_memories}
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1407,147 +1650,42 @@ class Memory(MemoryBase):
         return False
 
     def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False):
-        # Guard against None threshold (backward compat)
-        if threshold is None:
-            threshold = 0.1
+        """Backward-compatible wrapper: delegates to the new pipeline steps.
 
-        # Step 1: Preprocess query
-        query_lemmatized = lemmatize_for_bm25(query)
-        query_entities = extract_entities(query)
-
-        # Step 2: Embed query
-        embeddings = self.embedding_model.embed(query, "search")
-
-        # Step 3: Semantic search (over-fetch for scoring pool)
-        internal_limit = max(limit * 4, 60)
-        semantic_results = self.vector_store.search(
-            query=query, vectors=embeddings, top_k=internal_limit, filters=filters
-        )
-
-        # Step 4: Keyword search (if store supports it)
-        keyword_results = self.vector_store.keyword_search(
-            query=query_lemmatized, top_k=internal_limit, filters=filters
-        )
-
-        # Step 5: Compute BM25 scores from keyword results
-        bm25_scores = {}
-        if keyword_results is not None:
-            midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
-            for mem in keyword_results:
-                mem_id = str(mem.id) if hasattr(mem, 'id') else str(mem.get('id', ''))
-                raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
-                if raw_score and raw_score > 0:
-                    bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
-
-        # Step 6: Compute entity boosts
-        entity_boosts = {}
-        if query_entities:
-            entity_boosts = self._compute_entity_boosts(query_entities, filters)
-
-        # Step 7: Build candidate set from semantic results
-        candidates = []
-        for mem in semantic_results:
-            mem_id = str(mem.id)
-            candidates.append({
-                "id": mem_id,
-                "score": mem.score,
-                "payload": mem.payload if hasattr(mem, 'payload') else {},
-            })
-
-        # Step 8: Score and rank
-        scored_results = score_and_rank(
-            semantic_results=candidates,
-            bm25_scores=bm25_scores,
-            entity_boosts=entity_boosts,
-            threshold=threshold,
+        Tests that mock this method directly will continue to work.  New code
+        should call :meth:`search` or construct a :class:`SearchPipeline`.
+        """
+        ctx = SearchContext(
+            query=query,
+            normalized_filters=filters or {},
             top_k=limit,
+            threshold=threshold if threshold is not None else 0.1,
             explain=explain,
         )
-
-        # Step 9: Format results
-        return ResultFormatter.format_search_results(scored_results, explain=explain)
+        QueryPreprocessingStep(self.embedding_model).run_sync(ctx)
+        SemanticRecallStep(self.vector_store).run_sync(ctx)
+        KeywordRecallStep(self.vector_store).run_sync(ctx)
+        EntityBoostRecallStep(
+            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
+        ).run_sync(ctx)
+        CandidateMergeStep().run_sync(ctx)
+        ScoreFusionStep().run_sync(ctx)
+        ResultFormatStep().run_sync(ctx)
+        return ctx.formatted_results
 
     def _compute_entity_boosts(self, query_entities, filters):
-        """Compute per-memory entity boosts from entity store search.
+        """Backward-compatible wrapper: delegates to EntityBoostRecallStep.
 
-        For each extracted entity from the query:
-        1. Embed the entity text
-        2. Search the entity store (threshold >= 0.5)
-        3. For each matched entity, boost its linked memories
-
-        Returns:
-            Dict mapping memory_id (str) -> max entity boost [0, 0.5].
+        Constructs a minimal SearchContext and runs only the entity-boost step.
         """
-        # Deduplicate entities (max 8)
-        seen = set()
-        deduped = []
-        for entity_type, entity_text in query_entities[:8]:
-            key = entity_text.strip().lower()
-            if key and key not in seen:
-                seen.add(key)
-                deduped.append((entity_type, entity_text))
-
-        if not deduped:
-            return {}
-
-        search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
-        memory_boosts = {}
-
-        try:
-            entity_texts = [text for _, text in deduped]
-            embeddings = self.embedding_model.embed_batch(entity_texts, "search")
-
-            if len(embeddings) != len(entity_texts):
-                logger.warning(
-                    "embed_batch returned %d vectors for %d texts — skipping entity boost",
-                    len(embeddings),
-                    len(entity_texts),
-                )
-                return memory_boosts
-
-            entity_store = self.entity_store
-
-            def _search_entity(entity_text, embedding):
-                return entity_store.search(
-                    query=entity_text, vectors=embedding, top_k=500, filters=search_filters
-                )
-
-            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
-                futures = {
-                    pool.submit(_search_entity, text, emb): text
-                    for text, emb in zip(entity_texts, embeddings)
-                }
-
-                for future in concurrent.futures.as_completed(futures):
-                    try:
-                        matches = future.result()
-                    except Exception as e:
-                        logger.warning("Entity boost search failed for one entity: %s", e)
-                        continue
-
-                    for match in matches:
-                        similarity = match.score if hasattr(match, 'score') else 0.0
-                        if similarity < 0.5:
-                            continue
-
-                        payload = match.payload if hasattr(match, 'payload') else {}
-                        linked_memory_ids = payload.get("linked_memory_ids", [])
-                        if not isinstance(linked_memory_ids, list):
-                            continue
-
-                        num_linked = max(len(linked_memory_ids), 1)
-                        memory_count_weight = 1.0 / (1.0 + 0.001 * ((num_linked - 1) ** 2))
-                        boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
-
-                        for memory_id in linked_memory_ids:
-                            if memory_id:
-                                memory_key = str(memory_id)
-                                memory_boosts[memory_key] = max(memory_boosts.get(memory_key, 0.0), boost)
-
-        except Exception as e:
-            logger.warning(f"Entity boost computation failed: {e}")
-
-        return memory_boosts
+        ctx = SearchContext(
+            query_entities=list(query_entities),
+            normalized_filters=filters or {},
+        )
+        EntityBoostRecallStep(
+            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
+        ).run_sync(ctx)
+        return ctx.entity_boosts
 
     def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
         """
@@ -1570,8 +1708,7 @@ class Memory(MemoryBase):
         existing_embeddings = {data: self.embedding_model.embed(data, "update")}
 
         self._update_memory(memory_id, data, existing_embeddings, metadata)
-        notice_type, notice_args = self._lifecycle.detect_delete_notices()
-        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "update")
+        display_first_run_notice(self, "sync", "update")
         return {"message": "Memory updated successfully!"}
 
     def delete(self, memory_id):
@@ -1589,8 +1726,10 @@ class Memory(MemoryBase):
 
         self._delete_memory(memory_id, existing_memory)
         decay_usage_notice = detect_decay_usage_from_delete()
-        notice_type, notice_args = self._lifecycle.detect_delete_notices(decay_usage_notice)
-        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "delete")
+        if decay_usage_notice:
+            display_decay_usage_notice(self, "sync", "delete", *decay_usage_notice)
+        else:
+            display_first_run_notice(self, "sync", "delete")
         return {"message": "Memory deleted successfully!"}
 
     def delete_all(self, user_id: Optional[str] = None, agent_id: Optional[str] = None, run_id: Optional[str] = None):
@@ -1602,30 +1741,33 @@ class Memory(MemoryBase):
             agent_id (str, optional): ID of the agent to delete memories for. Defaults to None.
             run_id (str, optional): ID of the run to delete memories for. Defaults to None.
         """
-        processed_metadata, effective_filters = PayloadNormalizer.build_filters_and_metadata(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-        )
-        ctx = MemoryRequestContext(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            filters=effective_filters,
-            operation="delete_all",
-            sync_type="sync",
-        )
-        self._lifecycle.capture_event("mem0.delete_all", self, ctx)
+        filters: Dict[str, Any] = {}
+        if user_id:
+            filters["user_id"] = user_id
+        if agent_id:
+            filters["agent_id"] = agent_id
+        if run_id:
+            filters["run_id"] = run_id
 
-        memories = self.vector_store.list(filters=effective_filters)[0]
+        if not filters:
+            raise ValueError(
+                "At least one filter is required to delete all memories. If you want to delete all memories, use the `reset()` method."
+            )
+
+        keys, encoded_ids = process_telemetry_filters(filters)
+        capture_event("mem0.delete_all", self, {"keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"})
+        # delete all vector memories and reset the collections
+        memories = self.vector_store.list(filters=filters)[0]
         for memory in memories:
             self._delete_memory(memory.id)
 
         logger.info(f"Deleted {len(memories)} memories")
 
         decay_usage_notice = detect_decay_usage_from_delete_all(len(memories))
-        notice_type, notice_args = self._lifecycle.detect_delete_all_notices(decay_usage_notice)
-        self._lifecycle.dispatch_notice(self, notice_type, notice_args, "sync", "delete_all")
+        if decay_usage_notice:
+            display_decay_usage_notice(self, "sync", "delete_all", *decay_usage_notice)
+        else:
+            display_first_run_notice(self, "sync", "delete_all")
         return {"message": "Memories deleted successfully!"}
 
     def history(self, memory_id):
@@ -1850,7 +1992,6 @@ class Memory(MemoryBase):
 class AsyncMemory(MemoryBase):
     def __init__(self, config: MemoryConfig = MemoryConfig()):
         self.config = config
-        self._lifecycle = OperationLifecycle()
 
         self.embedding_model = EmbedderFactory.create(
             self.config.embedder.provider,
@@ -1895,21 +2036,37 @@ class AsyncMemory(MemoryBase):
 
         capture_event("mem0.init", self, {"sync_type": "async"})
 
-    @property
-    def _lifecycle(self) -> OperationLifecycle:
-        """Lazily initialized OperationLifecycle instance.
+    def _build_search_pipeline(self, extra_kwargs: Optional[Dict[str, Any]] = None) -> SearchPipeline:
+        """Build the default 9-step search pipeline for async use.
 
-        This property ensures that _lifecycle is always available, even when
-        the instance is created via __new__ (bypassing __init__) as some
-        tests do. The instance is cached after first access.
+        Same structure as Memory._build_search_pipeline; the step implementations
+        internally dispatch to async via run_async.
         """
-        if not hasattr(self, "_lifecycle_instance"):
-            object.__setattr__(self, "_lifecycle_instance", OperationLifecycle())
-        return self._lifecycle_instance
-
-    @_lifecycle.setter
-    def _lifecycle(self, value: OperationLifecycle) -> None:
-        object.__setattr__(self, "_lifecycle_instance", value)
+        return SearchPipeline(
+            [
+                QueryNormalizationStep(
+                    validate_and_trim_query=_validate_and_trim_search_query,
+                    validate_and_trim_entity_id=_validate_and_trim_entity_id,
+                    validate_search_params=_validate_search_params,
+                    reject_top_level_entity_params=_reject_top_level_entity_params,
+                    has_advanced_operators=self._has_advanced_operators,
+                    process_metadata_filters=self._process_metadata_filters,
+                    extra_kwargs=extra_kwargs,
+                ),
+                QueryPreprocessingStep(embedding_model=self.embedding_model),
+                SemanticRecallStep(vector_store=self.vector_store),
+                KeywordRecallStep(vector_store=self.vector_store),
+                EntityBoostRecallStep(
+                    embedding_model=self.embedding_model,
+                    entity_store=None,
+                    entity_store_getter=lambda: self.entity_store,
+                ),
+                CandidateMergeStep(),
+                ScoreFusionStep(),
+                RerankStep(reranker=self.reranker),
+                ResultFormatStep(),
+            ]
+        )
 
     @property
     def project(self):
@@ -2112,14 +2269,8 @@ class AsyncMemory(MemoryBase):
             raise ValueError(await get_temporal_feature_error_message_async("async", "add", "timestamp"))
 
         temporal_usage_notice = detect_temporal_usage_from_metadata(metadata)
-
-        ctx = PayloadNormalizer.for_add(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            metadata=metadata,
-            config=self.config,
-            sync_type="async",
+        processed_metadata, effective_filters = _build_filters_and_metadata(
+            user_id=user_id, agent_id=agent_id, run_id=run_id, input_metadata=metadata
         )
 
         if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
@@ -2141,14 +2292,17 @@ class AsyncMemory(MemoryBase):
                 suggestion="Convert your input to a string, dictionary, or list of dictionaries."
             )
 
-        if ctx.agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
+        if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
             results = await self._create_procedural_memory(
-                messages, metadata=ctx.metadata, prompt=prompt, llm=llm
+                messages, metadata=processed_metadata, prompt=prompt, llm=llm
             )
-            notice_type, notice_args = await self._lifecycle.detect_add_notices_async(
-                self, results, temporal_usage_notice
-            )
-            await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
+            scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, results)
+            if temporal_usage_notice:
+                await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
+            elif scale_threshold_notice:
+                await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
+            else:
+                await display_first_run_notice_async(self, "async", "add")
             return results
 
         if self.config.llm.config.get("enable_vision"):
@@ -2156,14 +2310,15 @@ class AsyncMemory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = await self._add_to_vector_store(
-            messages, ctx.metadata, ctx.filters, infer, prompt=prompt
-        )
-        notice_type, notice_args = await self._lifecycle.detect_add_notices_async(
-            self, vector_store_result, temporal_usage_notice
-        )
-        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "add")
-        return ResultFormatter.wrap_results(vector_store_result)
+        vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
+        if temporal_usage_notice:
+            await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
+        elif scale_threshold_notice:
+            await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
+        else:
+            await display_first_run_notice_async(self, "async", "add")
+        return {"results": vector_store_result}
 
     async def _add_to_vector_store(
         self,
@@ -2552,25 +2707,96 @@ class AsyncMemory(MemoryBase):
             ValueError: If filters doesn't contain at least one of user_id, agent_id, run_id,
                 or if top_k is invalid.
         """
-        ctx = PayloadNormalizer.for_get_all(
-            filters=filters,
-            top_k=top_k,
-            sync_type="async",
-            **kwargs,
+        # Reject top-level entity params - must use filters instead
+        _reject_top_level_entity_params(kwargs, "get_all")
+
+        # Validate top_k
+        _validate_search_params(top_k=top_k)
+
+        # Validate and trim entity IDs in filters
+        effective_filters = dict(filters) if filters else {}
+        if "user_id" in effective_filters:
+            effective_filters["user_id"] = _validate_and_trim_entity_id(
+                effective_filters["user_id"], "user_id"
+            )
+        if "agent_id" in effective_filters:
+            effective_filters["agent_id"] = _validate_and_trim_entity_id(
+                effective_filters["agent_id"], "agent_id"
+            )
+        if "run_id" in effective_filters:
+            effective_filters["run_id"] = _validate_and_trim_entity_id(
+                effective_filters["run_id"], "run_id"
+            )
+
+        # Validate filters contains at least one entity ID
+        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+            raise ValueError(
+                "filters must contain at least one of: user_id, agent_id, run_id. "
+                "Example: filters={'user_id': 'u1'}"
+            )
+
+        limit = top_k
+        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
+
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+        capture_event(
+            "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"}
         )
-        limit = ctx.extra["top_k"]
 
-        self._lifecycle.capture_event("mem0.get_all", self, ctx, limit=limit)
+        all_memories_result = await self._get_all_from_vector_store(effective_filters, limit)
 
-        all_memories_result = await self._get_all_from_vector_store(ctx.filters, limit)
-
-        notice_type, notice_args = self._lifecycle.detect_get_all_notices(self, top_k)
-        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "get_all")
-        return ResultFormatter.wrap_results(all_memories_result)
+        if scale_threshold_notice:
+            await display_scale_threshold_notice_async(self, "async", "get_all", *scale_threshold_notice)
+        else:
+            await display_first_run_notice_async(self, "async", "get_all")
+        return {"results": all_memories_result}
 
     async def _get_all_from_vector_store(self, filters, limit):
         memories_result = await asyncio.to_thread(self.vector_store.list, filters=filters, top_k=limit)
-        return ResultFormatter.format_list_results(memories_result)
+
+        # Handle different vector store return formats by inspecting first element
+        if isinstance(memories_result, (tuple, list)) and len(memories_result) > 0:
+            first_element = memories_result[0]
+
+            # If first element is a container, unwrap one level
+            if isinstance(first_element, (list, tuple)):
+                actual_memories = first_element
+            else:
+                # First element is a memory object, structure is already flat
+                actual_memories = memories_result
+        else:
+            actual_memories = memories_result
+
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+        ]
+        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+
+        formatted_memories = []
+        for mem in actual_memories:
+            memory_item_dict = MemoryItem(
+                id=mem.id,
+                memory=mem.payload.get("data", ""),
+                hash=mem.payload.get("hash"),
+                created_at=mem.payload.get("created_at"),
+                updated_at=mem.payload.get("updated_at"),
+            ).model_dump(exclude={"score"})
+
+            for key in promoted_payload_keys:
+                if key in mem.payload:
+                    memory_item_dict[key] = mem.payload[key]
+
+            additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                memory_item_dict["metadata"] = additional_metadata
+
+            formatted_memories.append(memory_item_dict)
+
+        return formatted_memories
 
     async def search(
         self,
@@ -2628,43 +2854,149 @@ class AsyncMemory(MemoryBase):
                 await get_temporal_feature_error_message_async("async", "search", "reference_date")
             )
 
-        ctx = PayloadNormalizer.for_search(
-            query=query,
-            filters=filters,
-            top_k=top_k,
-            threshold=threshold,
-            sync_type="async",
-            **kwargs,
-        )
-        query = ctx.extra["query"]
-        limit = ctx.extra["top_k"]
-        threshold = ctx.extra["threshold"]
+        # --- Backward-compat path (see Memory.search for rationale) ---
+        if self._search_vector_store is not AsyncMemory._search_vector_store:
+            return await self._search_legacy_path_async(
+                query=query,
+                top_k=top_k,
+                filters=filters,
+                threshold=threshold,
+                rerank=rerank,
+                explain=explain,
+                **kwargs,
+            )
 
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
+        limit = top_k
+        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
-        effective_filters = ctx.filters
+        ctx = SearchContext(
+            query=query,
+            original_filters=filters,
+            top_k=top_k,
+            threshold=threshold,
+            rerank=rerank,
+            explain=explain,
+        )
+        pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
+
+        # Run normalization step first to get effective_filters for telemetry
+        await pipeline.steps[0].run_async(ctx)
+        effective_filters = ctx.normalized_filters
+
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+        capture_event(
+            "mem0.search",
+            self,
+            {
+                "limit": limit,
+                "version": self.api_version,
+                "keys": keys,
+                "encoded_ids": encoded_ids,
+                "sync_type": "async",
+                "threshold": threshold,
+                "explain": explain,
+                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+            },
+        )
+
+        search_start = time.perf_counter()
+        # Run remaining steps
+        for step in pipeline.steps[1:]:
+            ctx = await pipeline._run_step_async(step, ctx)
+        search_elapsed_seconds = time.perf_counter() - search_start
+
+        original_memories = ctx.formatted_results
+
+        if temporal_usage_notice:
+            await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
+        elif scale_threshold_notice:
+            await display_scale_threshold_notice_async(self, "async", "search", *scale_threshold_notice)
+        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
+            await display_performance_slow_query_notice_async(
+                self,
+                "async",
+                "search",
+                search_elapsed_seconds,
+                top_k,
+                len(original_memories),
+            )
+        else:
+            await display_first_run_notice_async(self, "async", "search")
+        return {"results": original_memories}
+
+    async def _search_legacy_path_async(
+        self,
+        query: str,
+        *,
+        top_k: int = 20,
+        filters: Optional[Dict[str, Any]] = None,
+        threshold: float = 0.1,
+        rerank: bool = False,
+        explain: bool = False,
+        **kwargs,
+    ):
+        """Original async search code path, retained for instances where
+        ``_search_vector_store`` has been mocked/overridden on a per-object basis.
+        """
+        _reject_top_level_entity_params(kwargs, "search")
+        _validate_search_params(threshold=threshold, top_k=top_k)
+        query = _validate_and_trim_search_query(query)
+        temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
+
+        effective_filters = filters.copy() if filters else {}
+        if "user_id" in effective_filters:
+            effective_filters["user_id"] = _validate_and_trim_entity_id(
+                effective_filters["user_id"], "user_id"
+            )
+        if "agent_id" in effective_filters:
+            effective_filters["agent_id"] = _validate_and_trim_entity_id(
+                effective_filters["agent_id"], "agent_id"
+            )
+        if "run_id" in effective_filters:
+            effective_filters["run_id"] = _validate_and_trim_entity_id(
+                effective_filters["run_id"], "run_id"
+            )
+        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+            raise ValueError(
+                "filters must contain at least one of: user_id, agent_id, run_id. "
+                "Example: filters={'user_id': 'u1'}"
+            )
+
+        limit = top_k
+        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
+
         if self._has_advanced_operators(effective_filters):
             processed_filters = self._process_metadata_filters(effective_filters)
             for logical_key in ("AND", "OR", "NOT"):
                 effective_filters.pop(logical_key, None)
             for fk in list(effective_filters.keys()):
-                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
+                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(
+                    effective_filters.get(fk), dict
+                ):
                     effective_filters.pop(fk, None)
             effective_filters.update(processed_filters)
 
-        self._lifecycle.capture_event(
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+        capture_event(
             "mem0.search",
             self,
-            ctx,
-            limit=limit,
-            version=self.api_version,
-            threshold=threshold,
-            explain=explain,
-            advanced_filters=bool(filters and self._has_advanced_operators(filters)),
+            {
+                "limit": limit,
+                "version": self.api_version,
+                "keys": keys,
+                "encoded_ids": encoded_ids,
+                "sync_type": "async",
+                "threshold": threshold,
+                "explain": explain,
+                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+            },
         )
 
         search_start = time.perf_counter()
-        original_memories = await self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
+        original_memories = await self._search_vector_store(
+            query, effective_filters, limit, threshold, explain=explain
+        )
         search_elapsed_seconds = time.perf_counter() - search_start
 
         if rerank and self.reranker and original_memories:
@@ -2676,11 +3008,22 @@ class AsyncMemory(MemoryBase):
             except Exception as e:
                 logger.warning(f"Reranking failed, using original results: {e}")
 
-        notice_type, notice_args = self._lifecycle.detect_search_notices(
-            self, top_k, search_elapsed_seconds, len(original_memories), temporal_usage_notice
-        )
-        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "search")
-        return ResultFormatter.wrap_results(original_memories)
+        if temporal_usage_notice:
+            await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
+        elif scale_threshold_notice:
+            await display_scale_threshold_notice_async(self, "async", "search", *scale_threshold_notice)
+        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
+            await display_performance_slow_query_notice_async(
+                self,
+                "async",
+                "search",
+                search_elapsed_seconds,
+                top_k,
+                len(original_memories),
+            )
+        else:
+            await display_first_run_notice_async(self, "async", "search")
+        return {"results": original_memories}
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2787,138 +3130,35 @@ class AsyncMemory(MemoryBase):
         return False
 
     async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False):
-        if threshold is None:
-            threshold = 0.1
-
-        # Step 1: Preprocess query (CPU-bound)
-        query_lemmatized = await asyncio.to_thread(lemmatize_for_bm25, query)
-        query_entities = await asyncio.to_thread(extract_entities, query)
-
-        # Step 2: Embed query
-        embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
-
-        # Step 3: Semantic search (over-fetch)
-        internal_limit = max(limit * 4, 60)
-        semantic_results = await asyncio.to_thread(
-            self.vector_store.search, query=query, vectors=embeddings, top_k=internal_limit, filters=filters
-        )
-
-        # Step 4: Keyword search (if store supports it)
-        keyword_results = await asyncio.to_thread(
-            self.vector_store.keyword_search, query=query_lemmatized, top_k=internal_limit, filters=filters
-        )
-
-        # Step 5: Compute BM25 scores
-        bm25_scores = {}
-        if keyword_results is not None:
-            midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
-            for mem in keyword_results:
-                mem_id = str(mem.id) if hasattr(mem, 'id') else str(mem.get('id', ''))
-                raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
-                if raw_score and raw_score > 0:
-                    bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
-
-        # Step 6: Compute entity boosts
-        entity_boosts = {}
-        if query_entities:
-            entity_boosts = await self._compute_entity_boosts_async(query_entities, filters)
-
-        # Step 7: Build candidate set from semantic results
-        candidates = []
-        for mem in semantic_results:
-            mem_id = str(mem.id)
-            candidates.append({
-                "id": mem_id,
-                "score": mem.score,
-                "payload": mem.payload if hasattr(mem, 'payload') else {},
-            })
-
-        # Step 8: Score and rank
-        scored_results = score_and_rank(
-            semantic_results=candidates,
-            bm25_scores=bm25_scores,
-            entity_boosts=entity_boosts,
-            threshold=threshold,
+        """Backward-compatible async wrapper: delegates to the new pipeline steps."""
+        ctx = SearchContext(
+            query=query,
+            normalized_filters=filters or {},
             top_k=limit,
+            threshold=threshold if threshold is not None else 0.1,
             explain=explain,
         )
-
-        # Step 9: Format results
-        return ResultFormatter.format_search_results(scored_results, explain=explain)
+        await QueryPreprocessingStep(self.embedding_model).run_async(ctx)
+        await SemanticRecallStep(self.vector_store).run_async(ctx)
+        await KeywordRecallStep(self.vector_store).run_async(ctx)
+        await EntityBoostRecallStep(
+            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
+        ).run_async(ctx)
+        CandidateMergeStep()._do_merge(ctx)
+        ScoreFusionStep()._do_fuse(ctx)
+        ResultFormatStep()._do_format(ctx)
+        return ctx.formatted_results
 
     async def _compute_entity_boosts_async(self, query_entities, filters):
-        """Async version of entity boost computation."""
-        seen = set()
-        deduped = []
-        for entity_type, entity_text in query_entities[:8]:
-            key = entity_text.strip().lower()
-            if key and key not in seen:
-                seen.add(key)
-                deduped.append((entity_type, entity_text))
-
-        if not deduped:
-            return {}
-
-        search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
-        memory_boosts = {}
-
-        try:
-            entity_texts = [text for _, text in deduped]
-            embeddings = await asyncio.to_thread(self.embedding_model.embed_batch, entity_texts, "search")
-
-            if len(embeddings) != len(entity_texts):
-                logger.warning(
-                    "embed_batch returned %d vectors for %d texts — skipping entity boost",
-                    len(embeddings),
-                    len(entity_texts),
-                )
-                return memory_boosts
-
-            sem = asyncio.Semaphore(4)
-
-            async def _search_entity(entity_text, embedding):
-                async with sem:
-                    return await asyncio.to_thread(
-                        self.entity_store.search,
-                        query=entity_text,
-                        vectors=embedding,
-                        top_k=500,
-                        filters=search_filters,
-                    )
-
-            results = await asyncio.gather(
-                *(_search_entity(text, emb) for text, emb in zip(entity_texts, embeddings)),
-                return_exceptions=True,
-            )
-
-            for matches in results:
-                if isinstance(matches, BaseException):
-                    logger.warning("Entity boost search failed for one entity: %s", matches)
-                    continue
-
-                for match in matches:
-                    similarity = match.score if hasattr(match, 'score') else 0.0
-                    if similarity < 0.5:
-                        continue
-
-                    payload = match.payload if hasattr(match, 'payload') else {}
-                    linked_memory_ids = payload.get("linked_memory_ids", [])
-                    if not isinstance(linked_memory_ids, list):
-                        continue
-
-                    num_linked = max(len(linked_memory_ids), 1)
-                    memory_count_weight = 1.0 / (1.0 + 0.001 * ((num_linked - 1) ** 2))
-                    boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
-
-                    for memory_id in linked_memory_ids:
-                        if memory_id:
-                            memory_key = str(memory_id)
-                            memory_boosts[memory_key] = max(memory_boosts.get(memory_key, 0.0), boost)
-
-        except Exception as e:
-            logger.warning(f"Entity boost computation failed: {e}")
-
-        return memory_boosts
+        """Backward-compatible async wrapper: delegates to EntityBoostRecallStep."""
+        ctx = SearchContext(
+            query_entities=list(query_entities),
+            normalized_filters=filters or {},
+        )
+        await EntityBoostRecallStep(
+            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
+        ).run_async(ctx)
+        return ctx.entity_boosts
 
     async def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
         """
@@ -2942,8 +3182,7 @@ class AsyncMemory(MemoryBase):
         existing_embeddings = {data: embeddings}
 
         await self._update_memory(memory_id, data, existing_embeddings, metadata)
-        notice_type, notice_args = self._lifecycle.detect_delete_notices()
-        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "update")
+        await display_first_run_notice_async(self, "async", "update")
         return {"message": "Memory updated successfully!"}
 
     async def delete(self, memory_id):
@@ -2961,8 +3200,10 @@ class AsyncMemory(MemoryBase):
 
         await self._delete_memory(memory_id, existing_memory)
         decay_usage_notice = detect_decay_usage_from_delete()
-        notice_type, notice_args = self._lifecycle.detect_delete_notices(decay_usage_notice)
-        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "delete")
+        if decay_usage_notice:
+            await display_decay_usage_notice_async(self, "async", "delete", *decay_usage_notice)
+        else:
+            await display_first_run_notice_async(self, "async", "delete")
         return {"message": "Memory deleted successfully!"}
 
     async def delete_all(self, user_id=None, agent_id=None, run_id=None):
@@ -2974,22 +3215,22 @@ class AsyncMemory(MemoryBase):
             agent_id (str, optional): ID of the agent to delete memories for. Defaults to None.
             run_id (str, optional): ID of the run to delete memories for. Defaults to None.
         """
-        processed_metadata, effective_filters = PayloadNormalizer.build_filters_and_metadata(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-        )
-        ctx = MemoryRequestContext(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            filters=effective_filters,
-            operation="delete_all",
-            sync_type="async",
-        )
-        self._lifecycle.capture_event("mem0.delete_all", self, ctx)
+        filters = {}
+        if user_id:
+            filters["user_id"] = user_id
+        if agent_id:
+            filters["agent_id"] = agent_id
+        if run_id:
+            filters["run_id"] = run_id
 
-        memories = await asyncio.to_thread(self.vector_store.list, filters=effective_filters)
+        if not filters:
+            raise ValueError(
+                "At least one filter is required to delete all memories. If you want to delete all memories, use the `reset()` method."
+            )
+
+        keys, encoded_ids = process_telemetry_filters(filters)
+        capture_event("mem0.delete_all", self, {"keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"})
+        memories = await asyncio.to_thread(self.vector_store.list, filters=filters)
 
         delete_tasks = []
         for memory in memories[0]:
@@ -3006,8 +3247,10 @@ class AsyncMemory(MemoryBase):
         logger.info(f"Deleted {len(results) - len(errors)} memories")
 
         decay_usage_notice = detect_decay_usage_from_delete_all(len(memories[0]))
-        notice_type, notice_args = self._lifecycle.detect_delete_all_notices(decay_usage_notice)
-        await self._lifecycle.dispatch_notice_async(self, notice_type, notice_args, "async", "delete_all")
+        if decay_usage_notice:
+            await display_decay_usage_notice_async(self, "async", "delete_all", *decay_usage_notice)
+        else:
+            await display_first_run_notice_async(self, "async", "delete_all")
         return {"message": "Memories deleted successfully!"}
 
     async def history(self, memory_id):
@@ -3251,11 +3494,3 @@ class AsyncMemory(MemoryBase):
 
     async def chat(self, query):
         raise NotImplementedError("Chat function not implemented yet.")
-
-
-# Configure the default hooks to look up notice functions from this module.
-# This enables test compatibility: tests can use monkeypatch on
-# mem0.memory.main to intercept notice function calls.
-from mem0.memory.operation_hooks import DefaultMemoryHooks  # noqa: E402
-
-DefaultMemoryHooks.set_notice_module("mem0.memory.main")

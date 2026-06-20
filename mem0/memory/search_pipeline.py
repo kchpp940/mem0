@@ -108,6 +108,22 @@ class SearchContext:
     formatted_results: List[Dict[str, Any]] = field(default_factory=list)
 
     # -- Trace / profile (always collected, consumer decides what to expose) --
+    #
+    # Schema for ctx.trace:
+    #
+    #   ctx.trace["step_durations_ms"]  : Dict[str, float]  -- per-step wall time
+    #   ctx.trace["steps"]              : Dict[str, Dict]   -- per-step structured stats
+    #   ctx.trace["total_elapsed_ms"]   : float             -- total pipeline wall time
+    #   ctx.trace["query"]              : str               -- normalized query (for reference)
+    #   ctx.trace["filters"]            : Dict              -- normalized filters
+    #   ctx.trace["top_k"]              : int
+    #   ctx.trace["threshold"]          : float
+    #   ctx.trace["explain"]            : bool
+    #   ctx.trace["results_count"]      : int               -- final formatted result count
+    #
+    # Each step writes ctx.trace["steps"][self.name] = {...}.  Step names are
+    # the same ones used in ctx.trace["step_durations_ms"] so consumers can
+    # correlate duration with structured output.
     trace: Dict[str, Any] = field(default_factory=dict)
 
     # -- Escape hatch for custom recall steps --
@@ -126,6 +142,10 @@ class PipelineStep(ABC):
     the shared :class:`SearchContext` and are expected to mutate it in place
     (returning the same object is allowed for chaining convenience, but not
     required).
+
+    :meth:`record_trace` is invoked *after* the step runs (by the pipeline
+    orchestrator) so every step has a single, consistent place to write its
+    structured statistics into ``ctx.trace["steps"]``.
     """
 
     name: str = "base_step"
@@ -137,6 +157,15 @@ class PipelineStep(ABC):
     @abstractmethod
     async def run_async(self, ctx: SearchContext) -> SearchContext:
         ...
+
+    def record_trace(self, ctx: SearchContext) -> None:
+        """Write per-step structured statistics into ``ctx.trace["steps"]``.
+
+        Override in subclasses to record meaningful counters.  The default
+        implementation writes an empty dict so ``ctx.trace["steps"]`` always
+        contains a key for every executed step.
+        """
+        ctx.trace.setdefault("steps", {}).setdefault(self.name, {})
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +246,17 @@ class QueryNormalizationStep(PipelineStep):
         self._do_normalize(ctx)
         return ctx
 
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        ctx.trace["steps"][self.name] = {
+            "filters_keys": sorted(ctx.normalized_filters.keys()),
+            "has_advanced_operators": bool(
+                set(ctx.normalized_filters.keys()) & {"AND", "OR", "NOT"}
+            )
+            or any(isinstance(v, dict) for v in ctx.normalized_filters.values()),
+            "query_length": len(ctx.query),
+        }
+
 
 # ---------------------------------------------------------------------------
 # 2. Query preprocessing (lemmatize, entities, embedding)
@@ -252,6 +292,16 @@ class QueryPreprocessingStep(PipelineStep):
         ctx.internal_limit = max(ctx.top_k * 4, 60)
         return ctx
 
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        ctx.trace["steps"][self.name] = {
+            "lemmatized_query_length": len(ctx.query_lemmatized),
+            "entity_count": len(ctx.query_entities),
+            "entity_types": sorted({et for et, _ in ctx.query_entities}),
+            "embedding_dim": len(ctx.query_embedding),
+            "internal_limit": ctx.internal_limit,
+        }
+
 
 # ---------------------------------------------------------------------------
 # 3 / 4 / 5. Recall steps (semantic, keyword, entity-boost)
@@ -285,6 +335,16 @@ class SemanticRecallStep(PipelineStep):
         )
         return ctx
 
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        scores = [r.get("score") if isinstance(r, dict) else getattr(r, "score", 0.0) for r in ctx.semantic_results]
+        ctx.trace["steps"][self.name] = {
+            "hits_count": len(ctx.semantic_results),
+            "min_score": min(scores) if scores else None,
+            "max_score": max(scores) if scores else None,
+            "top_k_requested": ctx.internal_limit,
+        }
+
 
 class KeywordRecallStep(PipelineStep):
     """Execute keyword / BM25 search if the vector store supports it.
@@ -315,6 +375,14 @@ class KeywordRecallStep(PipelineStep):
             filters=ctx.normalized_filters,
         )
         return ctx
+
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        ctx.trace["steps"][self.name] = {
+            "supported": ctx.keyword_results is not None,
+            "hits_count": len(ctx.keyword_results) if ctx.keyword_results is not None else 0,
+            "query_lemmatized": ctx.query_lemmatized,
+        }
 
 
 class EntityBoostRecallStep(PipelineStep):
@@ -505,6 +573,19 @@ class EntityBoostRecallStep(PipelineStep):
         ctx.entity_boosts = memory_boosts
         return ctx
 
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        boosted_ids = [mid for mid, val in ctx.entity_boosts.items() if val > 0]
+        boost_values = list(ctx.entity_boosts.values())
+        ctx.trace["steps"][self.name] = {
+            "queries_searched": len(ctx.query_entities),
+            "queries_deduped": len(self._dedupe(ctx.query_entities)),
+            "boosted_memory_count": len(boosted_ids),
+            "total_boost": sum(boost_values),
+            "max_boost": max(boost_values) if boost_values else 0.0,
+            "boost_weight": ENTITY_BOOST_WEIGHT,
+        }
+
 
 # ---------------------------------------------------------------------------
 # 6. Candidate merge + BM25 normalization
@@ -567,6 +648,19 @@ class CandidateMergeStep(PipelineStep):
         self._do_merge(ctx)
         return ctx
 
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        bm25_count = len([s for s in ctx.bm25_scores.values() if s > 0])
+        bm25_values = list(ctx.bm25_scores.values())
+        ctx.trace["steps"][self.name] = {
+            "semantic_input_count": len(ctx.semantic_results),
+            "keyword_input_count": len(ctx.keyword_results) if ctx.keyword_results is not None else 0,
+            "merged_candidate_count": len(ctx.candidates),
+            "bm25_scored_count": bm25_count,
+            "bm25_max": max(bm25_values) if bm25_values else 0.0,
+            "bm25_params": get_bm25_params(ctx.query, lemmatized=ctx.query_lemmatized),
+        }
+
 
 # ---------------------------------------------------------------------------
 # 7. Score fusion + threshold + top-k cut
@@ -602,6 +696,45 @@ class ScoreFusionStep(PipelineStep):
     async def run_async(self, ctx: SearchContext) -> SearchContext:
         self._do_fuse(ctx)
         return ctx
+
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        # Count how many candidates were filtered out by the semantic threshold.
+        sem_scores_in = [
+            c.get("score", 0.0) if isinstance(c, dict) else getattr(c, "score", 0.0)
+            for c in ctx.candidates
+        ]
+        below_threshold = sum(1 for s in sem_scores_in if s < ctx.threshold)
+        final_scores = [
+            r.get("score", 0.0) if isinstance(r, dict) else getattr(r, "score", 0.0)
+            for r in ctx.scored_results
+        ]
+        score_details_present = any(
+            (r.get("score_details") if isinstance(r, dict) else None)
+            for r in ctx.scored_results
+        )
+        # Reconstruct max_possible (mirrors scoring.score_and_rank logic).
+        has_bm25 = bool(ctx.bm25_scores)
+        has_entity = bool(ctx.entity_boosts)
+        max_possible = 1.0
+        if has_bm25:
+            max_possible += 1.0
+        if has_entity:
+            max_possible += ENTITY_BOOST_WEIGHT
+        ctx.trace["steps"][self.name] = {
+            "candidate_count_before": len(ctx.candidates),
+            "below_threshold_count": below_threshold,
+            "kept_after_threshold": len(ctx.candidates) - below_threshold,
+            "kept_after_top_k": len(ctx.scored_results),
+            "threshold": ctx.threshold,
+            "top_k_requested": ctx.top_k,
+            "max_possible_score": max_possible,
+            "has_bm25": has_bm25,
+            "has_entity_boosts": has_entity,
+            "score_details_present": score_details_present,
+            "min_final_score": min(final_scores) if final_scores else None,
+            "max_final_score": max(final_scores) if final_scores else None,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +784,22 @@ class RerankStep(PipelineStep):
         except Exception as e:
             logger.warning("Reranking failed, using original results: %s", e)
         return ctx
+
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        has_reranker = self._reranker is not None
+        rerank_scores = [
+            r.get("rerank_score")
+            for r in ctx.scored_results
+            if isinstance(r, dict) and r.get("rerank_score") is not None
+        ]
+        ctx.trace["steps"][self.name] = {
+            "requested": ctx.rerank,
+            "reranker_available": has_reranker,
+            "executed": bool(ctx.reranked),
+            "reranked_count": len(rerank_scores),
+            "rerank_scores_present": bool(rerank_scores),
+        }
 
 
 def _pre_rerank_format(scored: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -760,6 +909,18 @@ class ResultFormatStep(PipelineStep):
         self._do_format(ctx)
         return ctx
 
+    def record_trace(self, ctx: SearchContext) -> None:
+        super().record_trace(ctx)
+        dropped = len(ctx.scored_results) - len(ctx.formatted_results)
+        has_score_details = any("score_details" in r for r in ctx.formatted_results)
+        ctx.trace["steps"][self.name] = {
+            "input_count": len(ctx.scored_results),
+            "output_count": len(ctx.formatted_results),
+            "dropped_missing_data": max(dropped, 0),
+            "score_details_attached": has_score_details,
+            "explain_requested": ctx.explain,
+        }
+
 
 # ---------------------------------------------------------------------------
 # Orchestrator
@@ -799,27 +960,47 @@ class SearchPipeline:
     def _run_step(self, step: PipelineStep, ctx: SearchContext) -> SearchContext:
         start = time.perf_counter()
         try:
-            return step.run_sync(ctx)
+            ctx = step.run_sync(ctx)
+            return ctx
         finally:
             dur_ms = (time.perf_counter() - start) * 1000.0
             ctx.trace.setdefault("step_durations_ms", {})[step.name] = dur_ms
+            step.record_trace(ctx)
 
     async def _run_step_async(self, step: PipelineStep, ctx: SearchContext) -> SearchContext:
         start = time.perf_counter()
         try:
-            return await step.run_async(ctx)
+            ctx = await step.run_async(ctx)
+            return ctx
         finally:
             dur_ms = (time.perf_counter() - start) * 1000.0
             ctx.trace.setdefault("step_durations_ms", {})[step.name] = dur_ms
+            step.record_trace(ctx)
 
     # -- public entry points --
 
     def run_sync(self, ctx: SearchContext) -> SearchContext:
+        pipeline_start = time.perf_counter()
         for step in self._steps:
             ctx = self._run_step(step, ctx)
+        ctx.trace["total_elapsed_ms"] = (time.perf_counter() - pipeline_start) * 1000.0
+        ctx.trace.setdefault("query", ctx.query)
+        ctx.trace.setdefault("filters", ctx.normalized_filters)
+        ctx.trace.setdefault("top_k", ctx.top_k)
+        ctx.trace.setdefault("threshold", ctx.threshold)
+        ctx.trace.setdefault("explain", ctx.explain)
+        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
         return ctx
 
     async def run_async(self, ctx: SearchContext) -> SearchContext:
+        pipeline_start = time.perf_counter()
         for step in self._steps:
             ctx = await self._run_step_async(step, ctx)
+        ctx.trace["total_elapsed_ms"] = (time.perf_counter() - pipeline_start) * 1000.0
+        ctx.trace.setdefault("query", ctx.query)
+        ctx.trace.setdefault("filters", ctx.normalized_filters)
+        ctx.trace.setdefault("top_k", ctx.top_k)
+        ctx.trace.setdefault("threshold", ctx.threshold)
+        ctx.trace.setdefault("explain", ctx.explain)
+        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
         return ctx

@@ -1385,10 +1385,10 @@ class Memory(MemoryBase):
         )
         pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
 
-        # Build effective_filters for telemetry (delegated to pipeline step 1)
-        # Run just the normalization step first to extract effective_filters
-        # for telemetry before capturing the event
-        pipeline.steps[0].run_sync(ctx)
+        # Run QueryNormalizationStep first via the pipeline wrapper so that
+        # step durations + structured trace are collected consistently.
+        # We need effective_filters early for telemetry event capture.
+        pipeline._run_step(pipeline.steps[0], ctx)
         effective_filters = ctx.normalized_filters
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
@@ -1407,12 +1407,22 @@ class Memory(MemoryBase):
             },
         )
 
-        search_start = time.perf_counter()
-        # Run remaining steps (skip first which was already run for normalization)
+        # Run remaining steps (step 0 was already executed above)
         for step in pipeline.steps[1:]:
             ctx = pipeline._run_step(step, ctx)
-        search_elapsed_seconds = time.perf_counter() - search_start
 
+        # Compute total pipeline wall time (steps 0..n) from the per-step
+        # durations already collected in ctx.trace["step_durations_ms"].
+        step_durations = ctx.trace.get("step_durations_ms", {})
+        ctx.trace["total_elapsed_ms"] = sum(step_durations.values())
+        ctx.trace.setdefault("query", ctx.query)
+        ctx.trace.setdefault("filters", ctx.normalized_filters)
+        ctx.trace.setdefault("top_k", ctx.top_k)
+        ctx.trace.setdefault("threshold", ctx.threshold)
+        ctx.trace.setdefault("explain", ctx.explain)
+        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
+
+        search_elapsed_seconds = ctx.trace["total_elapsed_ms"] / 1000.0
         original_memories = ctx.formatted_results
 
         if temporal_usage_notice:
@@ -1430,7 +1440,11 @@ class Memory(MemoryBase):
             )
         else:
             display_first_run_notice(self, "sync", "search")
-        return {"results": original_memories}
+
+        response: Dict[str, Any] = {"results": original_memories}
+        if explain:
+            response["trace"] = ctx.trace
+        return response
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1549,15 +1563,19 @@ class Memory(MemoryBase):
             threshold=threshold if threshold is not None else 0.1,
             explain=explain,
         )
-        QueryPreprocessingStep(self.embedding_model).run_sync(ctx)
-        SemanticRecallStep(self.vector_store).run_sync(ctx)
-        KeywordRecallStep(self.vector_store).run_sync(ctx)
-        EntityBoostRecallStep(
-            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
-        ).run_sync(ctx)
-        CandidateMergeStep().run_sync(ctx)
-        ScoreFusionStep().run_sync(ctx)
-        ResultFormatStep().run_sync(ctx)
+        steps = [
+            QueryPreprocessingStep(self.embedding_model),
+            SemanticRecallStep(self.vector_store),
+            KeywordRecallStep(self.vector_store),
+            EntityBoostRecallStep(
+                self.embedding_model, None, entity_store_getter=lambda: self.entity_store
+            ),
+            CandidateMergeStep(),
+            ScoreFusionStep(),
+            ResultFormatStep(),
+        ]
+        pipeline = SearchPipeline(steps)
+        pipeline.run_sync(ctx)
         return ctx.formatted_results
 
     def _compute_entity_boosts(self, query_entities, filters):
@@ -2755,8 +2773,9 @@ class AsyncMemory(MemoryBase):
         )
         pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
 
-        # Run normalization step first to get effective_filters for telemetry
-        await pipeline.steps[0].run_async(ctx)
+        # Run QueryNormalizationStep via the pipeline wrapper so that
+        # step durations + structured trace are collected consistently.
+        await pipeline._run_step_async(pipeline.steps[0], ctx)
         effective_filters = ctx.normalized_filters
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
@@ -2775,12 +2794,21 @@ class AsyncMemory(MemoryBase):
             },
         )
 
-        search_start = time.perf_counter()
         # Run remaining steps
         for step in pipeline.steps[1:]:
             ctx = await pipeline._run_step_async(step, ctx)
-        search_elapsed_seconds = time.perf_counter() - search_start
 
+        # Compute total pipeline wall time from per-step durations.
+        step_durations = ctx.trace.get("step_durations_ms", {})
+        ctx.trace["total_elapsed_ms"] = sum(step_durations.values())
+        ctx.trace.setdefault("query", ctx.query)
+        ctx.trace.setdefault("filters", ctx.normalized_filters)
+        ctx.trace.setdefault("top_k", ctx.top_k)
+        ctx.trace.setdefault("threshold", ctx.threshold)
+        ctx.trace.setdefault("explain", ctx.explain)
+        ctx.trace.setdefault("results_count", len(ctx.formatted_results))
+
+        search_elapsed_seconds = ctx.trace["total_elapsed_ms"] / 1000.0
         original_memories = ctx.formatted_results
 
         if temporal_usage_notice:
@@ -2798,7 +2826,11 @@ class AsyncMemory(MemoryBase):
             )
         else:
             await display_first_run_notice_async(self, "async", "search")
-        return {"results": original_memories}
+
+        response: Dict[str, Any] = {"results": original_memories}
+        if explain:
+            response["trace"] = ctx.trace
+        return response
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2913,15 +2945,19 @@ class AsyncMemory(MemoryBase):
             threshold=threshold if threshold is not None else 0.1,
             explain=explain,
         )
-        await QueryPreprocessingStep(self.embedding_model).run_async(ctx)
-        await SemanticRecallStep(self.vector_store).run_async(ctx)
-        await KeywordRecallStep(self.vector_store).run_async(ctx)
-        await EntityBoostRecallStep(
-            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
-        ).run_async(ctx)
-        CandidateMergeStep()._do_merge(ctx)
-        ScoreFusionStep()._do_fuse(ctx)
-        ResultFormatStep()._do_format(ctx)
+        steps = [
+            QueryPreprocessingStep(self.embedding_model),
+            SemanticRecallStep(self.vector_store),
+            KeywordRecallStep(self.vector_store),
+            EntityBoostRecallStep(
+                self.embedding_model, None, entity_store_getter=lambda: self.entity_store
+            ),
+            CandidateMergeStep(),
+            ScoreFusionStep(),
+            ResultFormatStep(),
+        ]
+        pipeline = SearchPipeline(steps)
+        await pipeline.run_async(ctx)
         return ctx.formatted_results
 
     async def _compute_entity_boosts_async(self, query_entities, filters):

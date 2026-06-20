@@ -4,6 +4,7 @@
 
 import fs from "node:fs";
 import type { Backend } from "../backend/base.js";
+import { PlatformBackend } from "../backend/platform.js";
 import {
 	printError,
 	printInfo,
@@ -22,6 +23,108 @@ import {
 	printResultSummary,
 } from "../output.js";
 import { isAgentMode, setCurrentCommand } from "../state.js";
+
+const TRACE_META_KEYS = [
+	"count",
+	"operation",
+	"memories_added",
+	"memories_updated",
+	"memories_skipped",
+	"duplicates_skipped",
+	"entities_extracted",
+	"entities_linked",
+	"candidates_ranked",
+	"candidates_passed_threshold",
+	"semantic_candidates",
+	"keyword_candidates",
+	"entity_matches",
+	"results_returned",
+	"results_filtered",
+	"has_bm25",
+	"has_entity_boost",
+	"threshold",
+	"mode",
+	"last_messages_count",
+	"existing_memories",
+] as const;
+
+function formatCompactTrace(
+	operationId: string | null | undefined,
+	trace: Record<string, unknown> | null | undefined,
+): string {
+	const opIdShort = operationId ? operationId.slice(0, 8) : "?";
+
+	if (!trace) {
+		return `\x1b[2m[trace] op=\x1b[0m\x1b[1m\x1b[36m${opIdShort}\x1b[0m\x1b[2m \u00b7 stages=0 \u00b7 no_trace_data\x1b[0m`;
+	}
+
+	const stages = (trace.stages ?? []) as Record<string, unknown>[];
+	const totalMs = (trace.total_duration_ms ?? 0) as number;
+
+	let out = `\x1b[2m[trace] op=\x1b[0m\x1b[1m\x1b[36m${opIdShort}\x1b[0m\x1b[2m \u00b7 total=${Math.round(totalMs)}ms \u00b7 stages=${stages.length}\x1b[0m`;
+
+	for (const s of stages) {
+		const name = (s.name ?? "?") as string;
+		const dur = (s.duration_ms ?? 0) as number;
+		const status = (s.status ?? "ok") as string;
+		const meta = (s.metadata ?? {}) as Record<string, unknown>;
+
+		out += `\x1b[2m | \x1b[0m\x1b[34m${name}\x1b[36m:${Math.round(dur)}ms\x1b[0m`;
+		if (status !== "ok") {
+			out += `\x1b[31m\x1b[1m:${status}\x1b[0m`;
+		}
+
+		const picked: string[] = [];
+		for (const key of TRACE_META_KEYS) {
+			const val = meta[key];
+			if (val !== undefined && val !== "" && val !== null) {
+				if (typeof val === "boolean") {
+					picked.push(`${key.slice(0, 6)}=${val ? "t" : "f"}`);
+				} else if (typeof val !== "object") {
+					picked.push(`${key.slice(0, 6)}=${val}`);
+				}
+			}
+		}
+		if (picked.length > 0) {
+			out += `\x1b[96m(${picked.slice(0, 4).join(",")})\x1b[0m`;
+		}
+	}
+
+	return out;
+}
+
+function printTraceEpilogue(
+	backend: Backend,
+	operationId: string | null | undefined,
+	trace: Record<string, unknown> | null | undefined,
+): void {
+	let opId = operationId;
+	if (!opId && backend instanceof PlatformBackend) {
+		opId = backend.lastOperationId;
+	}
+	process.stderr.write("\n");
+	process.stderr.write(formatCompactTrace(opId, trace));
+	process.stderr.write("\n");
+}
+
+function extractTraceWrapper(data: Record<string, unknown>): {
+	operationId: string | null;
+	traceData: Record<string, unknown> | null;
+	clean: Record<string, unknown>;
+} {
+	const operationId = (data.operation_id ?? null) as string | null;
+	const traceData = (data.trace ?? data.trace_summary ?? null) as Record<
+		string,
+		unknown
+	> | null;
+	const clean: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(data)) {
+		if (k !== "trace" && k !== "trace_summary" && k !== "operation_id") {
+			clean[k] = v;
+		}
+	}
+	return { operationId, traceData, clean };
+}
 
 /** True only when stdin is an actual pipe or file redirect — never in agent mode. */
 function _stdinIsPiped(): boolean {
@@ -50,6 +153,7 @@ export async function cmdAdd(
 		expires?: string;
 		categories?: string;
 		output: string;
+		trace?: boolean;
 	},
 ): Promise<void> {
 	setCurrentCommand("add");
@@ -139,6 +243,7 @@ export async function cmdAdd(
 				infer: opts.infer !== false,
 				expires: opts.expires,
 				categories: cats,
+				traceEnabled: opts.trace,
 			});
 		});
 	} catch (e) {
@@ -146,7 +251,17 @@ export async function cmdAdd(
 		process.exit(1);
 	}
 
-	if (opts.output === "quiet") return;
+	const {
+		operationId,
+		traceData,
+		clean: cleanResult,
+	} = extractTraceWrapper(result);
+	result = cleanResult;
+
+	if (opts.output === "quiet") {
+		if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
+		return;
+	}
 
 	// Deduplicate PENDING entries sharing the same event_id across all output modes
 	const rawResults: Record<string, unknown>[] = Array.isArray(result)
@@ -174,17 +289,40 @@ export async function cmdAdd(
 			app_id: opts.appId,
 			run_id: opts.runId,
 		};
+		let agentData: unknown = deduped;
+		if (opts.trace && operationId) {
+			agentData = { results: deduped, operation_id: operationId };
+			if (traceData) (agentData as Record<string, unknown>).trace = traceData;
+		}
 		formatAgentEnvelope({
 			command: "add",
-			data: deduped,
+			data: agentData,
 			scope,
 			count: deduped.length,
 		});
+		if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
 		return;
 	}
 
 	if (opts.output === "json") {
-		formatAddResult(dedupedResult, opts.output);
+		let jsonPayload: unknown = dedupedResult;
+		if (opts.trace && operationId) {
+			if (
+				typeof jsonPayload === "object" &&
+				jsonPayload !== null &&
+				!Array.isArray(jsonPayload)
+			) {
+				(jsonPayload as Record<string, unknown>).operation_id = operationId;
+				if (traceData)
+					(jsonPayload as Record<string, unknown>).trace = traceData;
+			} else {
+				jsonPayload = { results: jsonPayload, operation_id: operationId };
+				if (traceData)
+					(jsonPayload as Record<string, unknown>).trace = traceData;
+			}
+		}
+		formatJson(jsonPayload);
+		if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
 		return;
 	}
 
@@ -207,6 +345,8 @@ export async function cmdAdd(
 		);
 	}
 	formatAddResult(dedupedResult, opts.output);
+
+	if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
 }
 
 export async function cmdSearch(
@@ -224,6 +364,7 @@ export async function cmdSearch(
 		filterJson?: string;
 		fields?: string;
 		output: string;
+		trace?: boolean;
 	},
 ): Promise<void> {
 	setCurrentCommand("search");
@@ -271,6 +412,7 @@ export async function cmdSearch(
 				keyword: opts.keyword,
 				filters,
 				fields: fieldList,
+				traceEnabled: opts.trace,
 			});
 		});
 	} catch (e) {
@@ -279,7 +421,26 @@ export async function cmdSearch(
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	if (opts.output === "quiet") return;
+	let operationId: string | null = null;
+	let traceData: Record<string, unknown> | null = null;
+	if (opts.trace && results.length === 1 && !Array.isArray(results[0]?.id)) {
+		const wrapper = results[0] as Record<string, unknown>;
+		operationId = (wrapper.operation_id ?? null) as string | null;
+		traceData = (wrapper.trace ?? wrapper.trace_summary ?? null) as Record<
+			string,
+			unknown
+		> | null;
+		const extracted = (wrapper.results ?? wrapper.memories ?? []) as Record<
+			string,
+			unknown
+		>[];
+		if (extracted.length > 0) results = extracted;
+	}
+
+	if (opts.output === "quiet") {
+		if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
+		return;
+	}
 
 	if (opts.output === "agent") {
 		const scope: Record<string, string | undefined> = {
@@ -288,18 +449,29 @@ export async function cmdSearch(
 			app_id: opts.appId,
 			run_id: opts.runId,
 		};
+		let agentData: unknown = results;
+		if (opts.trace && operationId) {
+			agentData = { results, operation_id: operationId };
+			if (traceData) (agentData as Record<string, unknown>).trace = traceData;
+		}
 		formatAgentEnvelope({
 			command: "search",
-			data: results,
+			data: agentData,
 			scope,
 			count: results.length,
 			durationMs: Math.round(elapsed * 1000),
 		});
+		if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
 		return;
 	}
 
 	if (opts.output === "json") {
-		formatJson(results);
+		let jsonPayload: unknown = results;
+		if (opts.trace && operationId) {
+			jsonPayload = { results, operation_id: operationId };
+			if (traceData) (jsonPayload as Record<string, unknown>).trace = traceData;
+		}
+		formatJson(jsonPayload);
 	} else if (opts.output === "table") {
 		if (results.length > 0) {
 			formatMemoriesTable(results, { showScore: true });
@@ -327,6 +499,8 @@ export async function cmdSearch(
 			console.log();
 		}
 	}
+
+	if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
 }
 
 export async function cmdGet(
@@ -365,6 +539,7 @@ export async function cmdList(
 		after?: string;
 		before?: string;
 		output: string;
+		trace?: boolean;
 	},
 ): Promise<void> {
 	setCurrentCommand("list");
@@ -391,6 +566,7 @@ export async function cmdList(
 				category: opts.category,
 				after: opts.after,
 				before: opts.before,
+				traceEnabled: opts.trace,
 			});
 		});
 	} catch (e) {
@@ -399,7 +575,26 @@ export async function cmdList(
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	if (opts.output === "quiet") return;
+	let operationId: string | null = null;
+	let traceData: Record<string, unknown> | null = null;
+	if (opts.trace && results.length === 1 && !Array.isArray(results[0]?.id)) {
+		const wrapper = results[0] as Record<string, unknown>;
+		operationId = (wrapper.operation_id ?? null) as string | null;
+		traceData = (wrapper.trace ?? wrapper.trace_summary ?? null) as Record<
+			string,
+			unknown
+		> | null;
+		const extracted = (wrapper.results ?? wrapper.memories ?? []) as Record<
+			string,
+			unknown
+		>[];
+		if (extracted.length > 0) results = extracted;
+	}
+
+	if (opts.output === "quiet") {
+		if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
+		return;
+	}
 
 	if (opts.output === "agent" || opts.output === "json") {
 		const scope: Record<string, string | undefined> = {
@@ -408,9 +603,14 @@ export async function cmdList(
 			app_id: opts.appId,
 			run_id: opts.runId,
 		};
+		let outData: unknown = results;
+		if (opts.trace && operationId) {
+			outData = { results, operation_id: operationId };
+			if (traceData) (outData as Record<string, unknown>).trace = traceData;
+		}
 		formatAgentEnvelope({
 			command: "list",
-			data: results,
+			data: outData,
 			scope,
 			count: results.length,
 			durationMs: Math.round(elapsed * 1000),
@@ -444,6 +644,8 @@ export async function cmdList(
 			console.log();
 		}
 	}
+
+	if (opts.trace) printTraceEpilogue(backend, operationId, traceData);
 }
 
 export async function cmdUpdate(

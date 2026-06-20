@@ -10,6 +10,11 @@ import time as _time
 from pathlib import Path
 
 import typer
+from mem0.schema.fields import (
+    FIELD_VALIDATION,
+    SCOPE_DISPLAY_NAMES,
+    validate_expires,
+)
 from rich.console import Console
 
 from mem0_cli.backend.base import Backend
@@ -115,20 +120,12 @@ def cmd_add(
         except json.JSONDecodeError:
             cats = [c.strip() for c in categories.split(",")]
 
-    # Validate --expires
     if expires:
-        import re
-
-        if not re.match(r"^\d{4}-\d{2}-\d{2}$", expires):
-            print_error(
-                err_console, "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31)."
-            )
-            raise typer.Exit(1)
-        from datetime import date
-
-        if date.fromisoformat(expires) <= date.today():
-            print_error(err_console, "--expires date must be in the future.")
-            raise typer.Exit(1)
+        try:
+            validate_expires(expires)
+        except ValueError as e:
+            print_error(err_console, str(e))
+            raise typer.Exit(1) from None
 
     with timed_status(err_console, "Adding memory...") as ts:
         try:
@@ -245,10 +242,10 @@ def cmd_search(
         field_list = [f.strip() for f in fields.split(",")]
 
     if top_k < 1:
-        print_error(err_console, "--top-k must be >= 1.")
+        print_error(err_console, FIELD_VALIDATION["top_k"]["error"])
         raise typer.Exit(1)
     if not (0.0 <= threshold <= 1.0):
-        print_error(err_console, "--threshold must be between 0.0 and 1.0.")
+        print_error(err_console, FIELD_VALIDATION["threshold"]["error"])
         raise typer.Exit(1)
 
     _start = _time.perf_counter()
@@ -361,10 +358,10 @@ def cmd_list(
     if is_agent_mode():
         output = "agent"
     if page_size < 1:
-        print_error(err_console, "--page-size must be >= 1.")
+        print_error(err_console, FIELD_VALIDATION["page_size"]["error"])
         raise typer.Exit(1)
     if page < 1:
-        print_error(err_console, "--page must be >= 1.")
+        print_error(err_console, FIELD_VALIDATION["page"]["error"])
         raise typer.Exit(1)
 
     _start = _time.perf_counter()
@@ -614,14 +611,11 @@ def cmd_delete_all(
 
     if not force:
         scope_parts = []
-        if user_id:
-            scope_parts.append(f"user={user_id}")
-        if agent_id:
-            scope_parts.append(f"agent={agent_id}")
-        if app_id:
-            scope_parts.append(f"app={app_id}")
-        if run_id:
-            scope_parts.append(f"run={run_id}")
+        entity_ids = {"user_id": user_id, "agent_id": agent_id, "app_id": app_id, "run_id": run_id}
+        for field, value in entity_ids.items():
+            if value:
+                display_name = SCOPE_DISPLAY_NAMES.get(field, field)
+                scope_parts.append(f"{display_name}={value}")
         scope = ", ".join(scope_parts) if scope_parts else "ALL entities"
 
         confirm = typer.confirm(f"\n  ⚠  Delete ALL memories for {scope}? This cannot be undone.")

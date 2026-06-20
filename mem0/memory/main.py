@@ -24,20 +24,6 @@ from mem0.configs.prompts import (
 )
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
-from mem0.memory.search_pipeline import (
-    CandidateMergeStep,
-    EntityBoostRecallStep,
-    KeywordRecallStep,
-    QueryNormalizationStep,
-    QueryPreprocessingStep,
-    ResultFormatStep,
-    RerankStep,
-    ScoreFusionStep,
-    SearchContext,
-    SearchPipeline,
-    SearchTraceCollector,
-    SemanticRecallStep,
-)
 from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
@@ -84,7 +70,12 @@ from mem0.utils.factory import (
     VectorStoreFactory,
 )
 from mem0.utils.lemmatization import lemmatize_for_bm25
-from mem0.utils.scoring import ENTITY_BOOST_WEIGHT
+from mem0.utils.scoring import (
+    ENTITY_BOOST_WEIGHT,
+    get_bm25_params,
+    normalize_bm25,
+    score_and_rank,
+)
 from mem0.vector_stores.base import VectorStoreBase
 
 # Suppress SWIG deprecation warnings globally
@@ -484,38 +475,6 @@ class Memory(MemoryBase):
             )
 
         capture_event("mem0.init", self, {"sync_type": "sync"})
-
-    def _build_search_pipeline(self, extra_kwargs: Optional[Dict[str, Any]] = None) -> SearchPipeline:
-        """Build the default 9-step search pipeline.
-
-        New recall strategies can be added by subclassing Memory and overriding this
-        method to insert additional RecallStep instances.
-        """
-        return SearchPipeline(
-            [
-                QueryNormalizationStep(
-                    validate_and_trim_query=_validate_and_trim_search_query,
-                    validate_and_trim_entity_id=_validate_and_trim_entity_id,
-                    validate_search_params=_validate_search_params,
-                    reject_top_level_entity_params=_reject_top_level_entity_params,
-                    has_advanced_operators=self._has_advanced_operators,
-                    process_metadata_filters=self._process_metadata_filters,
-                    extra_kwargs=extra_kwargs,
-                ),
-                QueryPreprocessingStep(embedding_model=self.embedding_model),
-                SemanticRecallStep(vector_store=self.vector_store),
-                KeywordRecallStep(vector_store=self.vector_store),
-                EntityBoostRecallStep(
-                    embedding_model=self.embedding_model,
-                    entity_store=None,
-                    entity_store_getter=lambda: self.entity_store,
-                ),
-                CandidateMergeStep(),
-                ScoreFusionStep(),
-                RerankStep(reranker=self.reranker),
-                ResultFormatStep(),
-            ]
-        )
 
     @property
     def project(self):
@@ -1372,72 +1331,75 @@ class Memory(MemoryBase):
         if reference_date is not None:
             raise ValueError(get_temporal_feature_error_message("sync", "search", "reference_date"))
 
+        # Reject top-level entity params - must use filters instead
+        _reject_top_level_entity_params(kwargs, "search")
+
+        # Validate search parameters (before applying defaults)
+        _validate_search_params(threshold=threshold, top_k=top_k)
+        query = _validate_and_trim_search_query(query)
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
+
+        # Validate and trim entity IDs in filters
+        effective_filters = filters.copy() if filters else {}
+        if "user_id" in effective_filters:
+            effective_filters["user_id"] = _validate_and_trim_entity_id(
+                effective_filters["user_id"], "user_id"
+            )
+        if "agent_id" in effective_filters:
+            effective_filters["agent_id"] = _validate_and_trim_entity_id(
+                effective_filters["agent_id"], "agent_id"
+            )
+        if "run_id" in effective_filters:
+            effective_filters["run_id"] = _validate_and_trim_entity_id(
+                effective_filters["run_id"], "run_id"
+            )
+        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+            raise ValueError(
+                "filters must contain at least one of: user_id, agent_id, run_id. "
+                "Example: filters={'user_id': 'u1'}"
+            )
+
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
-        # --- Unified trace collector (single source of truth) ---
-        # Telemetry properties, explain=True payload, and CLI --trace output
-        # ALL read from this one SearchTraceCollector.  Never emit trace data
-        # through a second, parallel mechanism inside Memory.search().
-        trace_collector = SearchTraceCollector()
-        trace_collector.set_meta(
-            query=query,
-            filters=filters or {},
-            top_k=top_k,
-            threshold=threshold,
-            explain=explain,
-        )
+        # Apply enhanced metadata filtering if advanced operators are detected
+        if self._has_advanced_operators(effective_filters):
+            processed_filters = self._process_metadata_filters(effective_filters)
+            # Remove logical/operator keys that have been reprocessed
+            for logical_key in ("AND", "OR", "NOT"):
+                effective_filters.pop(logical_key, None)
+            for fk in list(effective_filters.keys()):
+                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
+                    effective_filters.pop(fk, None)
+            effective_filters.update(processed_filters)
 
-        ctx = SearchContext(
-            query=query,
-            original_filters=filters,
-            top_k=top_k,
-            threshold=threshold,
-            rerank=rerank,
-            explain=explain,
-            trace_collector=trace_collector,
-        )
-        pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
-
-        # Run QueryNormalizationStep first via the pipeline wrapper so that
-        # step durations + structured trace are collected consistently.
-        # We need effective_filters early for telemetry event capture.
-        pipeline._run_step(pipeline.steps[0], ctx)
-        effective_filters = ctx.normalized_filters
-
-        # Merge pipeline-level telemetry counters (candidates, threshold hits,
-        # rerank execution etc.) into the PostHog event.  This guarantees that
-        # mem0.search telemetry always contains the same step-level counters
-        # that explain=True exposes — the two views are kept in sync by
-        # construction, not by convention.
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        telem_additional = {
-            "limit": limit,
-            "version": self.api_version,
-            "keys": keys,
-            "encoded_ids": encoded_ids,
-            "sync_type": "sync",
-            "threshold": threshold,
-            "explain": explain,
-            "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-        }
-        # Run remaining steps (step 0 was already executed above)
-        for step in pipeline.steps[1:]:
-            ctx = pipeline._run_step(step, ctx)
+        capture_event(
+            "mem0.search",
+            self,
+            {
+                "limit": limit,
+                "version": self.api_version,
+                "keys": keys,
+                "encoded_ids": encoded_ids,
+                "sync_type": "sync",
+                "threshold": threshold,
+                "explain": explain,
+                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+            },
+        )
 
-        # Freeze the unified collector (computes total_elapsed_ms, results_count).
-        # After this call, to_dict() / telemetry_props() / summary() are stable.
-        trace_collector.finalize(results_count=len(ctx.formatted_results))
+        search_start = time.perf_counter()
+        original_memories = self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
+        search_elapsed_seconds = time.perf_counter() - search_start
 
-        # Merge collector-backed props into telemetry (PostHog caps per-event
-        # property size, so telemetry_props() only emits low-cardinality
-        # counters — the full trace lives in explain=True / response["trace"]).
-        telem_additional.update(trace_collector.telemetry_props())
-        capture_event("mem0.search", self, telem_additional)
-
-        search_elapsed_seconds = trace_collector._total_elapsed_ms / 1000.0 if trace_collector._total_elapsed_ms is not None else 0.0
-        original_memories = ctx.formatted_results
+        # Apply reranking if enabled and reranker is available
+        if rerank and self.reranker and original_memories:
+            try:
+                reranked_memories = self.reranker.rerank(query, original_memories, limit)
+                original_memories = reranked_memories
+            except Exception as e:
+                logger.warning(f"Reranking failed, using original results: {e}")
 
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
@@ -1454,12 +1416,7 @@ class Memory(MemoryBase):
             )
         else:
             display_first_run_notice(self, "sync", "search")
-
-        response: Dict[str, Any] = {"results": original_memories}
-        if explain:
-            # Reuse the SAME collector — explain trace and telemetry are identical.
-            response["trace"] = trace_collector.to_dict()
-        return response
+        return {"results": original_memories}
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1566,46 +1523,194 @@ class Memory(MemoryBase):
         return False
 
     def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False):
-        """Backward-compatible wrapper: delegates to the new pipeline steps.
+        # Guard against None threshold (backward compat)
+        if threshold is None:
+            threshold = 0.1
 
-        Tests that mock this method directly will continue to work.  New code
-        should call :meth:`search` or construct a :class:`SearchPipeline`.
-        """
-        ctx = SearchContext(
-            query=query,
-            normalized_filters=filters or {},
+        # Step 1: Preprocess query
+        query_lemmatized = lemmatize_for_bm25(query)
+        query_entities = extract_entities(query)
+
+        # Step 2: Embed query
+        embeddings = self.embedding_model.embed(query, "search")
+
+        # Step 3: Semantic search (over-fetch for scoring pool)
+        internal_limit = max(limit * 4, 60)
+        semantic_results = self.vector_store.search(
+            query=query, vectors=embeddings, top_k=internal_limit, filters=filters
+        )
+
+        # Step 4: Keyword search (if store supports it)
+        keyword_results = self.vector_store.keyword_search(
+            query=query_lemmatized, top_k=internal_limit, filters=filters
+        )
+
+        # Step 5: Compute BM25 scores from keyword results
+        bm25_scores = {}
+        if keyword_results is not None:
+            midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
+            for mem in keyword_results:
+                mem_id = str(mem.id) if hasattr(mem, 'id') else str(mem.get('id', ''))
+                raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
+                if raw_score and raw_score > 0:
+                    bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
+
+        # Step 6: Compute entity boosts
+        entity_boosts = {}
+        if query_entities:
+            entity_boosts = self._compute_entity_boosts(query_entities, filters)
+
+        # Step 7: Build candidate set from semantic results
+        candidates = []
+        for mem in semantic_results:
+            mem_id = str(mem.id)
+            candidates.append({
+                "id": mem_id,
+                "score": mem.score,
+                "payload": mem.payload if hasattr(mem, 'payload') else {},
+            })
+
+        # Step 8: Score and rank
+        scored_results = score_and_rank(
+            semantic_results=candidates,
+            bm25_scores=bm25_scores,
+            entity_boosts=entity_boosts,
+            threshold=threshold,
             top_k=limit,
-            threshold=threshold if threshold is not None else 0.1,
             explain=explain,
         )
-        steps = [
-            QueryPreprocessingStep(self.embedding_model),
-            SemanticRecallStep(self.vector_store),
-            KeywordRecallStep(self.vector_store),
-            EntityBoostRecallStep(
-                self.embedding_model, None, entity_store_getter=lambda: self.entity_store
-            ),
-            CandidateMergeStep(),
-            ScoreFusionStep(),
-            ResultFormatStep(),
+
+        # Step 9: Format results
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
         ]
-        pipeline = SearchPipeline(steps)
-        pipeline.run_sync(ctx)
-        return ctx.formatted_results
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
+
+        original_memories = []
+        for scored in scored_results:
+            payload = scored.get("payload") or {}
+
+            if not payload.get("data"):
+                continue  # Skip candidates with no payload data
+
+            memory_item_dict = MemoryItem(
+                id=scored["id"],
+                memory=payload.get("data", ""),
+                hash=payload.get("hash"),
+                created_at=payload.get("created_at"),
+                updated_at=payload.get("updated_at"),
+                expires_at=payload.get("expires_at"),
+                ttl_source=payload.get("ttl_source"),
+                score=scored["score"],
+            ).model_dump()
+
+            for key in promoted_payload_keys:
+                if key in payload:
+                    memory_item_dict[key] = payload[key]
+
+            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                if not memory_item_dict.get("metadata"):
+                    memory_item_dict["metadata"] = {}
+                memory_item_dict["metadata"].update(additional_metadata)
+            if explain and "score_details" in scored:
+                memory_item_dict["score_details"] = scored["score_details"]
+
+            annotate_memory_result(memory_item_dict)
+
+            original_memories.append(memory_item_dict)
+
+        return original_memories
 
     def _compute_entity_boosts(self, query_entities, filters):
-        """Backward-compatible wrapper: delegates to EntityBoostRecallStep.
+        """Compute per-memory entity boosts from entity store search.
 
-        Constructs a minimal SearchContext and runs only the entity-boost step.
+        For each extracted entity from the query:
+        1. Embed the entity text
+        2. Search the entity store (threshold >= 0.5)
+        3. For each matched entity, boost its linked memories
+
+        Returns:
+            Dict mapping memory_id (str) -> max entity boost [0, 0.5].
         """
-        ctx = SearchContext(
-            query_entities=list(query_entities),
-            normalized_filters=filters or {},
-        )
-        EntityBoostRecallStep(
-            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
-        ).run_sync(ctx)
-        return ctx.entity_boosts
+        # Deduplicate entities (max 8)
+        seen = set()
+        deduped = []
+        for entity_type, entity_text in query_entities[:8]:
+            key = entity_text.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append((entity_type, entity_text))
+
+        if not deduped:
+            return {}
+
+        search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
+        memory_boosts = {}
+
+        try:
+            entity_texts = [text for _, text in deduped]
+            embeddings = self.embedding_model.embed_batch(entity_texts, "search")
+
+            if len(embeddings) != len(entity_texts):
+                logger.warning(
+                    "embed_batch returned %d vectors for %d texts — skipping entity boost",
+                    len(embeddings),
+                    len(entity_texts),
+                )
+                return memory_boosts
+
+            entity_store = self.entity_store
+
+            def _search_entity(entity_text, embedding):
+                return entity_store.search(
+                    query=entity_text, vectors=embedding, top_k=500, filters=search_filters
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+                futures = {
+                    pool.submit(_search_entity, text, emb): text
+                    for text, emb in zip(entity_texts, embeddings)
+                }
+
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        matches = future.result()
+                    except Exception as e:
+                        logger.warning("Entity boost search failed for one entity: %s", e)
+                        continue
+
+                    for match in matches:
+                        similarity = match.score if hasattr(match, 'score') else 0.0
+                        if similarity < 0.5:
+                            continue
+
+                        payload = match.payload if hasattr(match, 'payload') else {}
+                        linked_memory_ids = payload.get("linked_memory_ids", [])
+                        if not isinstance(linked_memory_ids, list):
+                            continue
+
+                        num_linked = max(len(linked_memory_ids), 1)
+                        memory_count_weight = 1.0 / (1.0 + 0.001 * ((num_linked - 1) ** 2))
+                        boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
+
+                        for memory_id in linked_memory_ids:
+                            if memory_id:
+                                memory_key = str(memory_id)
+                                memory_boosts[memory_key] = max(memory_boosts.get(memory_key, 0.0), boost)
+
+        except Exception as e:
+            logger.warning(f"Entity boost computation failed: {e}")
+
+        return memory_boosts
 
     def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
         """
@@ -1955,38 +2060,6 @@ class AsyncMemory(MemoryBase):
             )
 
         capture_event("mem0.init", self, {"sync_type": "async"})
-
-    def _build_search_pipeline(self, extra_kwargs: Optional[Dict[str, Any]] = None) -> SearchPipeline:
-        """Build the default 9-step search pipeline for async use.
-
-        Same structure as Memory._build_search_pipeline; the step implementations
-        internally dispatch to async via run_async.
-        """
-        return SearchPipeline(
-            [
-                QueryNormalizationStep(
-                    validate_and_trim_query=_validate_and_trim_search_query,
-                    validate_and_trim_entity_id=_validate_and_trim_entity_id,
-                    validate_search_params=_validate_search_params,
-                    reject_top_level_entity_params=_reject_top_level_entity_params,
-                    has_advanced_operators=self._has_advanced_operators,
-                    process_metadata_filters=self._process_metadata_filters,
-                    extra_kwargs=extra_kwargs,
-                ),
-                QueryPreprocessingStep(embedding_model=self.embedding_model),
-                SemanticRecallStep(vector_store=self.vector_store),
-                KeywordRecallStep(vector_store=self.vector_store),
-                EntityBoostRecallStep(
-                    embedding_model=self.embedding_model,
-                    entity_store=None,
-                    entity_store_getter=lambda: self.entity_store,
-                ),
-                CandidateMergeStep(),
-                ScoreFusionStep(),
-                RerankStep(reranker=self.reranker),
-                ResultFormatStep(),
-            ]
-        )
 
     @property
     def project(self):
@@ -2774,62 +2847,80 @@ class AsyncMemory(MemoryBase):
                 await get_temporal_feature_error_message_async("async", "search", "reference_date")
             )
 
+        # Reject top-level entity params - must use filters instead
+        _reject_top_level_entity_params(kwargs, "search")
+
+        # Validate search parameters (before applying defaults)
+        _validate_search_params(threshold=threshold, top_k=top_k)
+        query = _validate_and_trim_search_query(query)
         temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
+
+        # Validate and trim entity IDs in filters
+        effective_filters = filters.copy() if filters else {}
+        if "user_id" in effective_filters:
+            effective_filters["user_id"] = _validate_and_trim_entity_id(
+                effective_filters["user_id"], "user_id"
+            )
+        if "agent_id" in effective_filters:
+            effective_filters["agent_id"] = _validate_and_trim_entity_id(
+                effective_filters["agent_id"], "agent_id"
+            )
+        if "run_id" in effective_filters:
+            effective_filters["run_id"] = _validate_and_trim_entity_id(
+                effective_filters["run_id"], "run_id"
+            )
+
+        # Validate filters contains at least one entity ID
+        if not any(key in effective_filters for key in ("user_id", "agent_id", "run_id")):
+            raise ValueError(
+                "filters must contain at least one of: user_id, agent_id, run_id. "
+                "Example: filters={'user_id': 'u1'}"
+            )
+
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
-        # --- Unified trace collector (single source of truth) ---
-        trace_collector = SearchTraceCollector()
-        trace_collector.set_meta(
-            query=query,
-            filters=filters or {},
-            top_k=top_k,
-            threshold=threshold,
-            explain=explain,
-        )
+        # Apply enhanced metadata filtering if advanced operators are detected
+        if self._has_advanced_operators(effective_filters):
+            processed_filters = self._process_metadata_filters(effective_filters)
+            # Remove logical/operator keys that have been reprocessed
+            for logical_key in ("AND", "OR", "NOT"):
+                effective_filters.pop(logical_key, None)
+            for fk in list(effective_filters.keys()):
+                if fk not in ("AND", "OR", "NOT", "user_id", "agent_id", "run_id") and isinstance(effective_filters.get(fk), dict):
+                    effective_filters.pop(fk, None)
+            effective_filters.update(processed_filters)
 
-        ctx = SearchContext(
-            query=query,
-            original_filters=filters,
-            top_k=top_k,
-            threshold=threshold,
-            rerank=rerank,
-            explain=explain,
-            trace_collector=trace_collector,
-        )
-        pipeline = self._build_search_pipeline(extra_kwargs=kwargs)
-
-        # Run QueryNormalizationStep via the pipeline wrapper so that
-        # step durations + structured trace are collected consistently.
-        await pipeline._run_step_async(pipeline.steps[0], ctx)
-        effective_filters = ctx.normalized_filters
-
-        # Merge pipeline-level telemetry counters with the outer event payload.
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        telem_additional = {
-            "limit": limit,
-            "version": self.api_version,
-            "keys": keys,
-            "encoded_ids": encoded_ids,
-            "sync_type": "async",
-            "threshold": threshold,
-            "explain": explain,
-            "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
-        }
+        capture_event(
+            "mem0.search",
+            self,
+            {
+                "limit": limit,
+                "version": self.api_version,
+                "keys": keys,
+                "encoded_ids": encoded_ids,
+                "sync_type": "async",
+                "threshold": threshold,
+                "explain": explain,
+                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+            },
+        )
 
-        # Run remaining steps
-        for step in pipeline.steps[1:]:
-            ctx = await pipeline._run_step_async(step, ctx)
+        search_start = time.perf_counter()
+        original_memories = await self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
+        search_elapsed_seconds = time.perf_counter() - search_start
 
-        # Freeze the unified collector.
-        trace_collector.finalize(results_count=len(ctx.formatted_results))
-
-        # Merge collector-backed props into telemetry.
-        telem_additional.update(trace_collector.telemetry_props())
-        capture_event("mem0.search", self, telem_additional)
-
-        search_elapsed_seconds = trace_collector._total_elapsed_ms / 1000.0 if trace_collector._total_elapsed_ms is not None else 0.0
-        original_memories = ctx.formatted_results
+        # Apply reranking if enabled and reranker is available
+        if rerank and self.reranker and original_memories:
+            try:
+                # Run reranking in thread pool to avoid blocking async loop
+                reranked_memories = await asyncio.to_thread(
+                    self.reranker.rerank, query, original_memories, limit
+                )
+                original_memories = reranked_memories
+            except Exception as e:
+                logger.warning(f"Reranking failed, using original results: {e}")
 
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
@@ -2846,12 +2937,7 @@ class AsyncMemory(MemoryBase):
             )
         else:
             await display_first_run_notice_async(self, "async", "search")
-
-        response: Dict[str, Any] = {"results": original_memories}
-        if explain:
-            # Reuse the SAME collector — explain trace and telemetry are identical.
-            response["trace"] = trace_collector.to_dict()
-        return response
+        return {"results": original_memories}
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2958,39 +3044,176 @@ class AsyncMemory(MemoryBase):
         return False
 
     async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False):
-        """Backward-compatible async wrapper: delegates to the new pipeline steps."""
-        ctx = SearchContext(
-            query=query,
-            normalized_filters=filters or {},
+        if threshold is None:
+            threshold = 0.1
+
+        # Step 1: Preprocess query (CPU-bound)
+        query_lemmatized = await asyncio.to_thread(lemmatize_for_bm25, query)
+        query_entities = await asyncio.to_thread(extract_entities, query)
+
+        # Step 2: Embed query
+        embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+
+        # Step 3: Semantic search (over-fetch)
+        internal_limit = max(limit * 4, 60)
+        semantic_results = await asyncio.to_thread(
+            self.vector_store.search, query=query, vectors=embeddings, top_k=internal_limit, filters=filters
+        )
+
+        # Step 4: Keyword search (if store supports it)
+        keyword_results = await asyncio.to_thread(
+            self.vector_store.keyword_search, query=query_lemmatized, top_k=internal_limit, filters=filters
+        )
+
+        # Step 5: Compute BM25 scores
+        bm25_scores = {}
+        if keyword_results is not None:
+            midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
+            for mem in keyword_results:
+                mem_id = str(mem.id) if hasattr(mem, 'id') else str(mem.get('id', ''))
+                raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
+                if raw_score and raw_score > 0:
+                    bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
+
+        # Step 6: Compute entity boosts
+        entity_boosts = {}
+        if query_entities:
+            entity_boosts = await self._compute_entity_boosts_async(query_entities, filters)
+
+        # Step 7: Build candidate set from semantic results
+        candidates = []
+        for mem in semantic_results:
+            mem_id = str(mem.id)
+            candidates.append({
+                "id": mem_id,
+                "score": mem.score,
+                "payload": mem.payload if hasattr(mem, 'payload') else {},
+            })
+
+        # Step 8: Score and rank
+        scored_results = score_and_rank(
+            semantic_results=candidates,
+            bm25_scores=bm25_scores,
+            entity_boosts=entity_boosts,
+            threshold=threshold,
             top_k=limit,
-            threshold=threshold if threshold is not None else 0.1,
             explain=explain,
         )
-        steps = [
-            QueryPreprocessingStep(self.embedding_model),
-            SemanticRecallStep(self.vector_store),
-            KeywordRecallStep(self.vector_store),
-            EntityBoostRecallStep(
-                self.embedding_model, None, entity_store_getter=lambda: self.entity_store
-            ),
-            CandidateMergeStep(),
-            ScoreFusionStep(),
-            ResultFormatStep(),
+
+        # Step 9: Format results
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
         ]
-        pipeline = SearchPipeline(steps)
-        await pipeline.run_async(ctx)
-        return ctx.formatted_results
+        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+
+        original_memories = []
+        for scored in scored_results:
+            payload = scored.get("payload") or {}
+            if not payload.get("data"):
+                continue
+
+            memory_item_dict = MemoryItem(
+                id=scored["id"],
+                memory=payload.get("data", ""),
+                hash=payload.get("hash"),
+                created_at=payload.get("created_at"),
+                updated_at=payload.get("updated_at"),
+                score=scored["score"],
+            ).model_dump()
+
+            for key in promoted_payload_keys:
+                if key in payload:
+                    memory_item_dict[key] = payload[key]
+
+            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                if not memory_item_dict.get("metadata"):
+                    memory_item_dict["metadata"] = {}
+                memory_item_dict["metadata"].update(additional_metadata)
+            if explain and "score_details" in scored:
+                memory_item_dict["score_details"] = scored["score_details"]
+
+            original_memories.append(memory_item_dict)
+
+        return original_memories
 
     async def _compute_entity_boosts_async(self, query_entities, filters):
-        """Backward-compatible async wrapper: delegates to EntityBoostRecallStep."""
-        ctx = SearchContext(
-            query_entities=list(query_entities),
-            normalized_filters=filters or {},
-        )
-        await EntityBoostRecallStep(
-            self.embedding_model, None, entity_store_getter=lambda: self.entity_store
-        ).run_async(ctx)
-        return ctx.entity_boosts
+        """Async version of entity boost computation."""
+        seen = set()
+        deduped = []
+        for entity_type, entity_text in query_entities[:8]:
+            key = entity_text.strip().lower()
+            if key and key not in seen:
+                seen.add(key)
+                deduped.append((entity_type, entity_text))
+
+        if not deduped:
+            return {}
+
+        search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
+        memory_boosts = {}
+
+        try:
+            entity_texts = [text for _, text in deduped]
+            embeddings = await asyncio.to_thread(self.embedding_model.embed_batch, entity_texts, "search")
+
+            if len(embeddings) != len(entity_texts):
+                logger.warning(
+                    "embed_batch returned %d vectors for %d texts — skipping entity boost",
+                    len(embeddings),
+                    len(entity_texts),
+                )
+                return memory_boosts
+
+            sem = asyncio.Semaphore(4)
+
+            async def _search_entity(entity_text, embedding):
+                async with sem:
+                    return await asyncio.to_thread(
+                        self.entity_store.search,
+                        query=entity_text,
+                        vectors=embedding,
+                        top_k=500,
+                        filters=search_filters,
+                    )
+
+            results = await asyncio.gather(
+                *(_search_entity(text, emb) for text, emb in zip(entity_texts, embeddings)),
+                return_exceptions=True,
+            )
+
+            for matches in results:
+                if isinstance(matches, BaseException):
+                    logger.warning("Entity boost search failed for one entity: %s", matches)
+                    continue
+
+                for match in matches:
+                    similarity = match.score if hasattr(match, 'score') else 0.0
+                    if similarity < 0.5:
+                        continue
+
+                    payload = match.payload if hasattr(match, 'payload') else {}
+                    linked_memory_ids = payload.get("linked_memory_ids", [])
+                    if not isinstance(linked_memory_ids, list):
+                        continue
+
+                    num_linked = max(len(linked_memory_ids), 1)
+                    memory_count_weight = 1.0 / (1.0 + 0.001 * ((num_linked - 1) ** 2))
+                    boost = similarity * ENTITY_BOOST_WEIGHT * memory_count_weight
+
+                    for memory_id in linked_memory_ids:
+                        if memory_id:
+                            memory_key = str(memory_id)
+                            memory_boosts[memory_key] = max(memory_boosts.get(memory_key, 0.0), boost)
+
+        except Exception as e:
+            logger.warning(f"Entity boost computation failed: {e}")
+
+        return memory_boosts
 
     async def update(self, memory_id, data, metadata: Optional[Dict[str, Any]] = None):
         """

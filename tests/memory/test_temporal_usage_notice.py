@@ -13,19 +13,7 @@ def make_sync_memory():
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._add_to_vector_store = MagicMock(return_value=[])
-
-    embedding_model = MagicMock()
-    embedding_model.embed.return_value = [0.1, 0.2, 0.3]
-    embedding_model.embed_batch.return_value = [[0.1, 0.2, 0.3]]
-    memory.embedding_model = embedding_model
-
-    vector_store = MagicMock()
-    vector_store.search.return_value = []
-    vector_store.keyword_search.return_value = None
-    memory.vector_store = vector_store
-
-    memory._entity_store = MagicMock()
-    memory._entity_store.search.return_value = []
+    memory._search_vector_store = MagicMock(return_value=[])
     return memory
 
 
@@ -35,19 +23,7 @@ def make_async_memory():
     memory.api_version = "v1.1"
     memory.reranker = None
     memory._add_to_vector_store = AsyncMock(return_value=[])
-
-    embedding_model = MagicMock()
-    embedding_model.embed.return_value = [0.1, 0.2, 0.3]
-    embedding_model.embed_batch.return_value = [[0.1, 0.2, 0.3]]
-    memory.embedding_model = embedding_model
-
-    vector_store = MagicMock()
-    vector_store.search.return_value = []
-    vector_store.keyword_search.return_value = None
-    memory.vector_store = vector_store
-
-    memory._entity_store = MagicMock()
-    memory._entity_store.search.return_value = []
+    memory._search_vector_store = AsyncMock(return_value=[])
     return memory
 
 
@@ -117,7 +93,7 @@ def test_sync_search_temporal_query_triggers_notice_after_success(monkeypatch):
     result = Memory.search(memory, "what happened last week?", filters={"user_id": "u1"})
 
     assert result == {"results": []}
-    memory.vector_store.search.assert_called_once()
+    memory._search_vector_store.assert_called_once()
     temporal_notice.assert_called_once_with(memory, "sync", "search", "query", "relative_phrase")
     first_run_notice.assert_not_called()
 
@@ -140,7 +116,7 @@ def test_sync_search_temporal_filter_triggers_notice_after_success(monkeypatch):
 
 def test_sync_search_failure_does_not_trigger_temporal_usage_notice(monkeypatch):
     memory = make_sync_memory()
-    memory.vector_store.search.side_effect = RuntimeError("search failure")
+    memory._search_vector_store.side_effect = RuntimeError("search failure")
     temporal_notice = MagicMock()
     monkeypatch.setattr(memory_main, "capture_event", MagicMock())
     monkeypatch.setattr(memory_main, "display_temporal_usage_notice", temporal_notice)
@@ -221,6 +197,6 @@ async def test_async_search_temporal_query_triggers_notice_after_success(monkeyp
     result = await AsyncMemory.search(memory, "what happened last week?", filters={"user_id": "u1"})
 
     assert result == {"results": []}
-    memory.vector_store.search.assert_called_once()
+    memory._search_vector_store.assert_awaited_once()
     temporal_notice.assert_awaited_once_with(memory, "async", "search", "query", "relative_phrase")
     first_run_notice.assert_not_awaited()

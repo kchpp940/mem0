@@ -18,19 +18,17 @@ from mem0.client.types import (
 )
 from mem0.client.utils import api_error_handler
 
-# Exception classes are referenced in docstrings only
 from mem0.memory.setup import get_user_id, is_aliased, mark_aliased, read_anon_ids, setup_config
 from mem0.memory.telemetry import capture_client_event, client_telemetry
+from mem0.schema.fields import ENTITY_FIELD_SET
 
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("default", category=DeprecationWarning)
 
-# Setup user config
 setup_config()
 
-# Entity parameters that must be passed via filters, not top-level
-ENTITY_PARAMS = frozenset({"user_id", "agent_id", "app_id", "run_id"})
+ENTITY_PARAMS = ENTITY_FIELD_SET
 
 
 def _validate_and_trim_search_query(query: str) -> str:

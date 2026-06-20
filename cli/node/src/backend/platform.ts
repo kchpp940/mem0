@@ -3,19 +3,22 @@
  */
 
 import type { PlatformConfig } from "../config.js";
-import { captureNotice, isAgentMode } from "../state.js";
-import { CLI_VERSION } from "../version.js";
 import {
-	APIError,
 	type AddOptions,
-	AuthError,
 	type Backend,
 	type DeleteOptions,
+	ENTITY_FIELDS,
 	type EntityIds,
+	FIELD_DEFAULTS,
 	type ListOptions,
-	NotFoundError,
+	SCOPE_DISPLAY_NAMES,
 	type SearchOptions,
-} from "./base.js";
+	getAddApiKey,
+	getSearchApiKey,
+} from "../schema/index.js";
+import { captureNotice, isAgentMode } from "../state.js";
+import { CLI_VERSION } from "../version.js";
+import { APIError, AuthError, NotFoundError } from "./base.js";
 
 export class PlatformBackend implements Backend {
 	private baseUrl: string;
@@ -138,14 +141,21 @@ export class PlatformBackend implements Backend {
 			payload.messages = [{ role: "user", content }];
 		}
 
-		if (opts.userId) payload.user_id = opts.userId;
-		if (opts.agentId) payload.agent_id = opts.agentId;
-		if (opts.appId) payload.app_id = opts.appId;
-		if (opts.runId) payload.run_id = opts.runId;
+		const entityIds: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+		};
+		for (const fieldName of ENTITY_FIELDS) {
+			const value = entityIds[fieldName];
+			if (value) payload[fieldName] = value;
+		}
+
 		if (opts.metadata) payload.metadata = opts.metadata;
 		if (opts.immutable) payload.immutable = true;
 		if (opts.infer === false) payload.infer = false;
-		if (opts.expires) payload.expiration_date = opts.expires;
+		if (opts.expires) payload[getAddApiKey("expires")] = opts.expires;
 		if (opts.categories) payload.categories = opts.categories;
 		payload.source = "CLI";
 
@@ -161,7 +171,6 @@ export class PlatformBackend implements Backend {
 		runId?: string;
 		extraFilters?: Record<string, unknown>;
 	}): Record<string, unknown> | undefined {
-		// If caller passed a pre-built filter structure, use it directly
 		if (
 			opts.extraFilters &&
 			("AND" in opts.extraFilters || "OR" in opts.extraFilters)
@@ -169,11 +178,17 @@ export class PlatformBackend implements Backend {
 			return opts.extraFilters;
 		}
 
+		const entityIds: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+		};
 		const andConditions: Record<string, unknown>[] = [];
-		if (opts.userId) andConditions.push({ user_id: opts.userId });
-		if (opts.agentId) andConditions.push({ agent_id: opts.agentId });
-		if (opts.appId) andConditions.push({ app_id: opts.appId });
-		if (opts.runId) andConditions.push({ run_id: opts.runId });
+		for (const fieldName of ENTITY_FIELDS) {
+			const value = entityIds[fieldName];
+			if (value) andConditions.push({ [fieldName]: value });
+		}
 
 		if (opts.extraFilters) {
 			for (const [k, v] of Object.entries(opts.extraFilters)) {
@@ -192,8 +207,8 @@ export class PlatformBackend implements Backend {
 	): Promise<Record<string, unknown>[]> {
 		const payload: Record<string, unknown> = {
 			query,
-			top_k: opts.topK ?? 10,
-			threshold: opts.threshold ?? 0.3,
+			top_k: opts.topK ?? FIELD_DEFAULTS.top_k,
+			threshold: opts.threshold ?? FIELD_DEFAULTS.threshold,
 		};
 
 		const apiFilters = this._buildFilters({
@@ -205,7 +220,7 @@ export class PlatformBackend implements Backend {
 		});
 		if (apiFilters) payload.filters = apiFilters;
 		if (opts.rerank) payload.rerank = true;
-		if (opts.keyword) payload.keyword_search = true;
+		if (opts.keyword) payload[getSearchApiKey("keyword")] = true;
 		if (opts.fields) payload.fields = opts.fields;
 		payload.source = "CLI";
 
@@ -359,12 +374,9 @@ export class PlatformBackend implements Backend {
 			>[];
 		}
 
-		const typeMap: Record<string, string> = {
-			users: "user",
-			agents: "agent",
-			apps: "app",
-			runs: "run",
-		};
+		const typeMap: Record<string, string> = Object.fromEntries(
+			Object.entries(SCOPE_DISPLAY_NAMES).map(([k, v]) => [`${k}s`, v]),
+		);
 		const targetType = typeMap[entityType];
 		if (targetType) {
 			items = items.filter(

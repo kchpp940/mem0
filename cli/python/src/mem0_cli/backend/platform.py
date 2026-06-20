@@ -5,6 +5,13 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from mem0.schema.fields import (
+    ENTITY_FIELDS,
+    FIELD_DEFAULTS,
+    SCOPE_DISPLAY_NAMES,
+    get_add_api_key,
+    get_search_api_key,
+)
 
 from mem0_cli import __version__
 from mem0_cli.backend.base import Backend
@@ -91,14 +98,11 @@ class PlatformBackend(Backend):
         elif content:
             payload["messages"] = [{"role": "user", "content": content}]
 
-        if user_id:
-            payload["user_id"] = user_id
-        if agent_id:
-            payload["agent_id"] = agent_id
-        if app_id:
-            payload["app_id"] = app_id
-        if run_id:
-            payload["run_id"] = run_id
+        entity_ids = {"user_id": user_id, "agent_id": agent_id, "app_id": app_id, "run_id": run_id}
+        for field_name, field_value in entity_ids.items():
+            if field_value:
+                payload[field_name] = field_value
+
         if metadata:
             payload["metadata"] = metadata
         if immutable:
@@ -106,7 +110,7 @@ class PlatformBackend(Backend):
         if not infer:
             payload["infer"] = False
         if expires:
-            payload["expiration_date"] = expires
+            payload[get_add_api_key("expires")] = expires
         if categories:
             payload["categories"] = categories
         payload["source"] = "CLI"
@@ -122,27 +126,16 @@ class PlatformBackend(Backend):
         run_id: str | None = None,
         extra_filters: dict | None = None,
     ) -> dict | None:
-        """Build a filters dict for v3 API endpoints.
-
-        Entity IDs are ANDed (all provided IDs must match).
-        Extra filters (date ranges, categories) are also ANDed.
-        """
-        # If caller passed a pre-built filter structure (e.g. --filter from CLI), use it directly
         if extra_filters and ("AND" in extra_filters or "OR" in extra_filters):
             return extra_filters
 
-        # Build AND conditions for entity IDs
         and_conditions: list[dict[str, Any]] = []
-        if user_id:
-            and_conditions.append({"user_id": user_id})
-        if agent_id:
-            and_conditions.append({"agent_id": agent_id})
-        if app_id:
-            and_conditions.append({"app_id": app_id})
-        if run_id:
-            and_conditions.append({"run_id": run_id})
+        entity_ids = {"user_id": user_id, "agent_id": agent_id, "app_id": app_id, "run_id": run_id}
+        for field_name in ENTITY_FIELDS:
+            value = entity_ids.get(field_name)
+            if value:
+                and_conditions.append({field_name: value})
 
-        # Append any extra filters (dates, categories)
         if extra_filters:
             for k, v in extra_filters.items():
                 and_conditions.append({k: v})
@@ -162,10 +155,10 @@ class PlatformBackend(Backend):
         agent_id: str | None = None,
         app_id: str | None = None,
         run_id: str | None = None,
-        top_k: int = 10,
-        threshold: float = 0.3,
-        rerank: bool = False,
-        keyword: bool = False,
+        top_k: int = FIELD_DEFAULTS["top_k"],
+        threshold: float = FIELD_DEFAULTS["threshold"],
+        rerank: bool = FIELD_DEFAULTS["rerank"],
+        keyword: bool = FIELD_DEFAULTS["keyword"],
         filters: dict | None = None,
         fields: list[str] | None = None,
     ) -> list[dict]:
@@ -183,7 +176,7 @@ class PlatformBackend(Backend):
         if rerank:
             payload["rerank"] = True
         if keyword:
-            payload["keyword_search"] = True
+            payload[get_search_api_key("keyword")] = True
         if fields:
             payload["fields"] = fields
         payload["source"] = "CLI"
@@ -205,8 +198,8 @@ class PlatformBackend(Backend):
         agent_id: str | None = None,
         app_id: str | None = None,
         run_id: str | None = None,
-        page: int = 1,
-        page_size: int = 100,
+        page: int = FIELD_DEFAULTS["page"],
+        page_size: int = FIELD_DEFAULTS["page_size"],
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
@@ -286,7 +279,6 @@ class PlatformBackend(Backend):
         app_id: str | None = None,
         run_id: str | None = None,
     ) -> dict:
-        # v2 endpoint: DELETE /v2/entities/{entity_type}/{entity_id}/
         type_map = {
             "user": user_id,
             "agent": agent_id,
@@ -296,7 +288,6 @@ class PlatformBackend(Backend):
         entities = {t: v for t, v in type_map.items() if v}
         if not entities:
             raise ValueError("At least one entity ID is required for delete_entities.")
-        # Delete each provided entity via the v2 path-based endpoint
         result: dict = {}
         for entity_type, entity_id in entities.items():
             result = self._request(
@@ -334,8 +325,7 @@ class PlatformBackend(Backend):
     def entities(self, entity_type: str) -> list[dict]:
         result = self._request("GET", "/v1/entities/")
         items = result if isinstance(result, list) else result.get("results", [])
-        # Filter by entity type client-side (API returns all types)
-        type_map = {"users": "user", "agents": "agent", "apps": "app", "runs": "run"}
+        type_map = {f"{k}s": v for k, v in SCOPE_DISPLAY_NAMES.items()}
         target_type = type_map.get(entity_type)
         if target_type:
             items = [e for e in items if e.get("type", "").lower() == target_type]

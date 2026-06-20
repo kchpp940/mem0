@@ -170,6 +170,13 @@ app.include_router(entities_router.router)
 app.include_router(requests_router.router)
 
 
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+from mem0.schema.fields import ENTITY_FIELDS, FIELD_DEFAULTS, validate_filters_contain_entity
+
+
 class Message(BaseModel):
     role: str = Field(..., description="Role of the message (user or assistant).")
     content: str = Field(..., description="Message content.")
@@ -354,8 +361,11 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 @app.post("/memories", summary="Create memories")
 def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     """Store new memories."""
-    if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
+    if not any(getattr(memory_create, f, None) for f in ENTITY_FIELDS[:3]):
+        raise HTTPException(
+            status_code=400,
+            detail=f"At least one identifier ({', '.join(ENTITY_FIELDS[:3])}) is required.",
+        )
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
     try:
@@ -407,9 +417,7 @@ def get_all_memories(
             if _auth is not None and _auth.role != "admin" and auth_type not in {"admin_api_key", "disabled"}:
                 raise HTTPException(status_code=403, detail="Admin role required to list all memories.")
             return _list_all_memories()
-        filters = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
-        }
+        filters = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None}
         return get_memory_instance().get_all(filters=filters)
     except HTTPException:
         raise
@@ -432,7 +440,7 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
     try:
         filters = search_req.filters or {}
         deprecated_keys = []
-        for entity_key in ("user_id", "agent_id", "run_id"):
+        for entity_key in ENTITY_FIELDS[:3]:
             entity_val = getattr(search_req, entity_key, None)
             if entity_val is not None:
                 filters[entity_key] = entity_val
@@ -498,11 +506,12 @@ def delete_all_memories(
 ):
     """Delete all memories for a given identifier. Requires admin role."""
     if not any([user_id, run_id, agent_id]):
-        raise HTTPException(status_code=400, detail="At least one identifier is required.")
+        raise HTTPException(
+            status_code=400,
+            detail=f"At least one identifier ({', '.join(ENTITY_FIELDS[:3])}) is required.",
+        )
     try:
-        params = {
-            k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
-        }
+        params = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None}
         get_memory_instance().delete_all(**params)
         return MessageResponse(message="All relevant memories deleted")
     except Exception:

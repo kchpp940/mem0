@@ -187,14 +187,6 @@ def test_search_explain_includes_score_details(
     assert details["final_score"] == result["results"][0]["score"]
     assert details["threshold"] == 0.1
 
-    assert "trace" in result
-    trace = result["trace"]
-    assert "step_durations_ms" in trace
-    assert "steps" in trace
-    assert "total_elapsed_ms" in trace
-    assert "score_fusion" in trace["steps"]
-    assert trace["steps"]["score_fusion"]["threshold"] == 0.1
-
 
 @patch('mem0.utils.factory.EmbedderFactory.create')
 @patch('mem0.utils.factory.VectorStoreFactory.create')
@@ -567,10 +559,9 @@ def test_add_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm_fa
     memory.add("I like Python", user_id="test_user", infer=True)
 
     # V3 pipeline: embed called once for search query (Phase 1),
-    # embed_batch called once for extracted memories (Phase 3),
-    # embed_batch called once for entity linking (Phase 7)
+    # embed_batch called once for extracted memories (Phase 3)
     assert embedder.embed.call_count == 1
-    assert embedder.embed_batch.call_count == 2
+    assert embedder.embed_batch.call_count == 1
     mock_vector_store.insert.assert_called_once()
 
 
@@ -625,10 +616,9 @@ def test_update_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm
     memory.add("I love Python now", user_id="test_user", infer=True)
 
     # V3 pipeline: embed called once for search query (Phase 1),
-    # embed_batch called once for extracted memories (Phase 3),
-    # embed_batch called once for entity linking (Phase 7)
+    # embed_batch called once for extracted memories (Phase 3)
     assert embedder.embed.call_count == 1
-    assert embedder.embed_batch.call_count == 2
+    assert embedder.embed_batch.call_count == 1
     mock_vector_store.insert.assert_called_once()
 
 

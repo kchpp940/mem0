@@ -769,57 +769,18 @@ program
 
 program
 	.command("import <filePath>")
-	.description(
-		"Import memories from JSONL, JSON, or CSV with field mapping and batch processing.",
-	)
-	.option("-u, --user-id <id>", "Set user ID for all memories.")
-	.option("--agent-id <id>", "Set agent ID for all memories.")
-	.option("--app-id <id>", "Set app ID for all memories.")
-	.option("--run-id <id>", "Set run ID for all memories.")
-	.option("--category <name>", "Add a category to all memories.")
-	.option("--categories <value>", "Categories (JSON array or comma-separated).")
-	.option(
-		"--field-map <mapping>",
-		"Field mapping: source=dest, e.g. 'content=memory,owner=user_id'.",
-	)
-	.option("-m, --metadata <json>", "Metadata to attach (JSON).")
-	.option(
-		"-f, --format <format>",
-		"Input format: jsonl, json, csv (auto-detected from extension).",
-	)
-	.option(
-		"--batch-size <n>",
-		"Batch size for processing.",
-		(v) => Number.parseInt(v),
-		100,
-	)
-	.option("--infer", "Infer facts from memory content.", true)
-	.option("--no-infer", "Skip inference, store raw.")
-	.option(
-		"--cursor <n>",
-		"Start index for resuming a failed import.",
-		(v) => Number.parseInt(v),
-		0,
-	)
-	.option("--batch-id <id>", "Existing batch ID for resuming an import (persisted on server).")
-	.option("--resume", "Resume from cached/specified batch_id and cursor (works across restarts).", false)
-	.option("--dry-run", "Preview import without making changes.", false)
-	.option("-o, --output <format>", "Output: text, json, quiet.", "text")
+	.description("Import memories from a JSON file.")
+	.option("-u, --user-id <id>", "Override user ID.")
+	.option("--agent-id <id>", "Override agent ID.")
+	.option("-o, --output <format>", "Output: text, json.", "text")
 	.option("--api-key <key>", "Override API key.")
 	.option("--base-url <url>", "Override API base URL.")
 	.addHelpText(
 		"after",
-		[
-			"\nExamples:",
-			"  $ mem0 import data.jsonl --user-id alice",
-			"  $ mem0 import data.csv --field-map content=memory,owner=user_id",
-			"  $ mem0 import data.json --dry-run",
-			"  $ mem0 import data.jsonl --resume                           # resume last cached batch",
-			"  $ mem0 import data.jsonl --resume --batch-id batch_abc123",
-		].join("\n"),
+		"\nExamples:\n  $ mem0 import data.json --user-id alice\n  $ mem0 import data.json -u alice -o json",
 	)
 	.action(async (filePath, opts) => {
-		const { cmdImport } = await import("./commands/memory.js");
+		const { cmdImport } = await import("./commands/utils.js");
 		const isAgent = checkAgentMode();
 		const { backend, config } = await getBackendAndConfig(
 			opts.apiKey,
@@ -828,91 +789,8 @@ program
 		const ids = resolveIds(config, opts);
 		const output = isAgent ? "agent" : opts.output;
 		await cmdImport(backend, filePath, {
-			...ids,
-			category: opts.category,
-			categories: opts.categories,
-			fieldMap: opts.fieldMap,
-			metadata: opts.metadata,
-			format: opts.format,
-			batchSize: opts.batchSize,
-			infer: opts.infer,
-			cursor: opts.cursor,
-			batchId: opts.batchId,
-			resume: opts.resume,
-			dryRun: opts.dryRun,
-			output,
-		});
-	});
-
-program
-	.command("import-status [batchId]")
-	.description(
-		"Query the persisted status of a batch import. No arg = use last cached batch.",
-	)
-	.option("-o, --output <format>", "Output: text, json.", "text")
-	.option("--api-key <key>", "Override API key.")
-	.option("--base-url <url>", "Override API base URL.")
-	.addHelpText(
-		"after",
-		[
-			"\nExamples:",
-			"  $ mem0 import-status                                    # last cached batch",
-			"  $ mem0 import-status batch_abc123",
-			"  $ mem0 import-status batch_abc123 -o json",
-		].join("\n"),
-	)
-	.action(async (batchId, opts) => {
-		const { cmdImportStatus } = await import("./commands/memory.js");
-		const isAgent = checkAgentMode();
-		const backend = await getBackendOnly(opts.apiKey, opts.baseUrl);
-		const output = isAgent ? "agent" : opts.output;
-		await cmdImportStatus(backend, batchId, { output });
-	});
-
-program
-	.command("export <outputFile>")
-	.description("Export memories to JSONL format with optional filters.")
-	.option("-u, --user-id <id>", "Filter by user.")
-	.option("--agent-id <id>", "Filter by agent.")
-	.option("--app-id <id>", "Filter by app.")
-	.option("--run-id <id>", "Filter by run.")
-	.option("--category <name>", "Filter by category.")
-	.option("--after <date>", "Created after (YYYY-MM-DD).")
-	.option("--before <date>", "Created before (YYYY-MM-DD).")
-	.option("--filter <json>", "Advanced filter expression (JSON).")
-	.option(
-		"-f, --format <format>",
-		"Output format (currently only jsonl).",
-		"jsonl",
-	)
-	.option("-o, --output <format>", "Output: text, json, quiet.", "text")
-	.option("--api-key <key>", "Override API key.")
-	.option("--base-url <url>", "Override API base URL.")
-	.addHelpText(
-		"after",
-		[
-			"\nExamples:",
-			"  $ mem0 export backup.jsonl --user-id alice",
-			"  $ mem0 export backup.jsonl --category prefs --after 2024-01-01",
-			'  $ mem0 export backup.jsonl --filter \'{"metadata.source": "import"}\'',
-		].join("\n"),
-	)
-	.action(async (outputFile, opts) => {
-		const { cmdExport } = await import("./commands/memory.js");
-		const isAgent = checkAgentMode();
-		const { backend, config } = await getBackendAndConfig(
-			opts.apiKey,
-			opts.baseUrl,
-		);
-		const ids = resolveIds(config, opts);
-		const output = isAgent ? "agent" : opts.output;
-		await cmdExport(backend, outputFile, {
-			...ids,
-			category: opts.category,
-			after: opts.after,
-			before: opts.before,
-			filterJson: opts.filter,
-			format: opts.format,
+			userId: ids.userId,
+			agentId: ids.agentId,
 			output,
 		});
 	});
@@ -968,11 +846,7 @@ program
 			console.log(
 				"  delete           Delete a memory, all memories, or an entity",
 			);
-			console.log(
-				"  import           Import memories from JSONL/JSON/CSV (batch, field mapping, dry-run, resume by batch_id)",
-			);
-			console.log("  import-status    Query persisted status of a batch import (or last cached)");
-			console.log("  export           Export memories to JSONL with filters");
+			console.log("  import           Import memories from a JSON file");
 			console.log("  config           Manage configuration (show, get, set)");
 			console.log("  entity           Manage entities (list, delete)");
 			console.log(

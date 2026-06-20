@@ -10,11 +10,8 @@ import {
 	type AddOptions,
 	AuthError,
 	type Backend,
-	type BatchImportOptions,
-	type BatchImportResponse,
 	type DeleteOptions,
 	type EntityIds,
-	type ExportOptions,
 	type ListOptions,
 	NotFoundError,
 	type SearchOptions,
@@ -391,123 +388,5 @@ export class PlatformBackend implements Backend {
 			string,
 			unknown
 		>;
-	}
-
-	async batchImport(
-		memories: Record<string, unknown>[],
-		opts: BatchImportOptions = {},
-	): Promise<BatchImportResponse> {
-		const payload: Record<string, unknown> = {
-			memories,
-			cursor: opts.cursor ?? 0,
-			batch_size: opts.batchSize ?? 100,
-			infer: opts.infer ?? true,
-			source: "CLI",
-		};
-		if (opts.batchId) payload.batch_id = opts.batchId;
-
-		const result = (await this._request("POST", "/v1/memories/batch/import", {
-			json: payload,
-		})) as Record<string, unknown>;
-
-		return {
-			batchId: result.batch_id as string,
-			total: result.total as number,
-			processed: result.processed as number,
-			successCount: result.success_count as number,
-			failedCount: result.failed_count as number,
-			cursor: result.cursor as number,
-			completed: result.completed as boolean,
-			successful:
-				(result.successful as Array<Record<string, unknown>>)?.map((s) => ({
-					index: s.index as number,
-					id: s.id as string | undefined,
-					memory: s.memory as string | undefined,
-				})) ?? [],
-			failed:
-				(result.failed as Array<Record<string, unknown>>)?.map((f) => ({
-					index: f.index as number,
-					error: f.error as string,
-					data: f.data as Record<string, unknown> | undefined,
-				})) ?? [],
-		};
-	}
-
-	async getBatchStatus(batchId: string): Promise<BatchImportResponse> {
-		const result = (await this._request(
-			"GET",
-			`/v1/memories/batch/import/${batchId}`,
-			{ params: { source: "CLI" } },
-		)) as Record<string, unknown>;
-
-		return {
-			batchId: result.batch_id as string,
-			total: result.total as number,
-			processed: result.processed as number,
-			successCount: result.success_count as number,
-			failedCount: result.failed_count as number,
-			cursor: result.cursor as number,
-			completed: result.completed as boolean,
-			successful:
-				(result.successful as Array<Record<string, unknown>>)?.map((s) => ({
-					index: s.index as number,
-					id: s.id as string | undefined,
-					memory: s.memory as string | undefined,
-				})) ?? [],
-			failed:
-				(result.failed as Array<Record<string, unknown>>)?.map((f) => ({
-					index: f.index as number,
-					error: f.error as string,
-					data: f.data as Record<string, unknown> | undefined,
-				})) ?? [],
-		};
-	}
-
-	async exportMemories(opts: ExportOptions = {}): Promise<string> {
-		const params: Record<string, string> = { source: "CLI" };
-		if (opts.userId) params.user_id = opts.userId;
-		if (opts.agentId) params.agent_id = opts.agentId;
-		if (opts.appId) params.app_id = opts.appId;
-		if (opts.runId) params.run_id = opts.runId;
-		if (opts.category) params.category = opts.category;
-		if (opts.after) params.after = opts.after;
-		if (opts.before) params.before = opts.before;
-
-		let url = `${this.baseUrl}/v1/memories/export`;
-		const qs = new URLSearchParams(params).toString();
-		if (qs) url += `?${qs}`;
-
-		const headers: Record<string, string> = {
-			...this.headers,
-			"X-Mem0-Caller-Type": isAgentMode() ? "agent" : "user",
-		};
-
-		const fetchOpts: RequestInit = {
-			method: opts.filters ? "POST" : "GET",
-			headers,
-			signal: AbortSignal.timeout(300_000),
-		};
-
-		if (opts.filters) {
-			fetchOpts.body = JSON.stringify({ filters: opts.filters });
-			headers["Content-Type"] = "application/json";
-		}
-
-		const resp = await fetch(url, fetchOpts);
-
-		if (resp.status === 401) throw new AuthError();
-		if (resp.status === 404) throw new NotFoundError("/v1/memories/export");
-		if (!resp.ok) {
-			let detail: string = resp.statusText;
-			try {
-				const body = (await resp.json()) as Record<string, unknown>;
-				detail = (body.detail ?? body.message ?? resp.statusText) as string;
-			} catch {
-				/* ignore */
-			}
-			throw new Error(`HTTP ${resp.status}: ${detail}`);
-		}
-
-		return resp.text();
 	}
 }

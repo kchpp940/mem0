@@ -26,6 +26,7 @@ class Backend(ABC):
         infer: bool = True,
         expires: str | None = None,
         categories: list[str] | None = None,
+        trace_enabled: bool = False,
     ) -> dict: ...
 
     @abstractmethod
@@ -43,6 +44,7 @@ class Backend(ABC):
         keyword: bool = False,
         filters: dict | None = None,
         fields: list[str] | None = None,
+        trace_enabled: bool = False,
     ) -> list[dict]: ...
 
     @abstractmethod
@@ -61,6 +63,7 @@ class Backend(ABC):
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
+        trace_enabled: bool = False,
     ) -> list[dict]: ...
 
     @abstractmethod
@@ -106,34 +109,6 @@ class Backend(ABC):
 
     @abstractmethod
     def get_event(self, event_id: str) -> dict: ...
-
-    @abstractmethod
-    def batch_import(
-        self,
-        memories: list[dict],
-        *,
-        batch_id: str | None = None,
-        cursor: int = 0,
-        batch_size: int = 100,
-        infer: bool = True,
-    ) -> dict: ...
-
-    @abstractmethod
-    def export_memories(
-        self,
-        *,
-        user_id: str | None = None,
-        agent_id: str | None = None,
-        app_id: str | None = None,
-        run_id: str | None = None,
-        category: str | None = None,
-        after: str | None = None,
-        before: str | None = None,
-        filters: dict | None = None,
-    ) -> str: ...
-
-    @abstractmethod
-    def get_batch_status(self, batch_id: str) -> dict: ...
 
 
 def get_backend(config: Mem0Config) -> Backend:

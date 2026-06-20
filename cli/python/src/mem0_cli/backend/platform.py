@@ -28,6 +28,8 @@ class PlatformBackend(Backend):
             },
             timeout=30.0,
         )
+        self._last_operation_id: str | None = None
+        self._last_response: Any = None
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         from mem0_cli.state import capture_notice, is_agent_mode
@@ -50,6 +52,9 @@ class PlatformBackend(Backend):
             return {}
         data = resp.json()
 
+        # Capture operation_id from response headers for trace
+        self._last_operation_id = resp.headers.get("X-Operation-ID") or None
+
         # Pull the unclaimed-Agent-Mode notice out of the body (or the header
         # fallback for endpoints that return non-dict / non-dict-leading
         # payloads) and stash it for end-of-command surfacing.
@@ -67,7 +72,13 @@ class PlatformBackend(Backend):
             notice = resp.headers.get("X-Mem0-Notice-Message") or None
         capture_notice(notice)
 
+        self._last_response = data
         return data
+
+    @property
+    def last_operation_id(self) -> str | None:
+        """Return the operation ID from the last API response (X-Operation-ID header)."""
+        return self._last_operation_id
 
     def add(
         self,
@@ -83,6 +94,7 @@ class PlatformBackend(Backend):
         infer: bool = True,
         expires: str | None = None,
         categories: list[str] | None = None,
+        trace_enabled: bool = False,
     ) -> dict:
         payload: dict[str, Any] = {}
 
@@ -109,6 +121,8 @@ class PlatformBackend(Backend):
             payload["expiration_date"] = expires
         if categories:
             payload["categories"] = categories
+        if trace_enabled:
+            payload["trace_enabled"] = True
         payload["source"] = "CLI"
 
         return self._request("POST", "/v3/memories/add/", json=payload)
@@ -168,6 +182,7 @@ class PlatformBackend(Backend):
         keyword: bool = False,
         filters: dict | None = None,
         fields: list[str] | None = None,
+        trace_enabled: bool = False,
     ) -> list[dict]:
         payload: dict[str, Any] = {"query": query, "top_k": top_k, "threshold": threshold}
 
@@ -186,9 +201,14 @@ class PlatformBackend(Backend):
             payload["keyword_search"] = True
         if fields:
             payload["fields"] = fields
+        if trace_enabled:
+            payload["trace_enabled"] = True
         payload["source"] = "CLI"
 
         result = self._request("POST", "/v3/memories/search/", json=payload)
+        # Return the full dict wrapper (including trace/operation_id) when trace is enabled
+        if trace_enabled and isinstance(result, dict):
+            return result
         return (
             result
             if isinstance(result, list)
@@ -210,6 +230,7 @@ class PlatformBackend(Backend):
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
+        trace_enabled: bool = False,
     ) -> list[dict]:
         payload: dict[str, Any] = {}
         params = {"page": str(page), "page_size": str(page_size)}
@@ -232,9 +253,14 @@ class PlatformBackend(Backend):
         )
         if api_filters:
             payload["filters"] = api_filters
+        if trace_enabled:
+            payload["trace_enabled"] = True
         payload["source"] = "CLI"
 
         result = self._request("POST", "/v3/memories/", json=payload, params=params)
+        # Return the full dict wrapper (including trace/operation_id) when trace is enabled
+        if trace_enabled and isinstance(result, dict):
+            return result
         return (
             result
             if isinstance(result, list)
@@ -347,78 +373,6 @@ class PlatformBackend(Backend):
 
     def get_event(self, event_id: str) -> dict:
         return self._request("GET", f"/v1/event/{event_id}/")
-
-    def batch_import(
-        self,
-        memories: list[dict],
-        *,
-        batch_id: str | None = None,
-        cursor: int = 0,
-        batch_size: int = 100,
-        infer: bool = True,
-    ) -> dict:
-        payload: dict[str, Any] = {
-            "memories": memories,
-            "cursor": cursor,
-            "batch_size": batch_size,
-            "infer": infer,
-            "source": "CLI",
-        }
-        if batch_id:
-            payload["batch_id"] = batch_id
-        return self._request("POST", "/v1/memories/batch/import", json=payload)
-
-    def export_memories(
-        self,
-        *,
-        user_id: str | None = None,
-        agent_id: str | None = None,
-        app_id: str | None = None,
-        run_id: str | None = None,
-        category: str | None = None,
-        after: str | None = None,
-        before: str | None = None,
-        filters: dict | None = None,
-    ) -> str:
-        params = {
-            "source": "CLI",
-        }
-        if user_id:
-            params["user_id"] = user_id
-        if agent_id:
-            params["agent_id"] = agent_id
-        if app_id:
-            params["app_id"] = app_id
-        if run_id:
-            params["run_id"] = run_id
-        if category:
-            params["category"] = category
-        if after:
-            params["after"] = after
-        if before:
-            params["before"] = before
-
-        if filters:
-            payload = {"filters": filters}
-            resp = self._client.post("/v1/memories/export", params=params, json=payload)
-        else:
-            resp = self._client.get("/v1/memories/export", params=params)
-
-        if resp.status_code == 401:
-            raise AuthError("Authentication failed. Your API key may be invalid or expired.")
-        if resp.status_code == 404:
-            raise NotFoundError("Resource not found: /v1/memories/export")
-        if resp.status_code == 400:
-            try:
-                detail = resp.json().get("detail", resp.text)
-            except Exception:
-                detail = resp.text
-            raise APIError(f"Bad request to /v1/memories/export: {detail}")
-        resp.raise_for_status()
-        return resp.text
-
-    def get_batch_status(self, batch_id: str) -> dict:
-        return self._request("GET", f"/v1/memories/batch/import/{batch_id}")
 
 
 class AuthError(Exception):

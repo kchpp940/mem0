@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, JSON, String, Text
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from db import Base
@@ -13,40 +13,6 @@ def _utcnow() -> datetime:
 
 def _new_uuid() -> uuid.UUID:
     return uuid.uuid4()
-
-
-class BatchImport(Base):
-    __tablename__ = "batch_imports"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
-    batch_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
-    total: Mapped[int] = mapped_column(Integer, default=0)
-    processed: Mapped[int] = mapped_column(Integer, default=0)
-    success_count: Mapped[int] = mapped_column(Integer, default=0)
-    failed_count: Mapped[int] = mapped_column(Integer, default=0)
-    cursor: Mapped[int] = mapped_column(Integer, default=0)
-    completed: Mapped[bool] = mapped_column(default=False)
-    source: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        default=_utcnow,
-        onupdate=_utcnow,
-    )
-
-
-class BatchImportItem(Base):
-    __tablename__ = "batch_import_items"
-
-    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=_new_uuid)
-    batch_id: Mapped[str] = mapped_column(String(64), index=True)
-    index: Mapped[int] = mapped_column(Integer)
-    success: Mapped[bool] = mapped_column(default=False)
-    memory_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    memory: Mapped[str | None] = mapped_column(Text, nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    raw_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
 
 class User(Base):

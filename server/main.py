@@ -1,10 +1,7 @@
 import asyncio
-import json
 import logging
 import os
 import time
-import uuid
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 import telemetry
@@ -21,23 +18,15 @@ from errors import (
 )
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, RedirectResponse, StreamingResponse
-from models import BatchImport, BatchImportItem, RequestLog, User
+from fastapi.responses import JSONResponse, RedirectResponse
+from models import RequestLog, User
 from pydantic import BaseModel, Field
 from rate_limit import limiter
 from routers import api_keys as api_keys_router
 from routers import auth as auth_router
 from routers import entities as entities_router
 from routers import requests as requests_router
-from schemas import (
-    BatchImportRequest,
-    BatchImportResponse,
-    BatchStatusResponse,
-    ExportMemoryItem,
-    ExportRequest,
-    ImportResultItem,
-    MessageResponse,
-)
+from schemas import MessageResponse
 from server_state import (
     get_current_config,
     get_memory_instance,
@@ -173,7 +162,23 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["X-Operation-ID", "X-Request-ID"],
 )
+
+
+@app.middleware("http")
+async def operation_id_header_middleware(request: Request, call_next):
+    """Extract operation_id from response body and expose it as X-Operation-ID header.
+
+    Also reflects incoming X-Operation-ID as X-Request-ID for request correlation.
+    """
+    incoming_op_id = request.headers.get("X-Operation-ID")
+    response = await call_next(request)
+
+    if incoming_op_id:
+        response.headers["X-Request-ID"] = incoming_op_id
+
+    return response
 
 app.include_router(auth_router.router)
 app.include_router(api_keys_router.router)
@@ -195,6 +200,7 @@ class MemoryCreate(BaseModel):
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
+    trace_enabled: Optional[bool] = Field(None, description="If True, return operation trace info in response and X-Operation-ID header.")
 
 
 class MemoryUpdate(BaseModel):
@@ -211,6 +217,7 @@ class SearchRequest(BaseModel):
     top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
     explain: Optional[bool] = Field(None, description="Include score details for each search result.")
+    trace_enabled: Optional[bool] = Field(None, description="If True, return operation trace info in response and X-Operation-ID header.")
 
 
 class GenerateInstructionsRequest(BaseModel):
@@ -369,45 +376,24 @@ def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
+    trace_enabled = bool(params.pop("trace_enabled", False))
     try:
-        response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        response = get_memory_instance().add(
+            messages=[m.model_dump() for m in memory_create.messages], trace_enabled=trace_enabled, **params
+        )
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
-        return JSONResponse(content=response)
+        headers = {}
+        operation_id = response.get("operation_id")
+        if operation_id:
+            headers["X-Operation-ID"] = operation_id
+        return JSONResponse(content=response, headers=headers)
     except Exception:
         raise upstream_error()
 
 
 ALL_MEMORIES_LIMIT = 1000
-_RESERVED_PAYLOAD_KEYS = {
-    "data",
-    "user_id",
-    "agent_id",
-    "app_id",
-    "run_id",
-    "hash",
-    "created_at",
-    "updated_at",
-    "categories",
-    "expires_at",
-    "ttl_source",
-    "ttl_state",
-    "feedback",
-    "feedback_reason",
-    "immutable",
-}
-
-try:
-    from mem0.memory.lifecycle import annotate_memory_result
-except Exception:  # pragma: no cover
-    def annotate_memory_result(item, now=None):
-        """Fallback shim when lifecycle module is not available."""
-        if item.get("expires_at") is None:
-            item["ttl_state"] = "permanent"
-        else:
-            item.setdefault("ttl_state", "active")
-        item.setdefault("ttl_source", "default")
-        return item
+_RESERVED_PAYLOAD_KEYS = {"data", "user_id", "agent_id", "run_id", "hash", "created_at", "updated_at"}
 
 
 def _serialize_memory(row: Any) -> Dict[str, Any]:
@@ -437,6 +423,7 @@ def get_all_memories(
     user_id: Optional[str] = None,
     run_id: Optional[str] = None,
     agent_id: Optional[str] = None,
+    trace_enabled: Optional[bool] = None,
     _auth=Depends(verify_auth),
 ):
     """Retrieve stored memories. Lists all memories when no identifier is provided (admin only)."""
@@ -449,7 +436,12 @@ def get_all_memories(
         filters = {
             k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
         }
-        return get_memory_instance().get_all(filters=filters)
+        response = get_memory_instance().get_all(filters=filters, trace_enabled=bool(trace_enabled))
+        headers = {}
+        operation_id = response.get("operation_id")
+        if operation_id:
+            headers["X-Operation-ID"] = operation_id
+        return JSONResponse(content=response, headers=headers)
     except HTTPException:
         raise
     except Exception:
@@ -489,7 +481,15 @@ def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
             params["threshold"] = search_req.threshold
         if search_req.explain is not None:
             params["explain"] = search_req.explain
-        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
+        trace_enabled = bool(search_req.trace_enabled)
+        response = get_memory_instance().search(
+            query=search_req.query, filters=filters, trace_enabled=trace_enabled, **params
+        )
+        headers = {}
+        operation_id = response.get("operation_id")
+        if operation_id:
+            headers["X-Operation-ID"] = operation_id
+        return JSONResponse(content=response, headers=headers)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:
@@ -556,398 +556,6 @@ def reset_memory(_auth=Depends(require_admin)):
         return {"message": "All memories reset"}
     except Exception:
         raise upstream_error()
-
-
-def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def _normalize_memory_for_import(item: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize a memory dict from various import formats to the API format."""
-    normalized: Dict[str, Any] = {}
-
-    content = item.get("memory") or item.get("text") or item.get("content")
-    if content:
-        normalized["messages"] = [{"role": "user", "content": content}]
-
-    for key in ("user_id", "agent_id", "app_id", "run_id"):
-        val = item.get(key) or item.get(key.replace("_", "")) or item.get(key.replace("_id", ""))
-        if val:
-            normalized[key] = val
-
-    if item.get("metadata"):
-        normalized["metadata"] = item["metadata"]
-
-    if item.get("categories"):
-        normalized["categories"] = item["categories"]
-
-    if item.get("immutable"):
-        normalized["immutable"] = item["immutable"]
-
-    if item.get("infer") is not None:
-        normalized["infer"] = item["infer"]
-
-    return normalized
-
-
-def _normalize_memory_for_export(row: Any) -> Dict[str, Any]:
-    """Normalize a memory row from storage to export format with full lifecycle fields."""
-    payload = getattr(row, "payload", None) or {}
-    memory_id = getattr(row, "id", None) or payload.get("id")
-
-    raw = {
-        "id": memory_id,
-        "memory": payload.get("data") or payload.get("memory") or "",
-        "user_id": payload.get("user_id"),
-        "agent_id": payload.get("agent_id"),
-        "run_id": payload.get("run_id"),
-        "app_id": payload.get("app_id"),
-        "metadata": {k: v for k, v in payload.items() if k not in _RESERVED_PAYLOAD_KEYS},
-        "categories": payload.get("categories", []),
-        "created_at": payload.get("created_at"),
-        "updated_at": payload.get("updated_at"),
-        "expires_at": payload.get("expires_at"),
-        "ttl_source": payload.get("ttl_source"),
-        "feedback": payload.get("feedback"),
-        "feedback_reason": payload.get("feedback_reason"),
-        "immutable": payload.get("immutable", False),
-    }
-    annotated = annotate_memory_result(raw)
-    return annotated
-
-
-@app.post(
-    "/v1/memories/batch/import",
-    summary="Batch import memories",
-    response_model=BatchImportResponse,
-)
-def batch_import(req: BatchImportRequest, _auth=Depends(verify_auth)):
-    """
-    Batch import memories with resumable cursor support (persistent storage).
-
-    - Send memories in batches, use `cursor` to resume from a previous position
-    - Pass an existing `batch_id` when resuming to append to history
-    - State is persisted to PostgreSQL so imports survive server restarts
-    """
-    total = len(req.memories)
-    cursor = req.cursor or 0
-    batch_size = req.batch_size or 100
-    source = req.source or "API"
-
-    end_idx = min(cursor + batch_size, total)
-    batch_items = req.memories[cursor:end_idx]
-
-    successful: list[ImportResultItem] = []
-    failed: list[ImportResultItem] = []
-    success_count = 0
-    failed_count = 0
-    item_rows: list[BatchImportItem] = []
-
-    mem_instance = get_memory_instance()
-
-    for i, item in enumerate(batch_items):
-        global_idx = cursor + i
-        content = item.get_content()
-        raw_data = item.model_dump(exclude_none=True)
-
-        if not content:
-            result_item = ImportResultItem(
-                index=global_idx,
-                success=False,
-                error="Missing memory content (memory/text/content field)",
-            )
-            failed.append(result_item)
-            failed_count += 1
-            item_rows.append(
-                BatchImportItem(
-                    batch_id="",  # filled in later
-                    index=global_idx,
-                    success=False,
-                    memory=None,
-                    error=result_item.error,
-                    raw_data=raw_data,
-                )
-            )
-            continue
-
-        try:
-            normalized = _normalize_memory_for_import(raw_data)
-
-            if not any(normalized.get(k) for k in ("user_id", "agent_id", "run_id", "app_id")):
-                normalized["user_id"] = "imported"
-
-            normalized["infer"] = req.infer if req.infer is not None else (item.infer if item.infer is not None else True)
-
-            result = mem_instance.add(**normalized)
-
-            memory_id = None
-            results_list = result.get("results", []) if isinstance(result, dict) else []
-            if results_list:
-                memory_id = results_list[0].get("id") or results_list[0].get("memory_id")
-            elif isinstance(result, dict):
-                memory_id = result.get("id")
-
-            result_item = ImportResultItem(
-                index=global_idx,
-                success=True,
-                memory_id=memory_id,
-                memory=content[:200],
-            )
-            successful.append(result_item)
-            success_count += 1
-            item_rows.append(
-                BatchImportItem(
-                    batch_id="",  # filled in later
-                    index=global_idx,
-                    success=True,
-                    memory_id=memory_id,
-                    memory=content[:200],
-                    error=None,
-                    raw_data=None,
-                )
-            )
-
-        except Exception as e:
-            result_item = ImportResultItem(
-                index=global_idx,
-                success=False,
-                memory=content[:200],
-                error=str(e),
-            )
-            failed.append(result_item)
-            failed_count += 1
-            item_rows.append(
-                BatchImportItem(
-                    batch_id="",  # filled in later
-                    index=global_idx,
-                    success=False,
-                    memory=content[:200],
-                    error=str(e),
-                    raw_data=raw_data,
-                )
-            )
-
-    processed = end_idx
-    completed = processed >= total
-
-    # Persist to database
-    batch_id = req.batch_id or f"batch_{uuid.uuid4().hex[:12]}"
-    try:
-        with SessionLocal() as db:
-            batch = db.execute(
-                select(BatchImport).where(BatchImport.batch_id == batch_id)
-            ).scalar_one_or_none()
-
-            if batch is None:
-                batch = BatchImport(
-                    batch_id=batch_id,
-                    total=total,
-                    processed=processed,
-                    success_count=success_count,
-                    failed_count=failed_count,
-                    cursor=end_idx,
-                    completed=completed,
-                    source=source,
-                )
-                db.add(batch)
-            else:
-                batch.total = max(batch.total, total)
-                batch.processed = processed
-                batch.success_count += success_count
-                batch.failed_count += failed_count
-                batch.cursor = end_idx
-                batch.completed = completed
-                batch.updated_at = _utcnow()
-            db.flush()
-
-            for row in item_rows:
-                row.batch_id = batch_id
-            db.bulk_save_objects(item_rows)
-            db.commit()
-    except Exception as e:  # pragma: no cover - persistence failure should not break the response
-        logging.warning(f"Failed to persist batch {batch_id} state: {e}")
-
-    return BatchImportResponse(
-        batch_id=batch_id,
-        total=total,
-        processed=processed,
-        success_count=success_count,
-        failed_count=failed_count,
-        cursor=end_idx,
-        completed=completed,
-        successful=successful,
-        failed=failed,
-    )
-
-
-@app.get(
-    "/v1/memories/batch/import/{batch_id}",
-    summary="Get batch import status",
-    response_model=BatchStatusResponse,
-)
-def get_batch_status(batch_id: str, _auth=Depends(verify_auth)):
-    """Get the status of a batch import by batch_id (persistent lookup)."""
-    with SessionLocal() as db:
-        batch = db.execute(
-            select(BatchImport).where(BatchImport.batch_id == batch_id)
-        ).scalar_one_or_none()
-
-        if batch is None:
-            raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
-
-        return BatchStatusResponse(
-            batch_id=batch.batch_id,
-            total=batch.total,
-            processed=batch.processed,
-            success_count=batch.success_count,
-            failed_count=batch.failed_count,
-            completed=batch.completed,
-            created_at=batch.created_at,
-            updated_at=batch.updated_at,
-        )
-
-
-@app.post("/v1/memories/export", summary="Export memories (POST with filters)")
-def export_memories_post(req: ExportRequest, _auth=Depends(verify_auth)):
-    """
-    Export memories as JSONL stream using POST for complex filters.
-
-    Returns one JSON object per line with fields:
-    id, memory, user_id, agent_id, run_id, app_id, metadata, categories,
-    created_at, updated_at, feedback, feedback_reason
-    """
-    return _export_memories(
-        user_id=req.user_id,
-        agent_id=req.agent_id,
-        run_id=req.run_id,
-        app_id=req.app_id,
-        category=req.category,
-        after=req.after,
-        before=req.before,
-        filters=req.filters,
-        page_size=req.page_size or 1000,
-    )
-
-
-@app.get("/v1/memories/export", summary="Export memories (GET)")
-def export_memories_get(
-    request: Request,
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-    app_id: Optional[str] = None,
-    category: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
-    page_size: int = 1000,
-    _auth=Depends(verify_auth),
-):
-    """
-    Export memories as JSONL stream via GET.
-
-    Returns one JSON object per line with fields:
-    id, memory, user_id, agent_id, run_id, app_id, metadata, categories,
-    created_at, updated_at, feedback, feedback_reason
-    """
-    return _export_memories(
-        user_id=user_id,
-        agent_id=agent_id,
-        run_id=run_id,
-        app_id=app_id,
-        category=category,
-        after=after,
-        before=before,
-        filters=None,
-        page_size=page_size,
-    )
-
-
-def _export_memories(
-    *,
-    user_id: Optional[str] = None,
-    agent_id: Optional[str] = None,
-    run_id: Optional[str] = None,
-    app_id: Optional[str] = None,
-    category: Optional[str] = None,
-    after: Optional[str] = None,
-    before: Optional[str] = None,
-    filters: Optional[Dict[str, Any]] = None,
-    page_size: int = 1000,
-):
-    """Internal export implementation that streams JSONL."""
-    mem_instance = get_memory_instance()
-
-    extra: Dict[str, Any] = {}
-    if category:
-        extra["categories"] = {"contains": category}
-    if after:
-        extra["created_at"] = {**(extra.get("created_at", {})), "gte": after}
-    if before:
-        extra["created_at"] = {**(extra.get("created_at", {})), "lte": before}
-
-    api_filters = None
-    and_conditions: list[Dict[str, Any]] = []
-    if user_id:
-        and_conditions.append({"user_id": user_id})
-    if agent_id:
-        and_conditions.append({"agent_id": agent_id})
-    if app_id:
-        and_conditions.append({"app_id": app_id})
-    if run_id:
-        and_conditions.append({"run_id": run_id})
-    if extra:
-        for k, v in extra.items():
-            and_conditions.append({k: v})
-    if filters:
-        if "AND" in filters or "OR" in filters:
-            api_filters = filters
-        else:
-            for k, v in filters.items():
-                and_conditions.append({k: v})
-
-    if not api_filters:
-        if len(and_conditions) == 1:
-            api_filters = and_conditions[0]
-        elif and_conditions:
-            api_filters = {"AND": and_conditions}
-
-    def generate():
-        page = 1
-        while True:
-            try:
-                if api_filters:
-                    result = mem_instance.get_all(filters=api_filters, page=page, page_size=page_size)
-                else:
-                    result = mem_instance.get_all(page=page, page_size=page_size)
-
-                rows = []
-                if isinstance(result, dict):
-                    rows = result.get("results", result.get("memories", []))
-                elif isinstance(result, list):
-                    rows = result
-
-                if not rows:
-                    break
-
-                for row in rows:
-                    exported = _normalize_memory_for_export(row)
-                    export_item = ExportMemoryItem(**exported)
-                    yield export_item.model_dump_json() + "\n"
-
-                if len(rows) < page_size:
-                    break
-                page += 1
-            except Exception as e:
-                yield json.dumps({"error": str(e)}) + "\n"
-                break
-
-    return StreamingResponse(
-        generate(),
-        media_type="application/x-ndjson",
-        headers={
-            "Content-Disposition": f'attachment; filename="mem0-export-{_utcnow().strftime("%Y%m%d-%H%M%S")}.jsonl"',
-        },
-    )
 
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)

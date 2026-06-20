@@ -27,6 +27,20 @@ from mem0.memory.base import MemoryBase
 from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
+from mem0.memory.trace import (
+    STAGE_CONTEXT_GATHERING,
+    STAGE_DEDUP,
+    STAGE_EMBEDDING,
+    STAGE_ENTITY_LINKING,
+    STAGE_ENTITY_RECALL,
+    STAGE_FORMATTER,
+    STAGE_HISTORY,
+    STAGE_KEYWORD_RECALL,
+    STAGE_LLM_EXTRACTION,
+    STAGE_SCORE_FUSION,
+    STAGE_VECTOR_STORE,
+    create_trace_collector,
+)
 from mem0.memory.notices import (
     PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,
     detect_scale_threshold_from_add_result,
@@ -669,6 +683,7 @@ class Memory(MemoryBase):
         prompt: Optional[str] = None,
         expires: Optional[Any] = None,
         ttl_days: Optional[int] = None,
+        trace_enabled: bool = False,
     ):
         """
         Create a new memory.
@@ -696,6 +711,8 @@ class Memory(MemoryBase):
                 or datetime). Takes highest precedence over any policy.
             ttl_days (int, optional): Explicit TTL in days. Takes precedence over policies
                 but lower than `expires`.
+            trace_enabled (bool, optional): If True, enable operation tracing and include
+                trace data in the returned result. Defaults to False.
 
         Returns:
             dict: A dictionary containing the result of the memory addition operation, typically
@@ -780,7 +797,17 @@ class Memory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        with create_trace_collector("add", enabled=trace_enabled) as tracer:
+            vector_store_result = self._add_to_vector_store(
+                messages, processed_metadata, effective_filters, infer, prompt=prompt, tracer=tracer
+            )
+            result = {"results": vector_store_result}
+            if trace_enabled:
+                result.update(tracer.get_trace_dict())
+                operation_id = tracer.get_operation_id()
+                if operation_id:
+                    result["operation_id"] = operation_id
+
         scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
@@ -788,9 +815,9 @@ class Memory(MemoryBase):
             display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
         else:
             display_first_run_notice(self, "sync", "add")
-        return {"results": vector_store_result}
+        return result
 
-    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
+    def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None, tracer=None):
         if not infer:
             returned_memories = []
             for message_dict in messages:
@@ -813,8 +840,16 @@ class Memory(MemoryBase):
                     per_msg_meta["actor_id"] = actor_name
 
                 msg_content = message_dict["content"]
+
+                tracer.start_stage(STAGE_EMBEDDING) if tracer else None
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
+                if tracer:
+                    tracer.finish_current_stage(metadata={"count": 1})
+
+                tracer.start_stage(STAGE_VECTOR_STORE) if tracer else None
                 mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
+                if tracer:
+                    tracer.finish_current_stage(metadata={"inserted": 1})
 
                 returned_memories.append(
                     {
@@ -830,19 +865,30 @@ class Memory(MemoryBase):
         # === V3 PHASED BATCH PIPELINE ===
 
         # Phase 0: Context gathering
+        tracer.start_stage(STAGE_CONTEXT_GATHERING) if tracer else None
         session_scope = _build_session_scope(filters)
         last_messages = self.db.get_last_messages(session_scope, limit=10)
         parsed_messages = parse_messages(messages)
+        if tracer:
+            tracer.finish_current_stage(metadata={"last_messages_count": len(last_messages)})
 
         # Phase 1: Existing memory retrieval
         search_filters = {k: v for k, v in filters.items() if k in ("user_id", "agent_id", "run_id") and v}
+
+        tracer.start_stage(STAGE_EMBEDDING, metadata={"mode": "search"}) if tracer else None
         query_embedding = self.embedding_model.embed(parsed_messages, "search")
+        if tracer:
+            tracer.finish_current_stage(metadata={"count": 1})
+
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "search"}) if tracer else None
         existing_results = self.vector_store.search(
             query=parsed_messages,
             vectors=query_embedding,
             top_k=10,
             filters=search_filters,
         )
+        if tracer:
+            tracer.finish_current_stage(metadata={"existing_retrieved": len(existing_results)})
 
         # Map UUIDs to integers (anti-hallucination)
         existing_memories = []
@@ -866,6 +912,8 @@ class Memory(MemoryBase):
             custom_instructions=custom_instr,
         )
 
+        tracer.start_stage(STAGE_LLM_EXTRACTION) if tracer else None
+        llm_success = True
         try:
             response = self.llm.generate_response(
                 messages=[
@@ -876,22 +924,36 @@ class Memory(MemoryBase):
             )
         except Exception as e:
             logger.error(f"LLM extraction failed: {e}")
+            llm_success = False
+            if tracer:
+                tracer.finish_current_stage(status="error", metadata={"extracted_count": 0}, error="LLMError")
             return []
 
-        # Parse response
-        try:
-            response = remove_code_blocks(response)
-            if not response or not response.strip():
+        if llm_success:
+            # Parse response
+            extracted_count = 0
+            try:
+                response = remove_code_blocks(response)
+                if not response or not response.strip():
+                    extracted_memories = []
+                else:
+                    try:
+                        extracted_memories = json.loads(response, strict=False).get("memory", [])
+                        extracted_count = len(extracted_memories)
+                    except json.JSONDecodeError:
+                        extracted_json = extract_json(response)
+                        extracted_memories = json.loads(extracted_json, strict=False).get("memory", [])
+                        extracted_count = len(extracted_memories)
+            except Exception as e:
+                logger.error(f"Error parsing extraction response: {e}")
                 extracted_memories = []
-            else:
-                try:
-                    extracted_memories = json.loads(response, strict=False).get("memory", [])
-                except json.JSONDecodeError:
-                    extracted_json = extract_json(response)
-                    extracted_memories = json.loads(extracted_json, strict=False).get("memory", [])
-        except Exception as e:
-            logger.error(f"Error parsing extraction response: {e}")
-            extracted_memories = []
+                extracted_count = 0
+
+            if tracer:
+                tracer.finish_current_stage(
+                    status="success" if extracted_count > 0 else "skipped",
+                    metadata={"extracted_count": extracted_count}
+                )
 
         if not extracted_memories:
             # Save messages even if nothing extracted
@@ -900,20 +962,29 @@ class Memory(MemoryBase):
 
         # Phase 3: Batch embed all extracted memory texts
         mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
+        tracer.start_stage(STAGE_EMBEDDING, metadata={"mode": "batch_add"}) if tracer else None
         try:
             mem_embeddings_list = self.embedding_model.embed_batch(mem_texts, "add")
             embed_map = dict(zip(mem_texts, mem_embeddings_list))
+            if tracer:
+                tracer.finish_current_stage(metadata={"count": len(mem_texts), "batch": True})
         except Exception:
             # Fallback: embed individually
             embed_map = {}
+            failed = 0
             for text in mem_texts:
                 try:
                     embed_map[text] = self.embedding_model.embed(text, "add")
                 except Exception as e:
                     logger.warning(f"Failed to embed memory text: {e}")
+                    failed += 1
+            if tracer:
+                tracer.finish_current_stage(
+                    metadata={"count": len(mem_texts), "batch": False, "failed": failed}
+                )
 
         # Phase 4: Per-memory CPU processing + Phase 5: Hash dedup
-        # Build set of existing hashes for dedup
+        tracer.start_stage(STAGE_DEDUP) if tracer else None
         existing_hashes = set()
         for mem in existing_results:
             h = mem.payload.get("hash") if hasattr(mem, "payload") and mem.payload else None
@@ -922,6 +993,7 @@ class Memory(MemoryBase):
 
         records = []  # (memory_id, text, embedding, payload)
         seen_hashes = set()  # dedup within the current batch
+        duplicates_skipped = 0
         for mem in extracted_memories:
             text = mem.get("text")
             if not text or text not in embed_map:
@@ -930,6 +1002,7 @@ class Memory(MemoryBase):
             mem_hash = hashlib.md5(text.encode()).hexdigest()
             if mem_hash in existing_hashes or mem_hash in seen_hashes:
                 logger.debug(f"Skipping duplicate memory (hash match): {text[:50]}")
+                duplicates_skipped += 1
                 continue
             seen_hashes.add(mem_hash)
 
@@ -948,11 +1021,21 @@ class Memory(MemoryBase):
 
             records.append((memory_id, text, embed_map[text], mem_metadata))
 
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "processed": len(extracted_memories),
+                    "unique_records": len(records),
+                    "duplicates_skipped": duplicates_skipped,
+                }
+            )
+
         if not records:
             self.db.save_messages(messages, session_scope)
             return []
 
         # Phase 6: Batch persist
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "insert"}) if tracer else None
         all_vectors = [r[2] for r in records]
         all_ids = [r[0] for r in records]
         all_payloads = [r[3] for r in records]
@@ -963,15 +1046,24 @@ class Memory(MemoryBase):
                 ids=all_ids,
                 payloads=all_payloads,
             )
+            if tracer:
+                tracer.finish_current_stage(metadata={"inserted": len(records), "batch": True})
         except Exception:
             # Fallback: insert one by one
+            failed = 0
             for mid, vec, pay in zip(all_ids, all_vectors, all_payloads):
                 try:
                     self.vector_store.insert(vectors=[vec], ids=[mid], payloads=[pay])
                 except Exception as e:
                     logger.error(f"Failed to insert memory {mid}: {e}")
+                    failed += 1
+            if tracer:
+                tracer.finish_current_stage(
+                    metadata={"inserted": len(records) - failed, "failed": failed, "batch": False}
+                )
 
         # Batch history
+        tracer.start_stage(STAGE_HISTORY) if tracer else None
         history_records = [
             {
                 "memory_id": r[0],
@@ -983,17 +1075,26 @@ class Memory(MemoryBase):
             }
             for r in records
         ]
+        history_saved = 0
         try:
             self.db.batch_add_history(history_records)
+            history_saved = len(history_records)
         except Exception:
             # Fallback: add one by one
             for hr in history_records:
                 try:
                     self.db.add_history(hr["memory_id"], None, hr["new_memory"], "ADD", created_at=hr.get("created_at"))
+                    history_saved += 1
                 except Exception as e:
                     logger.error(f"Failed to add history for {hr['memory_id']}: {e}")
+        if tracer:
+            tracer.finish_current_stage(metadata={"records_saved": history_saved})
 
         # Phase 7: Batch entity linking
+        tracer.start_stage(STAGE_ENTITY_LINKING) if tracer else None
+        entities_extracted = 0
+        entities_inserted = 0
+        entities_updated = 0
         try:
             all_texts = [r[1] for r in records]
             all_entities = extract_entities_batch(all_texts)
@@ -1002,6 +1103,7 @@ class Memory(MemoryBase):
             global_entities = {}  # normalized_key -> (entity_type, entity_text, set of memory_ids)
             for idx, (memory_id, text, embedding, payload) in enumerate(records):
                 entities = all_entities[idx] if idx < len(all_entities) else []
+                entities_extracted += len(entities)
                 for entity_type, entity_text in entities:
                     key = entity_text.strip().lower()
                     if key in global_entities:
@@ -1048,6 +1150,7 @@ class Memory(MemoryBase):
 
                         if matches and matches[0].score >= 0.95:
                             # Update existing entity
+                            entities_updated += 1
                             match = matches[0]
                             payload = match.payload or {}
                             linked = set(payload.get("linked_memory_ids", []))
@@ -1063,6 +1166,7 @@ class Memory(MemoryBase):
                                 logger.debug(f"Entity update failed for '{entity_text}': {e}")
                         else:
                             # New entity — collect for batch insert
+                            entities_inserted += 1
                             to_insert_vectors.append(valid_vectors[j])
                             to_insert_ids.append(str(uuid.uuid4()))
                             to_insert_payloads.append({
@@ -1084,6 +1188,18 @@ class Memory(MemoryBase):
                             logger.warning(f"Batch entity insert failed: {e}")
         except Exception as e:
             logger.warning(f"Batch entity linking failed: {e}")
+            if tracer:
+                tracer.finish_current_stage(status="error", error="EntityLinkingError")
+
+        if tracer and tracer._current_stage and tracer._current_stage.name == STAGE_ENTITY_LINKING:
+            tracer.finish_current_stage(
+                metadata={
+                    "entities_extracted": entities_extracted,
+                    "unique_entities": len(global_entities) if 'global_entities' in dir() else 0,
+                    "entities_inserted": entities_inserted,
+                    "entities_updated": entities_updated,
+                }
+            )
 
         # Phase 8: Save messages + return
         self.db.save_messages(messages, session_scope)
@@ -1159,6 +1275,7 @@ class Memory(MemoryBase):
         *,
         filters: Optional[Dict[str, Any]] = None,
         top_k: int = 20,
+        trace_enabled: bool = False,
         **kwargs,
     ):
         """
@@ -1169,6 +1286,7 @@ class Memory(MemoryBase):
                 Must contain at least one of: user_id, agent_id, run_id.
                 Example: filters={"user_id": "u1", "agent_id": "a1"}
             top_k (int, optional): The maximum number of memories to return. Defaults to 20.
+            trace_enabled (bool, optional): If True, return operation trace information. Defaults to False.
 
         Returns:
             dict: A dictionary containing a list of memories under the "results" key.
@@ -1214,15 +1332,24 @@ class Memory(MemoryBase):
             "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"}
         )
 
-        all_memories_result = self._get_all_from_vector_store(effective_filters, limit)
+        with create_trace_collector("get_all", enabled=trace_enabled) as tracer:
+            all_memories_result = self._get_all_from_vector_store(effective_filters, limit, tracer=tracer)
+
+            result = {"results": all_memories_result}
+            if trace_enabled:
+                result.update(tracer.get_trace_dict())
+                operation_id = tracer.get_operation_id()
+                if operation_id:
+                    result["operation_id"] = operation_id
 
         if scale_threshold_notice:
             display_scale_threshold_notice(self, "sync", "get_all", *scale_threshold_notice)
         else:
             display_first_run_notice(self, "sync", "get_all")
-        return {"results": all_memories_result}
+        return result
 
-    def _get_all_from_vector_store(self, filters, limit):
+    def _get_all_from_vector_store(self, filters, limit, tracer=None):
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "list"}) if tracer else None
         memories_result = self.vector_store.list(filters=filters, top_k=limit)
 
         # Handle different vector store return formats by inspecting first element
@@ -1238,6 +1365,10 @@ class Memory(MemoryBase):
         else:
             actual_memories = memories_result
 
+        if tracer:
+            tracer.finish_current_stage(metadata={"count": len(actual_memories)})
+
+        tracer.start_stage(STAGE_FORMATTER) if tracer else None
         promoted_payload_keys = [
             "user_id",
             "agent_id",
@@ -1275,6 +1406,9 @@ class Memory(MemoryBase):
 
             formatted_memories.append(memory_item_dict)
 
+        if tracer:
+            tracer.finish_current_stage(metadata={"results_returned": len(formatted_memories)})
+
         return formatted_memories
 
     def search(
@@ -1287,6 +1421,7 @@ class Memory(MemoryBase):
         rerank: bool = False,
         explain: bool = False,
         reference_date: Optional[Any] = None,
+        trace_enabled: bool = False,
         **kwargs,
     ):
         """
@@ -1319,6 +1454,9 @@ class Memory(MemoryBase):
             rerank (bool, optional): Whether to rerank results. Defaults to False.
             explain (bool, optional): Whether to include score_details for each result. Defaults to False.
             reference_date (Any, optional): Platform-only temporal parameter. Not supported in OSS.
+            trace_enabled (bool, optional): If True, enable operation tracing and include
+                trace data in the returned result. When combined with explain=True, provides
+                detailed stage timing and decision statistics. Defaults to False.
 
         Returns:
             dict: A dictionary containing the search results under a "results" key.
@@ -1389,17 +1527,27 @@ class Memory(MemoryBase):
             },
         )
 
-        search_start = time.perf_counter()
-        original_memories = self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
-        search_elapsed_seconds = time.perf_counter() - search_start
+        with create_trace_collector("search", enabled=trace_enabled) as tracer:
+            search_start = time.perf_counter()
+            original_memories = self._search_vector_store(
+                query, effective_filters, limit, threshold, explain=explain, tracer=tracer
+            )
+            search_elapsed_seconds = time.perf_counter() - search_start
 
-        # Apply reranking if enabled and reranker is available
-        if rerank and self.reranker and original_memories:
-            try:
-                reranked_memories = self.reranker.rerank(query, original_memories, limit)
-                original_memories = reranked_memories
-            except Exception as e:
-                logger.warning(f"Reranking failed, using original results: {e}")
+            # Apply reranking if enabled and reranker is available
+            if rerank and self.reranker and original_memories:
+                try:
+                    reranked_memories = self.reranker.rerank(query, original_memories, limit)
+                    original_memories = reranked_memories
+                except Exception as e:
+                    logger.warning(f"Reranking failed, using original results: {e}")
+
+            result = {"results": original_memories}
+            if trace_enabled:
+                result.update(tracer.get_trace_dict())
+                operation_id = tracer.get_operation_id()
+                if operation_id:
+                    result["operation_id"] = operation_id
 
         if temporal_usage_notice:
             display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
@@ -1416,7 +1564,7 @@ class Memory(MemoryBase):
             )
         else:
             display_first_run_notice(self, "sync", "search")
-        return {"results": original_memories}
+        return result
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1522,7 +1670,7 @@ class Memory(MemoryBase):
                 return True
         return False
 
-    def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False):
+    def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, tracer=None):
         # Guard against None threshold (backward compat)
         if threshold is None:
             threshold = 0.1
@@ -1530,23 +1678,32 @@ class Memory(MemoryBase):
         # Step 1: Preprocess query
         query_lemmatized = lemmatize_for_bm25(query)
         query_entities = extract_entities(query)
+        entity_count = len(query_entities)
 
         # Step 2: Embed query
+        tracer.start_stage(STAGE_EMBEDDING, metadata={"mode": "search"}) if tracer else None
         embeddings = self.embedding_model.embed(query, "search")
+        if tracer:
+            tracer.finish_current_stage(metadata={"count": 1})
 
         # Step 3: Semantic search (over-fetch for scoring pool)
         internal_limit = max(limit * 4, 60)
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "semantic_search"}) if tracer else None
         semantic_results = self.vector_store.search(
             query=query, vectors=embeddings, top_k=internal_limit, filters=filters
         )
+        if tracer:
+            tracer.finish_current_stage(metadata={"semantic_candidates": len(semantic_results), "internal_limit": internal_limit})
 
         # Step 4: Keyword search (if store supports it)
+        tracer.start_stage(STAGE_KEYWORD_RECALL) if tracer else None
         keyword_results = self.vector_store.keyword_search(
             query=query_lemmatized, top_k=internal_limit, filters=filters
         )
 
         # Step 5: Compute BM25 scores from keyword results
         bm25_scores = {}
+        keyword_count = 0
         if keyword_results is not None:
             midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
             for mem in keyword_results:
@@ -1554,11 +1711,30 @@ class Memory(MemoryBase):
                 raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
                 if raw_score and raw_score > 0:
                     bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
+                    keyword_count += 1
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "keyword_candidates": keyword_count,
+                    "supported": keyword_results is not None,
+                    "entities_extracted": entity_count,
+                }
+            )
 
         # Step 6: Compute entity boosts
+        tracer.start_stage(STAGE_ENTITY_RECALL) if tracer else None
         entity_boosts = {}
+        entity_matches = 0
         if query_entities:
             entity_boosts = self._compute_entity_boosts(query_entities, filters)
+            entity_matches = len(entity_boosts)
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "entities_extracted": entity_count,
+                    "entity_matches": entity_matches,
+                }
+            )
 
         # Step 7: Build candidate set from semantic results
         candidates = []
@@ -1571,6 +1747,7 @@ class Memory(MemoryBase):
             })
 
         # Step 8: Score and rank
+        tracer.start_stage(STAGE_SCORE_FUSION, metadata={"threshold": threshold}) if tracer else None
         scored_results = score_and_rank(
             semantic_results=candidates,
             bm25_scores=bm25_scores,
@@ -1579,8 +1756,18 @@ class Memory(MemoryBase):
             top_k=limit,
             explain=explain,
         )
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "candidates_ranked": len(candidates),
+                    "candidates_passed_threshold": len(scored_results),
+                    "has_bm25": bool(bm25_scores),
+                    "has_entity_boost": bool(entity_boosts),
+                }
+            )
 
         # Step 9: Format results
+        tracer.start_stage(STAGE_FORMATTER) if tracer else None
         promoted_payload_keys = [
             "user_id",
             "agent_id",
@@ -1595,10 +1782,12 @@ class Memory(MemoryBase):
         }
 
         original_memories = []
+        filtered_out = 0
         for scored in scored_results:
             payload = scored.get("payload") or {}
 
             if not payload.get("data"):
+                filtered_out += 1
                 continue  # Skip candidates with no payload data
 
             memory_item_dict = MemoryItem(
@@ -1627,6 +1816,14 @@ class Memory(MemoryBase):
             annotate_memory_result(memory_item_dict)
 
             original_memories.append(memory_item_dict)
+
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "results_filtered": filtered_out,
+                    "results_returned": len(original_memories),
+                }
+            )
 
         return original_memories
 
@@ -2239,6 +2436,7 @@ class AsyncMemory(MemoryBase):
         memory_type: Optional[str] = None,
         prompt: Optional[str] = None,
         llm=None,
+        trace_enabled: bool = False,
     ):
         """
         Create a new memory asynchronously.
@@ -2255,6 +2453,7 @@ class AsyncMemory(MemoryBase):
                                          Pass "procedural_memory" to create procedural memories.
             prompt (str, optional): Prompt to use for the memory creation. Defaults to None.
             llm (BaseChatModel, optional): LLM class to use for generating procedural memories. Defaults to None. Useful when user is using LangChain ChatModel.
+            trace_enabled (bool, optional): If True, return operation trace information. Defaults to False.
         Returns:
             dict: A dictionary containing the result of the memory addition operation.
         """
@@ -2303,7 +2502,17 @@ class AsyncMemory(MemoryBase):
         else:
             messages = parse_vision_messages(messages)
 
-        vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
+        with create_trace_collector("add", enabled=trace_enabled) as tracer:
+            vector_store_result = await self._add_to_vector_store(
+                messages, processed_metadata, effective_filters, infer, prompt=prompt, tracer=tracer
+            )
+            result = {"results": vector_store_result}
+            if trace_enabled:
+                result.update(tracer.get_trace_dict())
+                operation_id = tracer.get_operation_id()
+                if operation_id:
+                    result["operation_id"] = operation_id
+
         scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
@@ -2311,7 +2520,7 @@ class AsyncMemory(MemoryBase):
             await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
         else:
             await display_first_run_notice_async(self, "async", "add")
-        return {"results": vector_store_result}
+        return result
 
     async def _add_to_vector_store(
         self,
@@ -2320,9 +2529,12 @@ class AsyncMemory(MemoryBase):
         effective_filters: dict,
         infer: bool,
         prompt: Optional[str] = None,
+        tracer=None,
     ):
         if not infer:
+            tracer.start_stage(STAGE_EMBEDDING, metadata={"mode": "add", "infer": "false"}) if tracer else None
             returned_memories = []
+            processed = 0
             for message_dict in messages:
                 if (
                     not isinstance(message_dict, dict)
@@ -2345,6 +2557,7 @@ class AsyncMemory(MemoryBase):
                 msg_content = message_dict["content"]
                 msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
                 mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
+                processed += 1
 
                 returned_memories.append(
                     {
@@ -2355,16 +2568,22 @@ class AsyncMemory(MemoryBase):
                         "role": message_dict["role"],
                     }
                 )
+            if tracer:
+                tracer.finish_current_stage(metadata={"count": processed})
             return returned_memories
 
         # === V3 PHASED BATCH PIPELINE (async) ===
 
         # Phase 0: Context gathering
+        tracer.start_stage(STAGE_CONTEXT_GATHERING) if tracer else None
         session_scope = _build_session_scope(effective_filters)
         last_messages = await asyncio.to_thread(self.db.get_last_messages, session_scope, 10)
         parsed_messages = parse_messages(messages)
+        if tracer:
+            tracer.finish_current_stage(metadata={"last_messages_count": len(last_messages)})
 
         # Phase 1: Existing memory retrieval
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "search_existing"}) if tracer else None
         search_filters = {k: v for k, v in effective_filters.items() if k in ("user_id", "agent_id", "run_id") and v}
         query_embedding = await asyncio.to_thread(self.embedding_model.embed, parsed_messages, "search")
         existing_results = await asyncio.to_thread(
@@ -2374,6 +2593,8 @@ class AsyncMemory(MemoryBase):
             top_k=10,
             filters=search_filters,
         )
+        if tracer:
+            tracer.finish_current_stage(metadata={"existing_retrieved": len(existing_results)})
 
         # Map UUIDs to integers (anti-hallucination)
         existing_memories = []
@@ -2383,6 +2604,7 @@ class AsyncMemory(MemoryBase):
             existing_memories.append({"id": str(idx), "text": mem.payload.get("data", "")})
 
         # Phase 2: LLM extraction (single call)
+        tracer.start_stage(STAGE_LLM_EXTRACTION) if tracer else None
         is_agent_scoped = bool(effective_filters.get("agent_id")) and not effective_filters.get("user_id")
         system_prompt = ADDITIVE_EXTRACTION_PROMPT
         if is_agent_scoped:
@@ -2397,6 +2619,7 @@ class AsyncMemory(MemoryBase):
             custom_instructions=custom_instr,
         )
 
+        extracted_count = 0
         try:
             response = await asyncio.to_thread(
                 self.llm.generate_response,
@@ -2408,6 +2631,8 @@ class AsyncMemory(MemoryBase):
             )
         except Exception as e:
             logger.error(f"LLM extraction failed (async): {e}")
+            if tracer:
+                tracer.finish_current_stage(status="error", metadata={"extracted_count": 0}, error="LLMError")
             return []
 
         # Parse response
@@ -2425,12 +2650,21 @@ class AsyncMemory(MemoryBase):
             logger.error(f"Error parsing extraction response (async): {e}")
             extracted_memories = []
 
+        extracted_count = len(extracted_memories)
+        if tracer:
+            tracer.finish_current_stage(
+                status="success" if extracted_count > 0 else "skipped",
+                metadata={"extracted_count": extracted_count}
+            )
+
         if not extracted_memories:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
             return []
 
         # Phase 3: Batch embed all extracted memory texts
+        tracer.start_stage(STAGE_EMBEDDING, metadata={"mode": "add", "batch": True}) if tracer else None
         mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
+        failed = 0
         try:
             mem_embeddings_list = await asyncio.to_thread(self.embedding_model.embed_batch, mem_texts, "add")
             embed_map = dict(zip(mem_texts, mem_embeddings_list))
@@ -2441,8 +2675,12 @@ class AsyncMemory(MemoryBase):
                     embed_map[text] = await asyncio.to_thread(self.embedding_model.embed, text, "add")
                 except Exception as e:
                     logger.warning(f"Failed to embed memory text (async): {e}")
+                    failed += 1
+        if tracer:
+            tracer.finish_current_stage(metadata={"count": len(mem_texts), "batch": True, "failed": failed})
 
         # Phase 4: Per-memory CPU processing + Phase 5: Hash dedup
+        tracer.start_stage(STAGE_DEDUP) if tracer else None
         existing_hashes = set()
         for mem in existing_results:
             h = mem.payload.get("hash") if hasattr(mem, "payload") and mem.payload else None
@@ -2451,6 +2689,7 @@ class AsyncMemory(MemoryBase):
 
         records = []
         seen_hashes = set()
+        duplicates_skipped = 0
         for mem in extracted_memories:
             text = mem.get("text")
             if not text or text not in embed_map:
@@ -2458,6 +2697,7 @@ class AsyncMemory(MemoryBase):
 
             mem_hash = hashlib.md5(text.encode()).hexdigest()
             if mem_hash in existing_hashes or mem_hash in seen_hashes:
+                duplicates_skipped += 1
                 logger.debug(f"Skipping duplicate memory (hash match, async): {text[:50]}")
                 continue
             seen_hashes.add(mem_hash)
@@ -2477,14 +2717,26 @@ class AsyncMemory(MemoryBase):
 
             records.append((memory_id, text, embed_map[text], mem_metadata))
 
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "processed": len(extracted_memories),
+                    "unique_records": len(records),
+                    "duplicates_skipped": duplicates_skipped,
+                }
+            )
+
         if not records:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
             return []
 
         # Phase 6: Batch persist
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "insert", "batch": True}) if tracer else None
         all_vectors = [r[2] for r in records]
         all_ids = [r[0] for r in records]
         all_payloads = [r[3] for r in records]
+        inserted = 0
+        failed_inserts = 0
 
         try:
             await asyncio.to_thread(
@@ -2493,14 +2745,27 @@ class AsyncMemory(MemoryBase):
                 ids=all_ids,
                 payloads=all_payloads,
             )
+            inserted = len(all_ids)
         except Exception:
+            inserted = 0
             for mid, vec, pay in zip(all_ids, all_vectors, all_payloads):
                 try:
                     await asyncio.to_thread(self.vector_store.insert, vectors=[vec], ids=[mid], payloads=[pay])
+                    inserted += 1
                 except Exception as e:
+                    failed_inserts += 1
                     logger.error(f"Failed to insert memory {mid} (async): {e}")
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "inserted": inserted,
+                    "batch": True,
+                    "failed": failed_inserts,
+                }
+            )
 
         # Batch history
+        tracer.start_stage(STAGE_HISTORY) if tracer else None
         history_records = [
             {
                 "memory_id": r[0],
@@ -2523,8 +2788,15 @@ class AsyncMemory(MemoryBase):
                     )
                 except Exception as e:
                     logger.error(f"Failed to add history for {hr['memory_id']} (async): {e}")
+        if tracer:
+            tracer.finish_current_stage(metadata={"records_saved": len(history_records)})
 
         # Phase 7: Batch entity linking
+        tracer.start_stage(STAGE_ENTITY_LINKING) if tracer else None
+        entities_extracted = 0
+        unique_entities = 0
+        entities_inserted = 0
+        entities_updated = 0
         try:
             all_texts = [r[1] for r in records]
             all_entities = await asyncio.to_thread(extract_entities_batch, all_texts)
@@ -2533,6 +2805,7 @@ class AsyncMemory(MemoryBase):
             global_entities = {}
             for idx, (memory_id, text, embedding, payload) in enumerate(records):
                 entities = all_entities[idx] if idx < len(all_entities) else []
+                entities_extracted += len(entities)
                 for entity_type, entity_text in entities:
                     key = entity_text.strip().lower()
                     if key in global_entities:
@@ -2540,6 +2813,7 @@ class AsyncMemory(MemoryBase):
                     else:
                         global_entities[key] = [entity_type, entity_text, {memory_id}]
 
+            unique_entities = len(global_entities)
             if global_entities:
                 ordered_keys = list(global_entities.keys())
                 entity_texts = [global_entities[k][1] for k in ordered_keys]
@@ -2589,6 +2863,7 @@ class AsyncMemory(MemoryBase):
                                     vector=None,
                                     payload=payload,
                                 )
+                                entities_updated += 1
                             except Exception as e:
                                 logger.debug(f"Entity update failed for '{entity_text}' (async): {e}")
                         else:
@@ -2610,10 +2885,23 @@ class AsyncMemory(MemoryBase):
                                 ids=to_insert_ids,
                                 payloads=to_insert_payloads,
                             )
+                            entities_inserted += len(to_insert_ids)
                         except Exception as e:
                             logger.warning(f"Batch entity insert failed (async): {e}")
         except Exception as e:
             logger.warning(f"Batch entity linking failed (async): {e}")
+            if tracer:
+                tracer.finish_current_stage(status="error", error="EntityLinkingError")
+        else:
+            if tracer:
+                tracer.finish_current_stage(
+                    metadata={
+                        "entities_extracted": entities_extracted,
+                        "unique_entities": unique_entities,
+                        "entities_inserted": entities_inserted,
+                        "entities_updated": entities_updated,
+                    }
+                )
 
         # Phase 8: Save messages + return
         await asyncio.to_thread(self.db.save_messages, messages, session_scope)
@@ -2681,6 +2969,7 @@ class AsyncMemory(MemoryBase):
         *,
         filters: Optional[Dict[str, Any]] = None,
         top_k: int = 20,
+        trace_enabled: bool = False,
         **kwargs,
     ):
         """
@@ -2691,6 +2980,7 @@ class AsyncMemory(MemoryBase):
                 Must contain at least one of: user_id, agent_id, run_id.
                 Example: filters={"user_id": "u1", "agent_id": "a1"}
             top_k (int, optional): The maximum number of memories to return. Defaults to 20.
+            trace_enabled (bool, optional): If True, return operation trace information. Defaults to False.
 
         Returns:
             dict: A dictionary containing a list of memories under the "results" key.
@@ -2736,15 +3026,24 @@ class AsyncMemory(MemoryBase):
             "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"}
         )
 
-        all_memories_result = await self._get_all_from_vector_store(effective_filters, limit)
+        with create_trace_collector("get_all", enabled=trace_enabled) as tracer:
+            all_memories_result = await self._get_all_from_vector_store(effective_filters, limit, tracer=tracer)
+
+            result = {"results": all_memories_result}
+            if trace_enabled:
+                result.update(tracer.get_trace_dict())
+                operation_id = tracer.get_operation_id()
+                if operation_id:
+                    result["operation_id"] = operation_id
 
         if scale_threshold_notice:
             await display_scale_threshold_notice_async(self, "async", "get_all", *scale_threshold_notice)
         else:
             await display_first_run_notice_async(self, "async", "get_all")
-        return {"results": all_memories_result}
+        return result
 
-    async def _get_all_from_vector_store(self, filters, limit):
+    async def _get_all_from_vector_store(self, filters, limit, tracer=None):
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "list"}) if tracer else None
         memories_result = await asyncio.to_thread(self.vector_store.list, filters=filters, top_k=limit)
 
         # Handle different vector store return formats by inspecting first element
@@ -2760,6 +3059,10 @@ class AsyncMemory(MemoryBase):
         else:
             actual_memories = memories_result
 
+        if tracer:
+            tracer.finish_current_stage(metadata={"count": len(actual_memories)})
+
+        tracer.start_stage(STAGE_FORMATTER) if tracer else None
         promoted_payload_keys = [
             "user_id",
             "agent_id",
@@ -2789,6 +3092,9 @@ class AsyncMemory(MemoryBase):
 
             formatted_memories.append(memory_item_dict)
 
+        if tracer:
+            tracer.finish_current_stage(metadata={"results_returned": len(formatted_memories)})
+
         return formatted_memories
 
     async def search(
@@ -2801,6 +3107,7 @@ class AsyncMemory(MemoryBase):
         rerank: bool = False,
         explain: bool = False,
         reference_date: Optional[Any] = None,
+        trace_enabled: bool = False,
         **kwargs,
     ):
         """
@@ -2833,6 +3140,7 @@ class AsyncMemory(MemoryBase):
             rerank (bool, optional): Whether to rerank results. Defaults to False.
             explain (bool, optional): Whether to include score_details for each result. Defaults to False.
             reference_date (Any, optional): Platform-only temporal parameter. Not supported in OSS.
+            trace_enabled (bool, optional): If True, return operation trace information. Defaults to False.
 
         Returns:
             dict: A dictionary containing the search results under a "results" key.
@@ -2907,20 +3215,30 @@ class AsyncMemory(MemoryBase):
             },
         )
 
-        search_start = time.perf_counter()
-        original_memories = await self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
-        search_elapsed_seconds = time.perf_counter() - search_start
+        with create_trace_collector("search", enabled=trace_enabled) as tracer:
+            search_start = time.perf_counter()
+            original_memories = await self._search_vector_store(
+                query, effective_filters, limit, threshold, explain=explain, tracer=tracer
+            )
+            search_elapsed_seconds = time.perf_counter() - search_start
 
-        # Apply reranking if enabled and reranker is available
-        if rerank and self.reranker and original_memories:
-            try:
-                # Run reranking in thread pool to avoid blocking async loop
-                reranked_memories = await asyncio.to_thread(
-                    self.reranker.rerank, query, original_memories, limit
-                )
-                original_memories = reranked_memories
-            except Exception as e:
-                logger.warning(f"Reranking failed, using original results: {e}")
+            # Apply reranking if enabled and reranker is available
+            if rerank and self.reranker and original_memories:
+                try:
+                    # Run reranking in thread pool to avoid blocking async loop
+                    reranked_memories = await asyncio.to_thread(
+                        self.reranker.rerank, query, original_memories, limit
+                    )
+                    original_memories = reranked_memories
+                except Exception as e:
+                    logger.warning(f"Reranking failed, using original results: {e}")
+
+            result = {"results": original_memories}
+            if trace_enabled:
+                result.update(tracer.get_trace_dict())
+                operation_id = tracer.get_operation_id()
+                if operation_id:
+                    result["operation_id"] = operation_id
 
         if temporal_usage_notice:
             await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
@@ -2937,7 +3255,7 @@ class AsyncMemory(MemoryBase):
             )
         else:
             await display_first_run_notice_async(self, "async", "search")
-        return {"results": original_memories}
+        return result
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -3043,30 +3361,39 @@ class AsyncMemory(MemoryBase):
                 return True
         return False
 
-    async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False):
+    async def _search_vector_store(self, query, filters, limit, threshold=0.1, explain=False, tracer=None):
         if threshold is None:
             threshold = 0.1
 
         # Step 1: Preprocess query (CPU-bound)
         query_lemmatized = await asyncio.to_thread(lemmatize_for_bm25, query)
         query_entities = await asyncio.to_thread(extract_entities, query)
+        entity_count = len(query_entities)
 
         # Step 2: Embed query
+        tracer.start_stage(STAGE_EMBEDDING, metadata={"mode": "search"}) if tracer else None
         embeddings = await asyncio.to_thread(self.embedding_model.embed, query, "search")
+        if tracer:
+            tracer.finish_current_stage(metadata={"count": 1})
 
         # Step 3: Semantic search (over-fetch)
         internal_limit = max(limit * 4, 60)
+        tracer.start_stage(STAGE_VECTOR_STORE, metadata={"operation": "semantic_search"}) if tracer else None
         semantic_results = await asyncio.to_thread(
             self.vector_store.search, query=query, vectors=embeddings, top_k=internal_limit, filters=filters
         )
+        if tracer:
+            tracer.finish_current_stage(metadata={"semantic_candidates": len(semantic_results), "internal_limit": internal_limit})
 
         # Step 4: Keyword search (if store supports it)
+        tracer.start_stage(STAGE_KEYWORD_RECALL) if tracer else None
         keyword_results = await asyncio.to_thread(
             self.vector_store.keyword_search, query=query_lemmatized, top_k=internal_limit, filters=filters
         )
 
         # Step 5: Compute BM25 scores
         bm25_scores = {}
+        keyword_count = 0
         if keyword_results is not None:
             midpoint, steepness = get_bm25_params(query, lemmatized=query_lemmatized)
             for mem in keyword_results:
@@ -3074,11 +3401,30 @@ class AsyncMemory(MemoryBase):
                 raw_score = mem.score if hasattr(mem, 'score') else mem.get('score', 0)
                 if raw_score and raw_score > 0:
                     bm25_scores[mem_id] = normalize_bm25(raw_score, midpoint, steepness)
+                    keyword_count += 1
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "keyword_candidates": keyword_count,
+                    "supported": keyword_results is not None,
+                    "entities_extracted": entity_count,
+                }
+            )
 
         # Step 6: Compute entity boosts
+        tracer.start_stage(STAGE_ENTITY_RECALL) if tracer else None
         entity_boosts = {}
+        entity_matches = 0
         if query_entities:
             entity_boosts = await self._compute_entity_boosts_async(query_entities, filters)
+            entity_matches = len(entity_boosts)
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "entities_extracted": entity_count,
+                    "entity_matches": entity_matches,
+                }
+            )
 
         # Step 7: Build candidate set from semantic results
         candidates = []
@@ -3091,6 +3437,7 @@ class AsyncMemory(MemoryBase):
             })
 
         # Step 8: Score and rank
+        tracer.start_stage(STAGE_SCORE_FUSION, metadata={"threshold": threshold}) if tracer else None
         scored_results = score_and_rank(
             semantic_results=candidates,
             bm25_scores=bm25_scores,
@@ -3099,8 +3446,18 @@ class AsyncMemory(MemoryBase):
             top_k=limit,
             explain=explain,
         )
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "candidates_ranked": len(candidates),
+                    "candidates_passed_threshold": len(scored_results),
+                    "has_bm25": bool(bm25_scores),
+                    "has_entity_boost": bool(entity_boosts),
+                }
+            )
 
         # Step 9: Format results
+        tracer.start_stage(STAGE_FORMATTER) if tracer else None
         promoted_payload_keys = [
             "user_id",
             "agent_id",
@@ -3111,9 +3468,11 @@ class AsyncMemory(MemoryBase):
         core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
 
         original_memories = []
+        filtered_out = 0
         for scored in scored_results:
             payload = scored.get("payload") or {}
             if not payload.get("data"):
+                filtered_out += 1
                 continue
 
             memory_item_dict = MemoryItem(
@@ -3138,6 +3497,14 @@ class AsyncMemory(MemoryBase):
                 memory_item_dict["score_details"] = scored["score_details"]
 
             original_memories.append(memory_item_dict)
+
+        if tracer:
+            tracer.finish_current_stage(
+                metadata={
+                    "results_filtered": filtered_out,
+                    "results_returned": len(original_memories),
+                }
+            )
 
         return original_memories
 

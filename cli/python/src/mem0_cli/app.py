@@ -278,6 +278,9 @@ def add(
     output: str = typer.Option(
         "text", "--output", "-o", help="Output format: text, json, quiet.", rich_help_panel="Output"
     ),
+    trace: bool = typer.Option(
+        False, "--trace", help="Print compact operation trace chain after results.", rich_help_panel="Output"
+    ),
     api_key: str | None = typer.Option(
         None,
         "--api-key",
@@ -313,6 +316,7 @@ def add(
         expires=expires,
         categories=categories,
         output=output,
+        trace=trace,
     )
 
 
@@ -358,6 +362,9 @@ def search(
     output: str = typer.Option(
         "text", "--output", "-o", help="Output: text, json, table.", rich_help_panel="Output"
     ),
+    trace: bool = typer.Option(
+        False, "--trace", help="Print compact operation trace chain after results.", rich_help_panel="Output"
+    ),
     api_key: str | None = typer.Option(
         None,
         "--api-key",
@@ -399,6 +406,7 @@ def search(
         filter_json=filter_json,
         fields=fields,
         output=output,
+        trace=trace,
     )
 
 
@@ -467,6 +475,9 @@ def list_cmd(
     output: str = typer.Option(
         "table", "--output", "-o", help="Output: text, json, table.", rich_help_panel="Output"
     ),
+    trace: bool = typer.Option(
+        False, "--trace", help="Print compact operation trace chain after results.", rich_help_panel="Output"
+    ),
     api_key: str | None = typer.Option(
         None,
         "--api-key",
@@ -498,6 +509,7 @@ def list_cmd(
         after=after,
         before=before,
         output=output,
+        trace=trace,
     )
 
 
@@ -1009,116 +1021,15 @@ def status(
     )
 
 
-@app.command("import", rich_help_panel="Memory")
+@app.command("import", rich_help_panel="Management")
 def import_cmd(
-    file_path: Path = typer.Argument(..., help="Input file (JSONL, JSON, or CSV)."),
+    file_path: str = typer.Argument(..., help="JSON file to import."),
     user_id: str | None = typer.Option(
-        None, "--user-id", "-u", help="Set user ID for all memories.", rich_help_panel="Scope"
+        None, "--user-id", "-u", help="Override user ID.", rich_help_panel="Scope"
     ),
     agent_id: str | None = typer.Option(
-        None, "--agent-id", help="Set agent ID for all memories.", rich_help_panel="Scope"
+        None, "--agent-id", help="Override agent ID.", rich_help_panel="Scope"
     ),
-    app_id: str | None = typer.Option(
-        None, "--app-id", help="Set app ID for all memories.", rich_help_panel="Scope"
-    ),
-    run_id: str | None = typer.Option(
-        None, "--run-id", help="Set run ID for all memories.", rich_help_panel="Scope"
-    ),
-    category: str | None = typer.Option(
-        None, "--category", help="Add a category to all memories.", rich_help_panel="Metadata"
-    ),
-    categories: str | None = typer.Option(
-        None, "--categories", help="Categories (JSON array or comma-separated).", rich_help_panel="Metadata"
-    ),
-    field_map: str | None = typer.Option(
-        None,
-        "--field-map",
-        help="Field mapping: source=dest, e.g. 'content=memory,owner=user_id'.",
-        rich_help_panel="Mapping",
-    ),
-    metadata: str | None = typer.Option(
-        None, "--metadata", "-m", help="Metadata to attach (JSON).", rich_help_panel="Metadata"
-    ),
-    format: str | None = typer.Option(
-        None, "--format", "-f", help="Input format: jsonl, json, csv (auto-detected from extension).", rich_help_panel="Input"
-    ),
-    batch_size: int = typer.Option(
-        100, "--batch-size", help="Batch size for processing.", rich_help_panel="Processing"
-    ),
-    infer: bool = typer.Option(
-        True, "--infer/--no-infer", help="Infer facts from memory content.", rich_help_panel="Processing"
-    ),
-    cursor: int = typer.Option(
-        0, "--cursor", help="Start index for resuming a failed import.", rich_help_panel="Processing"
-    ),
-    batch_id: str | None = typer.Option(
-        None,
-        "--batch-id",
-        help="Existing batch ID for resuming an import (persisted on server).",
-        rich_help_panel="Processing",
-    ),
-    resume: bool = typer.Option(
-        False,
-        "--resume",
-        help="Resume from cached/specified batch_id and cursor (works across restarts).",
-        rich_help_panel="Processing",
-    ),
-    dry_run: bool = typer.Option(
-        False, "--dry-run", help="Preview import without making changes."
-    ),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
-    ),
-    api_key: str | None = typer.Option(
-        None,
-        "--api-key",
-        help="Override API key.",
-        envvar="MEM0_API_KEY",
-        rich_help_panel="Connection",
-    ),
-    base_url: str | None = typer.Option(
-        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
-    ),
-) -> None:
-    """Import memories from JSONL, JSON, or CSV with field mapping and batch processing.
-
-    Supports field mapping, category assignment, user/agent/run scope,
-    batch processing with resumable batch_id + cursor, and dry-run preview.
-    The last batch_id and cursor are cached locally so --resume works across restarts.
-
-    Examples:
-      mem0 import data.jsonl --user-id alice
-      mem0 import data.csv --field-map content=memory,owner=user_id
-      mem0 import data.json --dry-run
-      mem0 import data.jsonl --resume                           # resume last cached batch
-      mem0 import data.jsonl --resume --batch-id batch_abc123
-    """
-    from mem0_cli.commands.memory import cmd_import
-
-    backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    cmd_import(
-        backend,
-        file_path,
-        **ids,
-        category=category,
-        categories=categories,
-        field_map=field_map,
-        metadata=metadata,
-        format=format,
-        batch_size=batch_size,
-        infer=infer,
-        cursor=cursor,
-        batch_id=batch_id,
-        resume=resume,
-        dry_run=dry_run,
-        output=output,
-    )
-
-
-@app.command("import-status", rich_help_panel="Memory")
-def import_status_cmd(
-    batch_id: str | None = typer.Argument(None, help="Batch ID to query. If omitted, the last cached import is used."),
     output: str = typer.Option(
         "text", "--output", "-o", help="Output: text, json.", rich_help_panel="Output"
     ),
@@ -1133,91 +1044,17 @@ def import_status_cmd(
         None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
     ),
 ) -> None:
-    """Query the persisted status of a batch import.
-
-    When no batch_id is given, the batch metadata cached from your last
-    `mem0 import` invocation is used automatically.
+    """Import memories from a JSON file.
 
     Examples:
-      mem0 import-status
-      mem0 import-status batch_abc123
-      mem0 import-status batch_abc123 -o json
+      mem0 import data.json --user-id alice
+      mem0 import data.json -u alice -o json
     """
-    from mem0_cli.commands.memory import cmd_import_status
-
-    backend, _ = _get_backend_and_config(api_key, base_url)
-    cmd_import_status(backend, batch_id, output=output)
-
-
-@app.command("export", rich_help_panel="Memory")
-def export_cmd(
-    output_file: Path = typer.Argument(..., help="Output file path (JSONL)."),
-    user_id: str | None = typer.Option(
-        None, "--user-id", "-u", help="Filter by user.", rich_help_panel="Scope"
-    ),
-    agent_id: str | None = typer.Option(
-        None, "--agent-id", help="Filter by agent.", rich_help_panel="Scope"
-    ),
-    app_id: str | None = typer.Option(
-        None, "--app-id", help="Filter by app.", rich_help_panel="Scope"
-    ),
-    run_id: str | None = typer.Option(
-        None, "--run-id", help="Filter by run.", rich_help_panel="Scope"
-    ),
-    category: str | None = typer.Option(
-        None, "--category", help="Filter by category.", rich_help_panel="Filters"
-    ),
-    after: str | None = typer.Option(
-        None, "--after", help="Created after (YYYY-MM-DD).", rich_help_panel="Filters"
-    ),
-    before: str | None = typer.Option(
-        None, "--before", help="Created before (YYYY-MM-DD).", rich_help_panel="Filters"
-    ),
-    filter_json: str | None = typer.Option(
-        None, "--filter", help="Advanced filter expression (JSON).", rich_help_panel="Filters"
-    ),
-    format: str = typer.Option(
-        "jsonl", "--format", "-f", help="Output format (currently only jsonl).", rich_help_panel="Output"
-    ),
-    output: str = typer.Option(
-        "text", "--output", "-o", help="Output: text, json, quiet.", rich_help_panel="Output"
-    ),
-    api_key: str | None = typer.Option(
-        None,
-        "--api-key",
-        help="Override API key.",
-        envvar="MEM0_API_KEY",
-        rich_help_panel="Connection",
-    ),
-    base_url: str | None = typer.Option(
-        None, "--base-url", help="Override API base URL.", rich_help_panel="Connection"
-    ),
-) -> None:
-    """Export memories to JSONL format with optional filters.
-
-    Exports fields: id, memory, user_id, agent_id, run_id, metadata,
-    created_at, updated_at, categories, feedback, feedback_reason.
-
-    Examples:
-      mem0 export backup.jsonl --user-id alice
-      mem0 export backup.jsonl --category preference --after 2024-01-01
-      mem0 export backup.jsonl --filter '{"user_id": "alice"}'
-    """
-    from mem0_cli.commands.memory import cmd_export
+    from mem0_cli.commands.utils import cmd_import
 
     backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    cmd_export(
-        backend,
-        output_file,
-        **ids,
-        category=category,
-        after=after,
-        before=before,
-        filter_json=filter_json,
-        format=format,
-        output=output,
-    )
+    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id)
+    cmd_import(backend, file_path, user_id=ids["user_id"], agent_id=ids["agent_id"], output=output)
 
 
 # ── Help (machine-readable) ──────────────────────────────────────────────
@@ -1247,6 +1084,7 @@ def _build_help_json() -> dict:
                 "--graph": "Enable graph memory extraction.",
                 "--no-graph": "Disable graph memory extraction.",
                 "--output, -o": "Output format: text, json, quiet.",
+                "--trace": "Print compact operation trace chain after results.",
             },
         },
         "search": {
@@ -1265,6 +1103,7 @@ def _build_help_json() -> dict:
                 "--graph": "Enable graph in search.",
                 "--no-graph": "Disable graph in search.",
                 "--output, -o": "Output format: text, json, table.",
+                "--trace": "Print compact operation trace chain after results.",
             },
         },
         "get": {
@@ -1288,6 +1127,7 @@ def _build_help_json() -> dict:
                 "--graph": "Enable graph in listing.",
                 "--no-graph": "Disable graph in listing.",
                 "--output, -o": "Output format: text, json, table.",
+                "--trace": "Print compact operation trace chain after results.",
             },
         },
         "update": {
@@ -1325,66 +1165,13 @@ def _build_help_json() -> dict:
             },
         },
         "import": {
-            "description": "Import memories from JSONL, JSON, or CSV with field mapping and batch processing.",
+            "description": "Import memories from a JSON file.",
             "usage": "mem0 import <file_path> [OPTIONS]",
-            "arguments": {
-                "file_path": {
-                    "description": "Input file (JSONL, JSON, or CSV).",
-                    "required": True,
-                }
-            },
+            "arguments": {"file_path": {"description": "JSON file to import.", "required": True}},
             "options": {
-                "--user-id, -u": "Set user ID for all memories.",
-                "--agent-id": "Set agent ID for all memories.",
-                "--app-id": "Set app ID for all memories.",
-                "--run-id": "Set run ID for all memories.",
-                "--category": "Add a category to all memories.",
-                "--categories": "Categories (JSON array or comma-separated).",
-                "--field-map": "Field mapping: source=dest, e.g. 'content=memory,owner=user_id'.",
-                "--metadata, -m": "Metadata to attach (JSON).",
-                "--format, -f": "Input format: jsonl, json, csv (auto-detected from extension).",
-                "--batch-size": "Batch size for processing (default: 100).",
-                "--infer/--no-infer": "Infer facts from memory content (default: true).",
-                "--cursor": "Start index for resuming a failed import.",
-                "--batch-id": "Existing batch ID for resuming an import (persisted on server).",
-                "--resume": "Resume from cached/specified batch_id and cursor (works across restarts).",
-                "--dry-run": "Preview import without making changes.",
-                "--output, -o": "Output format: text, json, quiet.",
-            },
-        },
-        "import-status": {
-            "description": "Query the persisted status of a batch import (no arg = last cached).",
-            "usage": "mem0 import-status [batch_id] [OPTIONS]",
-            "arguments": {
-                "batch_id": {
-                    "description": "Batch ID to query. If omitted, the last cached import is used.",
-                    "required": False,
-                }
-            },
-            "options": {
-                "--output, -o": "Output: text, json.",
-            },
-        },
-        "export": {
-            "description": "Export memories to JSONL format with optional filters.",
-            "usage": "mem0 export <output_file> [OPTIONS]",
-            "arguments": {
-                "output_file": {
-                    "description": "Output file path (JSONL).",
-                    "required": True,
-                }
-            },
-            "options": {
-                "--user-id, -u": "Filter by user.",
-                "--agent-id": "Filter by agent.",
-                "--app-id": "Filter by app.",
-                "--run-id": "Filter by run.",
-                "--category": "Filter by category.",
-                "--after": "Created after (YYYY-MM-DD).",
-                "--before": "Created before (YYYY-MM-DD).",
-                "--filter": "Advanced filter expression (JSON).",
-                "--format, -f": "Output format (currently only jsonl).",
-                "--output, -o": "Output format: text, json, quiet.",
+                "--user-id, -u": "Override user ID.",
+                "--agent-id": "Override agent ID.",
+                "--output, -o": "Output format: text, json.",
             },
         },
         "config show": {
@@ -1511,9 +1298,7 @@ def help(
         console.print("  list             List memories with optional filters")
         console.print("  update           Update a memory's text or metadata")
         console.print("  delete           Delete a memory, all memories, or an entity")
-        console.print("  import           Import memories from JSONL/JSON/CSV (batch, field mapping, dry-run)")
-        console.print("  import-status    Query persisted status of a batch import (or last cached)")
-        console.print("  export           Export memories to JSONL with filters")
+        console.print("  import           Import memories from a JSON file")
         console.print("  config           Manage configuration (show, get, set)")
         console.print("  entity           Manage entities (list, delete)")
         console.print("  event            Inspect background events (list, status)")

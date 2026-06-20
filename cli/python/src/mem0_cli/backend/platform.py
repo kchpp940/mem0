@@ -28,8 +28,6 @@ class PlatformBackend(Backend):
             },
             timeout=30.0,
         )
-        self._last_operation_id: str | None = None
-        self._last_response: Any = None
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
         from mem0_cli.state import capture_notice, is_agent_mode
@@ -52,9 +50,6 @@ class PlatformBackend(Backend):
             return {}
         data = resp.json()
 
-        # Capture operation_id from response headers for trace
-        self._last_operation_id = resp.headers.get("X-Operation-ID") or None
-
         # Pull the unclaimed-Agent-Mode notice out of the body (or the header
         # fallback for endpoints that return non-dict / non-dict-leading
         # payloads) and stash it for end-of-command surfacing.
@@ -72,13 +67,7 @@ class PlatformBackend(Backend):
             notice = resp.headers.get("X-Mem0-Notice-Message") or None
         capture_notice(notice)
 
-        self._last_response = data
         return data
-
-    @property
-    def last_operation_id(self) -> str | None:
-        """Return the operation ID from the last API response (X-Operation-ID header)."""
-        return self._last_operation_id
 
     def add(
         self,
@@ -94,7 +83,6 @@ class PlatformBackend(Backend):
         infer: bool = True,
         expires: str | None = None,
         categories: list[str] | None = None,
-        trace_enabled: bool = False,
     ) -> dict:
         payload: dict[str, Any] = {}
 
@@ -121,8 +109,6 @@ class PlatformBackend(Backend):
             payload["expiration_date"] = expires
         if categories:
             payload["categories"] = categories
-        if trace_enabled:
-            payload["trace_enabled"] = True
         payload["source"] = "CLI"
 
         return self._request("POST", "/v3/memories/add/", json=payload)
@@ -182,7 +168,6 @@ class PlatformBackend(Backend):
         keyword: bool = False,
         filters: dict | None = None,
         fields: list[str] | None = None,
-        trace_enabled: bool = False,
     ) -> list[dict]:
         payload: dict[str, Any] = {"query": query, "top_k": top_k, "threshold": threshold}
 
@@ -201,14 +186,9 @@ class PlatformBackend(Backend):
             payload["keyword_search"] = True
         if fields:
             payload["fields"] = fields
-        if trace_enabled:
-            payload["trace_enabled"] = True
         payload["source"] = "CLI"
 
         result = self._request("POST", "/v3/memories/search/", json=payload)
-        # Return the full dict wrapper (including trace/operation_id) when trace is enabled
-        if trace_enabled and isinstance(result, dict):
-            return result
         return (
             result
             if isinstance(result, list)
@@ -230,7 +210,6 @@ class PlatformBackend(Backend):
         category: str | None = None,
         after: str | None = None,
         before: str | None = None,
-        trace_enabled: bool = False,
     ) -> list[dict]:
         payload: dict[str, Any] = {}
         params = {"page": str(page), "page_size": str(page_size)}
@@ -253,14 +232,9 @@ class PlatformBackend(Backend):
         )
         if api_filters:
             payload["filters"] = api_filters
-        if trace_enabled:
-            payload["trace_enabled"] = True
         payload["source"] = "CLI"
 
         result = self._request("POST", "/v3/memories/", json=payload, params=params)
-        # Return the full dict wrapper (including trace/operation_id) when trace is enabled
-        if trace_enabled and isinstance(result, dict):
-            return result
         return (
             result
             if isinstance(result, list)

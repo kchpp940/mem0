@@ -15,7 +15,6 @@ export interface AddOptions {
 	infer?: boolean;
 	expires?: string;
 	categories?: string[];
-	traceEnabled?: boolean;
 }
 
 export interface SearchOptions {
@@ -29,7 +28,6 @@ export interface SearchOptions {
 	keyword?: boolean;
 	filters?: Record<string, unknown>;
 	fields?: string[];
-	traceEnabled?: boolean;
 }
 
 export interface ListOptions {
@@ -42,7 +40,6 @@ export interface ListOptions {
 	category?: string;
 	after?: string;
 	before?: string;
-	traceEnabled?: boolean;
 }
 
 export interface DeleteOptions {

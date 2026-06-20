@@ -321,11 +321,6 @@ program
 	.option("--expires <date>", "Expiration date (YYYY-MM-DD).")
 	.option("--categories <value>", "Categories (JSON array or comma-separated).")
 	.option("-o, --output <format>", "Output format: text, json, quiet.", "text")
-	.option(
-		"--trace",
-		"Print compact operation trace chain after results.",
-		false,
-	)
 	.option("--api-key <key>", "Override API key.")
 	.option("--base-url <url>", "Override API base URL.")
 	.addHelpText(
@@ -372,11 +367,6 @@ program
 	.option("--filter <json>", "Advanced filter expression (JSON).")
 	.option("--fields <list>", "Specific fields to return (comma-separated).")
 	.option("-o, --output <format>", "Output: text, json, table.", "text")
-	.option(
-		"--trace",
-		"Print compact operation trace chain after results.",
-		false,
-	)
 	.option("--api-key <key>", "Override API key.")
 	.option("--base-url <url>", "Override API base URL.")
 	.addHelpText(
@@ -409,7 +399,6 @@ program
 			filterJson: opts.filter,
 			fields: opts.fields,
 			output,
-			trace: opts.trace,
 		});
 	});
 
@@ -453,11 +442,6 @@ program
 	.option("--after <date>", "Created after (YYYY-MM-DD).")
 	.option("--before <date>", "Created before (YYYY-MM-DD).")
 	.option("-o, --output <format>", "Output: text, json, table.", "table")
-	.option(
-		"--trace",
-		"Print compact operation trace chain after results.",
-		false,
-	)
 	.option("--api-key <key>", "Override API key.")
 	.option("--base-url <url>", "Override API base URL.")
 	.addHelpText(
@@ -481,7 +465,6 @@ program
 			after: opts.after,
 			before: opts.before,
 			output,
-			trace: opts.trace,
 		});
 	});
 

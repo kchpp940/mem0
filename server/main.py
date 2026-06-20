@@ -162,23 +162,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Operation-ID", "X-Request-ID"],
 )
-
-
-@app.middleware("http")
-async def operation_id_header_middleware(request: Request, call_next):
-    """Extract operation_id from response body and expose it as X-Operation-ID header.
-
-    Also reflects incoming X-Operation-ID as X-Request-ID for request correlation.
-    """
-    incoming_op_id = request.headers.get("X-Operation-ID")
-    response = await call_next(request)
-
-    if incoming_op_id:
-        response.headers["X-Request-ID"] = incoming_op_id
-
-    return response
 
 app.include_router(auth_router.router)
 app.include_router(api_keys_router.router)
@@ -200,7 +184,6 @@ class MemoryCreate(BaseModel):
     infer: Optional[bool] = Field(None, description="Whether to extract facts from messages. Defaults to True.")
     memory_type: Optional[str] = Field(None, description="Type of memory to store (e.g. 'core').")
     prompt: Optional[str] = Field(None, description="Custom prompt to use for fact extraction.")
-    trace_enabled: Optional[bool] = Field(None, description="If True, return operation trace info in response and X-Operation-ID header.")
 
 
 class MemoryUpdate(BaseModel):
@@ -217,7 +200,6 @@ class SearchRequest(BaseModel):
     top_k: Optional[int] = Field(None, description="Maximum number of results to return.")
     threshold: Optional[float] = Field(None, description="Minimum similarity score for results.")
     explain: Optional[bool] = Field(None, description="Include score details for each search result.")
-    trace_enabled: Optional[bool] = Field(None, description="If True, return operation trace info in response and X-Operation-ID header.")
 
 
 class GenerateInstructionsRequest(BaseModel):
@@ -370,28 +352,17 @@ def generate_instructions(req: GenerateInstructionsRequest, _auth=Depends(verify
 
 
 @app.post("/memories", summary="Create memories")
-def add_memory(memory_create: MemoryCreate, request: Request, _auth=Depends(verify_auth)):
+def add_memory(memory_create: MemoryCreate, _auth=Depends(verify_auth)):
     """Store new memories."""
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier (user_id, agent_id, run_id) is required.")
 
     params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
-    trace_enabled = bool(params.pop("trace_enabled", False))
-    operation_id = request.headers.get("X-Operation-ID")
     try:
-        response = get_memory_instance().add(
-            messages=[m.model_dump() for m in memory_create.messages],
-            trace_enabled=trace_enabled,
-            operation_id=operation_id,
-            **params,
-        )
+        response = get_memory_instance().add(messages=[m.model_dump() for m in memory_create.messages], **params)
         if response.get("results"):
             telemetry.log_dashboard_nudge_once(DASHBOARD_URL)
-        headers = {}
-        resp_op_id = response.get("operation_id")
-        if resp_op_id:
-            headers["X-Operation-ID"] = resp_op_id
-        return JSONResponse(content=response, headers=headers)
+        return JSONResponse(content=response)
     except Exception:
         raise upstream_error()
 
@@ -427,7 +398,6 @@ def get_all_memories(
     user_id: Optional[str] = None,
     run_id: Optional[str] = None,
     agent_id: Optional[str] = None,
-    trace_enabled: Optional[bool] = None,
     _auth=Depends(verify_auth),
 ):
     """Retrieve stored memories. Lists all memories when no identifier is provided (admin only)."""
@@ -440,17 +410,7 @@ def get_all_memories(
         filters = {
             k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None
         }
-        operation_id = request.headers.get("X-Operation-ID")
-        response = get_memory_instance().get_all(
-            filters=filters,
-            trace_enabled=bool(trace_enabled),
-            operation_id=operation_id,
-        )
-        headers = {}
-        resp_op_id = response.get("operation_id")
-        if resp_op_id:
-            headers["X-Operation-ID"] = resp_op_id
-        return JSONResponse(content=response, headers=headers)
+        return get_memory_instance().get_all(filters=filters)
     except HTTPException:
         raise
     except Exception:
@@ -467,7 +427,7 @@ def get_memory(memory_id: str, _auth=Depends(verify_auth)):
 
 
 @app.post("/search", summary="Search memories")
-def search_memories(search_req: SearchRequest, request: Request, _auth=Depends(verify_auth)):
+def search_memories(search_req: SearchRequest, _auth=Depends(verify_auth)):
     """Search for memories based on a query."""
     try:
         filters = search_req.filters or {}
@@ -490,20 +450,7 @@ def search_memories(search_req: SearchRequest, request: Request, _auth=Depends(v
             params["threshold"] = search_req.threshold
         if search_req.explain is not None:
             params["explain"] = search_req.explain
-        trace_enabled = bool(search_req.trace_enabled)
-        operation_id = request.headers.get("X-Operation-ID")
-        response = get_memory_instance().search(
-            query=search_req.query,
-            filters=filters,
-            trace_enabled=trace_enabled,
-            operation_id=operation_id,
-            **params,
-        )
-        headers = {}
-        resp_op_id = response.get("operation_id")
-        if resp_op_id:
-            headers["X-Operation-ID"] = resp_op_id
-        return JSONResponse(content=response, headers=headers)
+        return get_memory_instance().search(query=search_req.query, filters=filters, **params)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except HTTPException:

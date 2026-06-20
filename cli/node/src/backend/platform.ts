@@ -20,7 +20,6 @@ import {
 export class PlatformBackend implements Backend {
 	private baseUrl: string;
 	private headers: Record<string, string>;
-	private _lastOperationId: string | null = null;
 
 	constructor(config: PlatformConfig) {
 		this.baseUrl = config.baseUrl.replace(/\/+$/, "");
@@ -31,10 +30,6 @@ export class PlatformBackend implements Backend {
 			"X-Mem0-Client-Language": "node",
 			"X-Mem0-Client-Version": CLI_VERSION,
 		};
-	}
-
-	get lastOperationId(): string | null {
-		return this._lastOperationId;
 	}
 
 	private async _request(
@@ -98,9 +93,6 @@ export class PlatformBackend implements Backend {
 
 		const data = await resp.json();
 
-		const opId = resp.headers.get("X-Operation-ID");
-		this._lastOperationId = opId ?? null;
-
 		// Pull the unclaimed-Agent-Mode notice out of the body (or the header
 		// fallback for endpoints returning non-dict / non-dict-leading payloads)
 		// and stash for end-of-command surfacing.
@@ -155,7 +147,6 @@ export class PlatformBackend implements Backend {
 		if (opts.infer === false) payload.infer = false;
 		if (opts.expires) payload.expiration_date = opts.expires;
 		if (opts.categories) payload.categories = opts.categories;
-		if (opts.traceEnabled) payload.trace_enabled = true;
 		payload.source = "CLI";
 
 		return (await this._request("POST", "/v3/memories/add/", {
@@ -216,15 +207,11 @@ export class PlatformBackend implements Backend {
 		if (opts.rerank) payload.rerank = true;
 		if (opts.keyword) payload.keyword_search = true;
 		if (opts.fields) payload.fields = opts.fields;
-		if (opts.traceEnabled) payload.trace_enabled = true;
 		payload.source = "CLI";
 
 		const result = (await this._request("POST", "/v3/memories/search/", {
 			json: payload,
 		})) as unknown;
-		if (opts.traceEnabled && !Array.isArray(result)) {
-			return [result] as Record<string, unknown>[];
-		}
 		if (Array.isArray(result)) return result;
 		const obj = result as Record<string, unknown>;
 		return (obj.results ?? obj.memories ?? []) as Record<string, unknown>[];
@@ -270,16 +257,12 @@ export class PlatformBackend implements Backend {
 			extraFilters: Object.keys(extra).length > 0 ? extra : undefined,
 		});
 		if (apiFilters) payload.filters = apiFilters;
-		if (opts.traceEnabled) payload.trace_enabled = true;
 		payload.source = "CLI";
 
 		const result = (await this._request("POST", "/v3/memories/", {
 			json: payload,
 			params,
 		})) as unknown;
-		if (opts.traceEnabled && !Array.isArray(result)) {
-			return [result] as Record<string, unknown>[];
-		}
 		if (Array.isArray(result)) return result;
 		const obj = result as Record<string, unknown>;
 		return (obj.results ?? obj.memories ?? []) as Record<string, unknown>[];

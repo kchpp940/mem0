@@ -278,9 +278,6 @@ def add(
     output: str = typer.Option(
         "text", "--output", "-o", help="Output format: text, json, quiet.", rich_help_panel="Output"
     ),
-    trace: bool = typer.Option(
-        False, "--trace", help="Print compact operation trace chain after results.", rich_help_panel="Output"
-    ),
     api_key: str | None = typer.Option(
         None,
         "--api-key",
@@ -316,7 +313,6 @@ def add(
         expires=expires,
         categories=categories,
         output=output,
-        trace=trace,
     )
 
 
@@ -362,9 +358,6 @@ def search(
     output: str = typer.Option(
         "text", "--output", "-o", help="Output: text, json, table.", rich_help_panel="Output"
     ),
-    trace: bool = typer.Option(
-        False, "--trace", help="Print compact operation trace chain after results.", rich_help_panel="Output"
-    ),
     api_key: str | None = typer.Option(
         None,
         "--api-key",
@@ -406,7 +399,6 @@ def search(
         filter_json=filter_json,
         fields=fields,
         output=output,
-        trace=trace,
     )
 
 
@@ -475,9 +467,6 @@ def list_cmd(
     output: str = typer.Option(
         "table", "--output", "-o", help="Output: text, json, table.", rich_help_panel="Output"
     ),
-    trace: bool = typer.Option(
-        False, "--trace", help="Print compact operation trace chain after results.", rich_help_panel="Output"
-    ),
     api_key: str | None = typer.Option(
         None,
         "--api-key",
@@ -509,7 +498,6 @@ def list_cmd(
         after=after,
         before=before,
         output=output,
-        trace=trace,
     )
 
 
@@ -1084,7 +1072,6 @@ def _build_help_json() -> dict:
                 "--graph": "Enable graph memory extraction.",
                 "--no-graph": "Disable graph memory extraction.",
                 "--output, -o": "Output format: text, json, quiet.",
-                "--trace": "Print compact operation trace chain after results.",
             },
         },
         "search": {
@@ -1103,7 +1090,6 @@ def _build_help_json() -> dict:
                 "--graph": "Enable graph in search.",
                 "--no-graph": "Disable graph in search.",
                 "--output, -o": "Output format: text, json, table.",
-                "--trace": "Print compact operation trace chain after results.",
             },
         },
         "get": {
@@ -1127,7 +1113,6 @@ def _build_help_json() -> dict:
                 "--graph": "Enable graph in listing.",
                 "--no-graph": "Disable graph in listing.",
                 "--output, -o": "Output format: text, json, table.",
-                "--trace": "Print compact operation trace chain after results.",
             },
         },
         "update": {

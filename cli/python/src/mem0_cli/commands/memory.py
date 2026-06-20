@@ -34,88 +34,6 @@ console = Console()
 err_console = Console(stderr=True)
 
 
-def _format_compact_trace(operation_id: str | None, trace: dict | None) -> str:
-    """Build a compact one-line trace summary for CLI stderr output.
-
-    Never prints raw text/prompts — only operation id, total duration,
-    and per-stage name + duration + key non-sensitive statistics.
-    """
-    from rich.style import Style
-    from rich.text import Text
-
-    op_id_short = operation_id[:8] if operation_id else "?"
-
-    if not trace:
-        dim = Style(color="bright_black")
-        t = Text()
-        t.append("[trace] op=", style=dim)
-        t.append(op_id_short, style=Style(bold=True, color="cyan"))
-        t.append(f" · stages=0 · no_trace_data", style=dim)
-        return t
-
-    stages = trace.get("stages") or []
-    total_ms = trace.get("total_duration_ms") or 0
-    dim = Style(color="bright_black")
-    accent = Style(color="cyan")
-    accent2 = Style(color="bright_cyan")
-    stage_style = Style(color="bright_blue")
-
-    t = Text()
-    t.append("[trace] op=", style=dim)
-    t.append(op_id_short, style=Style(bold=True, color="cyan"))
-    t.append(f" · total={total_ms:.0f}ms", style=dim)
-    t.append(f" · stages={len(stages)}", style=dim)
-
-    for s in stages:
-        name = s.get("name", "?")
-        dur = s.get("duration_ms")
-        status = s.get("status", "ok")
-        meta = s.get("metadata") or {}
-
-        t.append(" | ", style=dim)
-        t.append(name, style=stage_style)
-        t.append(f":{dur:.0f}ms", style=accent)
-        if status != "ok":
-            t.append(f":{status}", style=Style(color="red", bold=True))
-
-        # Pick a few high-signal non-sensitive keys
-        picked: list[str] = []
-        for key in (
-            "count", "operation", "memories_added", "memories_updated",
-            "memories_skipped", "duplicates_skipped", "entities_extracted",
-            "entities_linked", "candidates_ranked", "candidates_passed_threshold",
-            "semantic_candidates", "keyword_candidates", "entity_matches",
-            "results_returned", "results_filtered", "has_bm25", "has_entity_boost",
-            "threshold", "mode", "last_messages_count", "existing_memories",
-        ):
-            val = meta.get(key)
-            if val is not None and val != "" and val != {} and val != []:
-                if isinstance(val, bool):
-                    picked.append(f"{key[:6]}={str(val)[0]}")
-                else:
-                    picked.append(f"{key[:6]}={val}")
-        if picked:
-            t.append("(" + ",".join(picked[:4]) + ")", style=accent2)
-
-    return t
-
-
-def _print_trace_epilogue(backend: Backend, operation_id: str | None, trace: dict | None) -> None:
-    """Print the compact trace line to stderr."""
-    # Fallback: if operation_id not provided, check backend.last_operation_id
-    if operation_id is None:
-        try:
-            from mem0_cli.backend.platform import PlatformBackend
-            if isinstance(backend, PlatformBackend):
-                operation_id = backend.last_operation_id
-        except Exception:
-            pass
-
-    compact = _format_compact_trace(operation_id, trace)
-    err_console.print()
-    err_console.print(compact)
-
-
 def _stdin_is_piped() -> bool:
     """Return True only when stdin is an actual pipe or file redirect."""
     from mem0_cli.state import is_agent_mode
@@ -145,7 +63,6 @@ def cmd_add(
     expires: str | None,
     categories: str | None,
     output: str = "text",
-    trace: bool = False,
 ) -> None:
     """Add a memory."""
     from mem0_cli.state import is_agent_mode, set_current_command
@@ -213,7 +130,6 @@ def cmd_add(
             print_error(err_console, "--expires date must be in the future.")
             raise typer.Exit(1)
 
-    # Extract trace metadata (non-sensitive) before sending content
     with timed_status(err_console, "Adding memory...") as ts:
         try:
             result = backend.add(
@@ -228,24 +144,12 @@ def cmd_add(
                 infer=not no_infer,
                 expires=expires,
                 categories=cats,
-                trace_enabled=trace,
             )
         except Exception as e:
             ts.error_msg = str(e)
             raise typer.Exit(1) from None
 
-    # Extract trace info if present — always strip before formatters
-    operation_id: str | None = None
-    trace_data: dict | None = None
-    if isinstance(result, dict):
-        operation_id = result.get("operation_id")
-        trace_data = result.get("trace") or result.get("trace_summary")
-        # Remove trace fields so formatters see clean data
-        result = {k: v for k, v in result.items() if k not in ("trace", "trace_summary")}
-
     if output == "quiet":
-        if trace:
-            _print_trace_epilogue(backend, operation_id, trace_data)
         return
 
     # Deduplicate PENDING entries sharing the same event_id across all output modes
@@ -277,39 +181,17 @@ def cmd_add(
             }.items()
             if v
         }
-        agent_data = deduped
-        if trace and operation_id:
-            agent_data = {"results": deduped, "operation_id": operation_id}
-            if trace_data:
-                agent_data["trace"] = trace_data
         format_agent_envelope(
             console,
             command="add",
-            data=agent_data,
+            data=deduped,
             scope=scope or None,
             count=len(deduped),
         )
-        if trace:
-            _print_trace_epilogue(backend, operation_id, trace_data)
         return
 
     if output == "json":
-        out_payload: Any = result
-        if trace and operation_id:
-            if isinstance(out_payload, dict):
-                out_payload["operation_id"] = operation_id
-                if trace_data:
-                    out_payload["trace"] = trace_data
-            else:
-                out_payload = {
-                    "results": out_payload,
-                    "operation_id": operation_id,
-                }
-                if trace_data:
-                    out_payload["trace"] = trace_data
-        format_json(console, out_payload)
-        if trace:
-            _print_trace_epilogue(backend, operation_id, trace_data)
+        format_add_result(console, result, output)
         return
 
     console.print()
@@ -327,9 +209,6 @@ def cmd_add(
         )
     format_add_result(console, result, output)
 
-    if trace:
-        _print_trace_epilogue(backend, operation_id, trace_data)
-
 
 def cmd_search(
     backend: Backend,
@@ -346,7 +225,6 @@ def cmd_search(
     filter_json: str | None,
     fields: str | None,
     output: str = "text",
-    trace: bool = False,
 ) -> None:
     """Search memories."""
     from mem0_cli.state import is_agent_mode, set_current_command
@@ -388,25 +266,13 @@ def cmd_search(
                 keyword=keyword,
                 filters=filters,
                 fields=field_list,
-                trace_enabled=trace,
             )
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
-    # Unpack trace wrapper when trace is enabled
-    operation_id: str | None = None
-    trace_data: dict | None = None
-    if isinstance(results, dict):
-        operation_id = results.get("operation_id")
-        trace_data = results.get("trace") or results.get("trace_summary")
-        # Extract actual memories list
-        results = results.get("results") or results.get("memories") or []
-
     if output == "quiet":
-        if trace:
-            _print_trace_epilogue(backend, operation_id, trace_data)
         return
 
     if output == "agent":
@@ -420,38 +286,18 @@ def cmd_search(
             }.items()
             if v
         }
-        agent_data: Any = results
-        if trace and operation_id:
-            agent_data = {"results": results, "operation_id": operation_id}
-            if trace_data:
-                agent_data["trace"] = trace_data
         format_agent_envelope(
             console,
             command="search",
-            data=agent_data,
+            data=results,
             scope=scope or None,
             count=len(results),
             duration_ms=int(_elapsed * 1000),
         )
-        if trace:
-            _print_trace_epilogue(backend, operation_id, trace_data)
         return
 
     if output == "json":
-        out_payload: Any = results
-        if trace and operation_id:
-            if isinstance(out_payload, list):
-                out_payload = {
-                    "results": out_payload,
-                    "operation_id": operation_id,
-                }
-                if trace_data:
-                    out_payload["trace"] = trace_data
-            else:
-                out_payload["operation_id"] = operation_id
-                if trace_data:
-                    out_payload["trace"] = trace_data
-        format_json(console, out_payload)
+        format_json(console, results)
     elif output == "table":
         if results:
             format_memories_table(console, results, show_score=True)
@@ -472,9 +318,6 @@ def cmd_search(
             console.print()
             print_info(console, "No memories found matching your query.")
             console.print()
-
-    if trace:
-        _print_trace_epilogue(backend, operation_id, trace_data)
 
 
 def cmd_get(backend: Backend, memory_id: str, *, output: str) -> None:
@@ -510,7 +353,6 @@ def cmd_list(
     after: str | None,
     before: str | None,
     output: str = "table",
-    trace: bool = False,
 ) -> None:
     """List memories."""
     from mem0_cli.state import is_agent_mode, set_current_command
@@ -538,25 +380,13 @@ def cmd_list(
                 category=category,
                 after=after,
                 before=before,
-                trace_enabled=trace,
             )
         except Exception as e:
             print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
-    # Unpack trace wrapper when trace is enabled
-    operation_id: str | None = None
-    trace_data: dict | None = None
-    if isinstance(results, dict):
-        operation_id = results.get("operation_id")
-        trace_data = results.get("trace") or results.get("trace_summary")
-        # Extract actual memories list
-        results = results.get("results") or results.get("memories") or []
-
     if output == "quiet":
-        if trace:
-            _print_trace_epilogue(backend, operation_id, trace_data)
         return
 
     if output in ("json", "agent"):
@@ -570,15 +400,10 @@ def cmd_list(
             }.items()
             if v
         }
-        out_data: Any = results
-        if trace and operation_id:
-            out_data = {"results": results, "operation_id": operation_id}
-            if trace_data:
-                out_data["trace"] = trace_data
         format_agent_envelope(
             console,
             command="list",
-            data=out_data,
+            data=results,
             scope=scope or None,
             count=len(results),
             duration_ms=int(_elapsed * 1000),
@@ -613,9 +438,6 @@ def cmd_list(
             console.print()
             print_info(console, "No memories found.")
             console.print()
-
-    if trace:
-        _print_trace_epilogue(backend, operation_id, trace_data)
 
 
 def cmd_update(

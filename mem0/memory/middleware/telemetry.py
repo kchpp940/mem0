@@ -1,18 +1,56 @@
 """
 Telemetry Middleware.
 
-Captures anonymous telemetry events (operation traces) for every memory operation via
-the existing ``capture_event`` helper.  The actual PostHog-backed
-implementation lives in :mod:`mem0.memory.telemetry`.
+Captures anonymous telemetry events (operation traces) for every memory
+operation via the existing ``capture_event`` helper.  The actual
+PostHog-backed implementation lives in :mod:`mem0.memory.telemetry`.
 
-Each operation builds the same ``event_name`` and ``additional_data`` that
-the original inline ``capture_event(...)`` calls produced — the mapping
-lives here instead of scattered through :mod:`mem0.memory.main`.
+Hook contract
+-------------
 
-Where the original code needed extra data (eg. the encoded filter ids for add /
-get_all / search / delete_all), we expect the core Memory method to
-stash it on ``ctx.extras`` under well-known keys so this middleware
-can pick it up.  See :data:`_EXTRAS_KEYS` for the list.
+All hooks are ``after_*`` — telemetry is emitted *after* the core
+operation completes.  Every operation fires a ``mem0.<op>`` event.
+
+===========  ===================  ===================================================  ==============================
+Phase        Hook                  Event name                                          Reads / Writes
+===========  ===================  ===================================================  ==============================
+after_add    ``after_add``          ``mem0.add``                                        **Reads**: ``ctx.extras["keys"]``,
+             (async too)                                                                ``ctx.extras["encoded_ids"]``,
+                                                                                        ``ctx.memory.api_version``
+
+after_get    ``after_get``          ``mem0.get``                                        **Reads**: ``ctx.kwargs["memory_id"]``
+
+after_get    ``after_get_all``      ``mem0.get_all``                                    **Reads**: ``ctx.kwargs["top_k"]``,
+_all         (async too)                                                                ``ctx.extras["keys"]``,
+                                                                                        ``ctx.extras["encoded_ids"]``
+
+after_search ``after_search``        ``mem0.search``                                    **Reads**: ``ctx.kwargs["top_k"]``,
+             (async too)                                                                ``ctx.kwargs["threshold"]``,
+                                                                                        ``ctx.kwargs["explain"]``,
+                                                                                        ``ctx.kwargs["advanced_filters"]``,
+                                                                                        ``ctx.extras["keys"]``,
+                                                                                        ``ctx.extras["encoded_ids"]``,
+                                                                                        ``ctx.memory.api_version``
+
+after_update ``after_update``        ``mem0.update``                                    **Reads**: ``ctx.kwargs["memory_id"]``
+
+after_delete ``after_delete``        ``mem0.delete``                                    **Reads**: ``ctx.kwargs["memory_id"]``
+
+after_delete ``after_delete_all``    ``mem0.delete_all``                                **Reads**: ``ctx.extras["keys"]``,
+_all         (async too)                                                                ``ctx.extras["encoded_ids"]``
+
+after_       ``after_history``       ``mem0.history``                                   **Reads**: ``ctx.kwargs["memory_id"]``
+history      (async too)
+
+after_reset  ``after_reset``         ``mem0.reset``                                     (no extra data)
+             (async too)
+===========  ===================  ===================================================  ==============================
+
+Best-effort
+-----------
+This middleware is **best-effort** (``critical = False``).  If
+``capture_event`` raises, the error is logged at WARNING level and
+skipped — it never interrupts the operation.
 """
 
 from __future__ import annotations

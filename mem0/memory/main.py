@@ -25,6 +25,7 @@ from mem0.configs.prompts import (
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
 from mem0.memory.middleware import (
+    FeedbackMiddleware,
     HookContext,
     HistoryMiddleware,
     LifecycleMiddleware,
@@ -36,13 +37,6 @@ from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
 from mem0.memory.notices import (
-    PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS,
-    detect_scale_threshold_from_add_result,
-    detect_scale_threshold_from_top_k,
-    detect_decay_usage_from_delete,
-    detect_decay_usage_from_delete_all,
-    detect_temporal_usage_from_metadata,
-    detect_temporal_usage_from_search,
     get_decay_feature_error_message,
     get_decay_feature_error_message_async,
     get_temporal_feature_error_message,
@@ -472,6 +466,7 @@ class Memory(MemoryBase):
             LifecycleMiddleware(),
             HistoryMiddleware(),
             TelemetryMiddleware(),
+            FeedbackMiddleware(),
             NoticesMiddleware(),
         ])
 
@@ -737,9 +732,7 @@ class Memory(MemoryBase):
             memory_type = ctx.kwargs.get("memory_type", memory_type)
             prompt = ctx.kwargs.get("prompt", prompt)
 
-            temporal_usage_notice = detect_temporal_usage_from_metadata(metadata)
-            if temporal_usage_notice:
-                ctx.extras["temporal_usage_notice"] = temporal_usage_notice
+            ctx.extras["metadata"] = metadata
 
             processed_metadata, effective_filters = _build_filters_and_metadata(
                 user_id=user_id,
@@ -777,9 +770,7 @@ class Memory(MemoryBase):
 
             if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
                 results = self._create_procedural_memory(messages, metadata=processed_metadata, prompt=prompt)
-                scale_threshold_notice = detect_scale_threshold_from_add_result(self, results)
-                if scale_threshold_notice:
-                    ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+                ctx.extras["add_results"] = results
                 ctx.result = results
                 return ctx.result
 
@@ -792,10 +783,7 @@ class Memory(MemoryBase):
                 messages, processed_metadata, effective_filters, infer, prompt=prompt
             )
             ctx.extras["history_records"] = history_records
-
-            scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
-            if scale_threshold_notice:
-                ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+            ctx.extras["vector_store_result"] = vector_store_result
 
             ctx.result = {"results": vector_store_result}
             return ctx.result
@@ -1206,7 +1194,6 @@ class Memory(MemoryBase):
             )
 
         limit = top_k
-        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
         keys, encoded_ids = process_telemetry_filters(effective_filters)
 
         ctx = HookContext(
@@ -1220,10 +1207,6 @@ class Memory(MemoryBase):
         )
         ctx.extras["keys"] = keys
         ctx.extras["encoded_ids"] = encoded_ids
-        if scale_threshold_notice:
-            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
-        else:
-            ctx.extras["first_run_notice"] = True
 
         with self.middleware.run(ctx):
             all_memories_result = self._get_all_from_vector_store(effective_filters, limit)
@@ -1343,7 +1326,6 @@ class Memory(MemoryBase):
         # Validate search parameters (before applying defaults)
         _validate_search_params(threshold=threshold, top_k=top_k)
         query = _validate_and_trim_search_query(query)
-        temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
 
         # Validate and trim entity IDs in filters
         effective_filters = filters.copy() if filters else {}
@@ -1366,7 +1348,6 @@ class Memory(MemoryBase):
             )
 
         limit = top_k
-        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
         # Apply enhanced metadata filtering if advanced operators are detected
         advanced_operators_present = bool(filters and self._has_advanced_operators(filters))
@@ -1397,16 +1378,13 @@ class Memory(MemoryBase):
         )
         ctx.extras["keys"] = keys
         ctx.extras["encoded_ids"] = encoded_ids
-        if temporal_usage_notice:
-            ctx.extras["temporal_usage_notice"] = temporal_usage_notice
-        elif scale_threshold_notice:
-            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
 
         with self.middleware.run(ctx):
             search_start = time.perf_counter()
             original_memories = self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
             search_elapsed_seconds = time.perf_counter() - search_start
             ctx.extras["search_elapsed_seconds"] = search_elapsed_seconds
+            ctx.extras["search_result_count"] = len(original_memories)
 
             # Apply reranking if enabled and reranker is available
             if rerank and self.reranker and original_memories:
@@ -1415,11 +1393,6 @@ class Memory(MemoryBase):
                     original_memories = reranked_memories
                 except Exception as e:
                     logger.warning(f"Reranking failed, using original results: {e}")
-
-            if not temporal_usage_notice and not scale_threshold_notice and search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-                ctx.extras["slow_query_notice"] = (search_elapsed_seconds, top_k, len(original_memories))
-            elif not temporal_usage_notice and not scale_threshold_notice:
-                ctx.extras["first_run_notice"] = True
 
             ctx.result = {"results": original_memories}
             return ctx.result
@@ -1737,7 +1710,6 @@ class Memory(MemoryBase):
             memory=self,
             kwargs={"memory_id": memory_id, "data": data, "metadata": metadata},
         )
-        ctx.extras["first_run_notice"] = True
 
         with self.middleware.run(ctx):
             existing_embeddings = {data: self.embedding_model.embed(data, "update")}
@@ -1761,11 +1733,6 @@ class Memory(MemoryBase):
             memory=self,
             kwargs={"memory_id": memory_id},
         )
-        decay_usage_notice = detect_decay_usage_from_delete()
-        if decay_usage_notice:
-            ctx.extras["decay_usage_notice"] = decay_usage_notice
-        else:
-            ctx.extras["first_run_notice"] = True
 
         with self.middleware.run(ctx):
             existing_memory = self.vector_store.get(vector_id=memory_id)
@@ -1823,11 +1790,7 @@ class Memory(MemoryBase):
 
             logger.info(f"Deleted {len(memories)} memories")
 
-            decay_usage_notice = detect_decay_usage_from_delete_all(len(memories))
-            if decay_usage_notice:
-                ctx.extras["decay_usage_notice"] = decay_usage_notice
-            else:
-                ctx.extras["first_run_notice"] = True
+            ctx.extras["deleted_count"] = len(memories)
 
             ctx.result = {"message": "Memories deleted successfully!"}
             return ctx.result
@@ -1847,7 +1810,6 @@ class Memory(MemoryBase):
             memory=self,
             kwargs={"memory_id": memory_id},
         )
-        ctx.extras["first_run_notice"] = True
 
         with self.middleware.run(ctx):
             history = self.db.get_history(memory_id)
@@ -2027,7 +1989,6 @@ class Memory(MemoryBase):
             memory=self,
             kwargs={},
         )
-        ctx.extras["first_run_notice"] = True
 
         with self.middleware.run(ctx):
             logger.warning("Resetting all memories")
@@ -2116,6 +2077,7 @@ class AsyncMemory(MemoryBase):
             LifecycleMiddleware(),
             HistoryMiddleware(),
             TelemetryMiddleware(),
+            FeedbackMiddleware(),
             NoticesMiddleware(),
         ])
 
@@ -2321,7 +2283,6 @@ class AsyncMemory(MemoryBase):
         if timestamp is not None:
             raise ValueError(await get_temporal_feature_error_message_async("async", "add", "timestamp"))
 
-        temporal_usage_notice = detect_temporal_usage_from_metadata(metadata)
         processed_metadata, effective_filters = _build_filters_and_metadata(
             user_id=user_id, agent_id=agent_id, run_id=run_id, input_metadata=metadata
         )
@@ -2349,15 +2310,12 @@ class AsyncMemory(MemoryBase):
             "user_id": user_id, "agent_id": agent_id, "run_id": run_id,
             "metadata": metadata, "infer": infer, "memory_type": memory_type,
         }
-        if temporal_usage_notice:
-            ctx_kwargs["temporal_usage_notice"] = temporal_usage_notice
         keys, encoded_ids = process_telemetry_filters(effective_filters)
 
         ctx = HookContext(operation="add", memory=self, kwargs=ctx_kwargs)
         ctx.extras["keys"] = keys
         ctx.extras["encoded_ids"] = encoded_ids
-        if temporal_usage_notice:
-            ctx.extras["temporal_usage_notice"] = temporal_usage_notice
+        ctx.extras["metadata"] = metadata
 
         async with self.middleware.run_async(ctx):
             if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
@@ -2366,11 +2324,7 @@ class AsyncMemory(MemoryBase):
                 )
                 if history_record:
                     ctx.extras["history_record"] = history_record
-                scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, results)
-                if scale_threshold_notice:
-                    ctx.extras["scale_threshold_notice"] = scale_threshold_notice
-                elif not temporal_usage_notice:
-                    ctx.extras["first_run_notice"] = True
+                ctx.extras["add_results"] = results
 
                 ctx.result = results
                 return ctx.result
@@ -2385,12 +2339,7 @@ class AsyncMemory(MemoryBase):
             )
             if history_records:
                 ctx.extras["history_records"] = history_records
-
-            scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
-            if scale_threshold_notice:
-                ctx.extras["scale_threshold_notice"] = scale_threshold_notice
-            elif not temporal_usage_notice:
-                ctx.extras["first_run_notice"] = True
+            ctx.extras["vector_store_result"] = vector_store_result
 
             ctx.result = {"results": vector_store_result}
             return ctx.result
@@ -2712,7 +2661,6 @@ class AsyncMemory(MemoryBase):
             dict: Retrieved memory.
         """
         ctx = HookContext(operation="get", memory=self, kwargs={"memory_id": memory_id})
-        ctx.extras["first_run_notice"] = True
 
         async with self.middleware.run_async(ctx):
             memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
@@ -2802,7 +2750,6 @@ class AsyncMemory(MemoryBase):
             )
 
         limit = top_k
-        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
         keys, encoded_ids = process_telemetry_filters(effective_filters)
 
         ctx = HookContext(
@@ -2816,10 +2763,6 @@ class AsyncMemory(MemoryBase):
         )
         ctx.extras["keys"] = keys
         ctx.extras["encoded_ids"] = encoded_ids
-        if scale_threshold_notice:
-            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
-        else:
-            ctx.extras["first_run_notice"] = True
 
         async with self.middleware.run_async(ctx):
             all_memories_result = await self._get_all_from_vector_store(effective_filters, limit)
@@ -2935,7 +2878,6 @@ class AsyncMemory(MemoryBase):
         # Validate search parameters (before applying defaults)
         _validate_search_params(threshold=threshold, top_k=top_k)
         query = _validate_and_trim_search_query(query)
-        temporal_usage_notice = detect_temporal_usage_from_search(query, filters)
 
         # Validate and trim entity IDs in filters
         effective_filters = filters.copy() if filters else {}
@@ -2960,7 +2902,6 @@ class AsyncMemory(MemoryBase):
             )
 
         limit = top_k
-        scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
         # Apply enhanced metadata filtering if advanced operators are detected
         advanced_operators_present = bool(filters and self._has_advanced_operators(filters))
@@ -2991,16 +2932,13 @@ class AsyncMemory(MemoryBase):
         )
         ctx.extras["keys"] = keys
         ctx.extras["encoded_ids"] = encoded_ids
-        if temporal_usage_notice:
-            ctx.extras["temporal_usage_notice"] = temporal_usage_notice
-        elif scale_threshold_notice:
-            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
 
         async with self.middleware.run_async(ctx):
             search_start = time.perf_counter()
             original_memories = await self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
             search_elapsed_seconds = time.perf_counter() - search_start
             ctx.extras["search_elapsed_seconds"] = search_elapsed_seconds
+            ctx.extras["search_result_count"] = len(original_memories)
 
             # Apply reranking if enabled and reranker is available
             if rerank and self.reranker and original_memories:
@@ -3012,11 +2950,6 @@ class AsyncMemory(MemoryBase):
                     original_memories = reranked_memories
                 except Exception as e:
                     logger.warning(f"Reranking failed, using original results: {e}")
-
-            if not temporal_usage_notice and not scale_threshold_notice and search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-                ctx.extras["slow_query_notice"] = (search_elapsed_seconds, top_k, len(original_memories))
-            elif not temporal_usage_notice and not scale_threshold_notice:
-                ctx.extras["first_run_notice"] = True
 
             ctx.result = {"results": original_memories}
             return ctx.result
@@ -3318,7 +3251,6 @@ class AsyncMemory(MemoryBase):
             memory=self,
             kwargs={"memory_id": memory_id, "data": data, "metadata": metadata},
         )
-        ctx.extras["first_run_notice"] = True
 
         async with self.middleware.run_async(ctx):
             embeddings = await asyncio.to_thread(self.embedding_model.embed, data, "update")
@@ -3343,11 +3275,6 @@ class AsyncMemory(MemoryBase):
             memory=self,
             kwargs={"memory_id": memory_id},
         )
-        decay_usage_notice = detect_decay_usage_from_delete()
-        if decay_usage_notice:
-            ctx.extras["decay_usage_notice"] = decay_usage_notice
-        else:
-            ctx.extras["first_run_notice"] = True
 
         async with self.middleware.run_async(ctx):
             existing_memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
@@ -3418,11 +3345,7 @@ class AsyncMemory(MemoryBase):
 
             logger.info(f"Deleted {len(results) - len(errors)} memories")
 
-            decay_usage_notice = detect_decay_usage_from_delete_all(len(memories[0]))
-            if decay_usage_notice:
-                ctx.extras["decay_usage_notice"] = decay_usage_notice
-            else:
-                ctx.extras["first_run_notice"] = True
+            ctx.extras["deleted_count"] = len(memories[0])
 
             ctx.result = {"message": "Memories deleted successfully!"}
             return ctx.result
@@ -3442,7 +3365,6 @@ class AsyncMemory(MemoryBase):
             memory=self,
             kwargs={"memory_id": memory_id},
         )
-        ctx.extras["first_run_notice"] = True
 
         async with self.middleware.run_async(ctx):
             history = await asyncio.to_thread(self.db.get_history, memory_id)
@@ -3643,7 +3565,6 @@ class AsyncMemory(MemoryBase):
             memory=self,
             kwargs={},
         )
-        ctx.extras["first_run_notice"] = True
 
         async with self.middleware.run_async(ctx):
             logger.warning("Resetting all memories")

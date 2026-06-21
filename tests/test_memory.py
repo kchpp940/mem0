@@ -520,11 +520,12 @@ def test_add_infer_false_embeds_once(mock_sqlite, mock_llm_factory, mock_vector_
     mock_vector_store.insert.assert_called_once()
 
 
+@patch('mem0.memory.main.extract_entities_batch', return_value=[])
 @patch('mem0.utils.factory.EmbedderFactory.create')
 @patch('mem0.utils.factory.VectorStoreFactory.create')
 @patch('mem0.utils.factory.LlmFactory.create')
-@patch('mem0.memory.storage.SQLiteManager')
-def test_add_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory):
+@patch('mem0.memory.main.SQLiteManager')
+def test_add_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory, _mock_extract_entities_batch):
     """
     Regression test for issue #3723 (infer=True path): when the LLM rewrites a fact during the
     ADD action, the embedding should be computed once and cached, not computed again inside _create_memory.
@@ -565,11 +566,12 @@ def test_add_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm_fa
     mock_vector_store.insert.assert_called_once()
 
 
+@patch('mem0.memory.main.extract_entities_batch', return_value=[])
 @patch('mem0.utils.factory.EmbedderFactory.create')
 @patch('mem0.utils.factory.VectorStoreFactory.create')
 @patch('mem0.utils.factory.LlmFactory.create')
-@patch('mem0.memory.storage.SQLiteManager')
-def test_update_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory):
+@patch('mem0.memory.main.SQLiteManager')
+def test_update_infer_true_caches_embedding_on_llm_rewrite(mock_sqlite, mock_llm_factory, mock_vector_factory, mock_embedder_factory, _mock_extract_entities_batch):
     """
     Regression test for issue #3723 (infer=True path): V3 is ADD-only, so this test verifies
     that the single-call extraction pipeline embeds via embed_batch, not individual embed calls.

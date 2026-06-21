@@ -4,15 +4,44 @@ History Middleware.
 Writes memory change events (ADD / UPDATE / DELETE) to the SQLite history
 store via the owning Memory's ``db`` (SQLiteManager) attribute.
 
-The core Memory methods do **not** write history directly.  Instead they
-stash the records they want persisted into ``ctx.extras["history_records"]``
-(a list of dicts compatible with :meth:`SQLiteManager.batch_add_history`)
-and this middleware consumes that list in the corresponding ``after_*``
-hook.
+Hook contract
+-------------
 
-For operations that only affect a single memory (``update``, ``delete``)
-the record can also be placed at ``ctx.extras["history_record"]`` — the
-middleware handles both shapes.
+===========  ===================  ===================================================  ==============================
+Phase        Hook                  Effect                                                Reads / Writes
+===========  ===================  ===================================================  ==============================
+after_add    ``after_add``          Persists ADD history records for all newly            **Reads**: ``ctx.extras["history_records"]``
+             (async too)            created memories.                                     (list of dicts), ``ctx.extras["history_record"]``
+                                                                                          (single dict), ``ctx.memory.db``, ``ctx.error``
+                                                                                          **Writes**: SQLite via ``db.add_history()`` or
+                                                                                          ``db.batch_add_history()``
+
+after_update ``after_update``       Persists UPDATE history record.                       **Reads**: ``ctx.extras["history_record"]``,
+             (async too)                                                                  ``ctx.memory.db``, ``ctx.error``
+                                                                                          **Writes**: SQLite via ``db.add_history()``
+
+after_delete ``after_delete``       Persists DELETE history record.                       **Reads**: ``ctx.extras["history_record"]``,
+             (async too)                                                                  ``ctx.memory.db``, ``ctx.error``
+                                                                                          **Writes**: SQLite via ``db.add_history()``
+
+after_delete ``after_delete_all``   Persists DELETE history records for bulk deletion.    **Reads**: ``ctx.extras["history_records"]``,
+_all         (async too)                                                                  ``ctx.memory.db``, ``ctx.error``
+                                                                                          **Writes**: SQLite via ``db.batch_add_history()``
+===========  ===================  ===================================================  ==============================
+
+Critical behaviour
+------------------
+This middleware is marked **critical** (``critical = True``).  If the
+SQLite write fails the exception is *not* swallowed — it is recorded on
+``ctx.hook_errors`` and, after all after-hooks have run, a
+:class:`~mem0.memory.middleware.base.MiddlewareError` is raised so the
+caller knows that the history side-effect did not land.
+
+Guard clauses
+-------------
+* If ``ctx.error is not None`` (the core operation failed), no history
+  is written — there is nothing meaningful to record.
+* If ``ctx.memory.db`` is ``None``, the flush is skipped with a debug log.
 """
 
 from __future__ import annotations
@@ -27,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 class HistoryMiddleware(BaseMiddleware):
     name = "history"
+    critical = True
 
     # ------------------------------------------------------------------
     # helpers
@@ -61,29 +91,19 @@ class HistoryMiddleware(BaseMiddleware):
             return
         if len(records) == 1:
             r = records[0]
-            try:
-                db.add_history(
-                    r.get("memory_id"),
-                    r.get("old_memory"),
-                    r.get("new_memory"),
-                    r.get("event", "ADD"),
-                    created_at=r.get("created_at"),
-                    updated_at=r.get("updated_at"),
-                    is_deleted=r.get("is_deleted", 0),
-                    actor_id=r.get("actor_id"),
-                    role=r.get("role"),
-                )
-            except Exception as exc:
-                logger.warning("HistoryMiddleware failed to add history record: %s", exc)
+            db.add_history(
+                r.get("memory_id"),
+                r.get("old_memory"),
+                r.get("new_memory"),
+                r.get("event", "ADD"),
+                created_at=r.get("created_at"),
+                updated_at=r.get("updated_at"),
+                is_deleted=r.get("is_deleted", 0),
+                actor_id=r.get("actor_id"),
+                role=r.get("role"),
+            )
         else:
-            try:
-                db.batch_add_history(records)
-            except Exception as exc:
-                logger.warning(
-                    "HistoryMiddleware failed to batch-add %d history records: %s",
-                    len(records),
-                    exc,
-                )
+            db.batch_add_history(records)
 
     # ------------------------------------------------------------------
     # after hooks (history is written after a successful operation)

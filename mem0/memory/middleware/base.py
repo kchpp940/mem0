@@ -4,7 +4,7 @@ Memory Middleware Framework.
 Provides a unified hook-based mechanism for attaching side-effects
 (trace/telemetry, lifecycle annotations, history recording, notices, etc.)
 to the core Memory operation pipeline (add, search, get, get_all,
-update, delete, delete_all, history) without polluting the main flow.
+update, delete, delete_all, history, reset) without polluting the main flow.
 
 Hook execution order
 --------------------
@@ -22,10 +22,29 @@ If an error is raised during the core operation:
     3. middleware.after_<op>(ctx)           # *still* runs for every middleware,
                                              # middleware can inspect ctx.error
 
-Each hook receives a mutable ``HookContext`` and may mutate it in place
+Error propagation
+-----------------
+
+Each middleware declares whether it is **critical** (``critical = True``) or
+best-effort (the default).
+
+* **Best-effort** middleware hooks that raise are logged at ``WARNING`` level
+  and skipped.  The operation continues normally and the caller never sees
+  the exception.
+
+* **Critical** middleware hooks that raise are logged at ``ERROR`` level and
+  recorded on ``ctx.hook_errors``.  After *all* after-hooks have run the
+  manager raises a single :class:`MiddlewareError` that aggregates every
+  critical failure.  This ensures:
+
+  - Every middleware still gets a chance to run (one broken hook does not
+    prevent others from executing).
+  - The caller is guaranteed to know when a required side-effect (e.g.
+  history persistence) failed.
+
+Each hook receives a mutable :class:`HookContext` and may mutate it in place
 (eg. inject extra metadata in ``before_add`` or annotate results in
-``after_search``).  Hooks MUST NOT raise — any exception is swallowed at
-the manager level so a broken middleware can never break the main flow.
+``after_search``).
 """
 
 from __future__ import annotations
@@ -49,6 +68,42 @@ MEMORY_OPERATIONS = frozenset(
         "reset",
     }
 )
+
+
+@dataclass
+class HookError:
+    """Record of a single hook failure.
+
+    Attributes
+    ----------
+    middleware_name:
+        ``name`` attribute of the middleware that raised.
+    hook_name:
+        Fully qualified hook name (e.g. ``"history.after_add"``).
+    exception:
+        The exception that was raised.
+    critical:
+        Whether the middleware is marked as critical.
+    """
+
+    middleware_name: str
+    hook_name: str
+    exception: BaseException
+    critical: bool
+
+
+class MiddlewareError(Exception):
+    """Raised after all hooks have executed when one or more *critical*
+    middleware hooks failed.
+
+    The ``errors`` attribute contains the full list of :class:`HookError`
+    records so callers can inspect which hooks failed and why.
+    """
+
+    def __init__(self, errors: List[HookError]):
+        self.errors = errors
+        names = ", ".join(f"{e.hook_name} ({type(e.exception).__name__})" for e in errors)
+        super().__init__(f"Critical middleware hook(s) failed: {names}")
 
 
 @dataclass
@@ -77,6 +132,10 @@ class HookContext:
         Free-form dictionary for passing ad-hoc data between hooks of
         different middleware (e.g. a telemetry start timestamp, a
         pre-computed notice detection flag, etc.).
+    hook_errors:
+        List of :class:`HookError` records collected during hook
+        execution.  Populated by the :class:`MiddlewareManager` when a
+        hook raises.
     """
 
     operation: str
@@ -85,6 +144,7 @@ class HookContext:
     result: Any = None
     error: Optional[BaseException] = None
     extras: Dict[str, Any] = field(default_factory=dict)
+    hook_errors: List[HookError] = field(default_factory=list)
 
 
 class BaseMiddleware:
@@ -94,10 +154,17 @@ class BaseMiddleware:
     hooks you care about.  Default implementations are no-ops so you
     only need to implement the hooks relevant to your concern.
 
-    All hooks receive a single :class:`HookContext` argument and must
-    never raise — any exception will be caught and logged by the
-    :class:`MiddlewareManager` so one misbehaving middleware cannot
-    take down the whole pipeline.
+    Error propagation
+    -----------------
+    Set the ``critical`` class attribute to ``True`` when the middleware
+    implements a side-effect that *must not* fail silently (e.g. history
+    persistence).  If a critical hook raises, the error is recorded on
+    ``ctx.hook_errors`` and, after all hooks have run, a
+    :class:`MiddlewareError` is raised to notify the caller.
+
+    For best-effort middleware (``critical = False``, the default), any
+    exception is logged at ``WARNING`` level and swallowed so the
+    operation continues normally.
 
     Naming convention
     -----------------
@@ -120,6 +187,7 @@ class BaseMiddleware:
     """
 
     name: str = "base"
+    critical: bool = False
 
     # ------------------------------------------------------------------
     # add
@@ -254,32 +322,76 @@ class MiddlewareManager:
             )
 
     @staticmethod
-    def _safe_call(fn: Callable[[HookContext], None], ctx: HookContext, name: str) -> None:
+    def _call_hook(
+        fn: Callable[[HookContext], None],
+        ctx: HookContext,
+        hook_name: str,
+        middleware_name: str,
+        critical: bool,
+    ) -> None:
         try:
             fn(ctx)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "Middleware hook %s raised %s: %s. Hook has been skipped.",
-                name,
-                type(exc).__name__,
-                exc,
+        except Exception as exc:
+            hook_err = HookError(
+                middleware_name=middleware_name,
+                hook_name=hook_name,
+                exception=exc,
+                critical=critical,
             )
+            ctx.hook_errors.append(hook_err)
+            if critical:
+                logger.error(
+                    "Critical middleware hook %s raised %s: %s.",
+                    hook_name,
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "Best-effort middleware hook %s raised %s: %s. Hook has been skipped.",
+                    hook_name,
+                    type(exc).__name__,
+                    exc,
+                )
 
     @staticmethod
-    async def _safe_call_async(
+    async def _call_hook_async(
         fn: Callable[[HookContext], Awaitable[None]],
         ctx: HookContext,
-        name: str,
+        hook_name: str,
+        middleware_name: str,
+        critical: bool,
     ) -> None:
         try:
             await fn(ctx)
-        except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(
-                "Middleware hook %s raised %s: %s. Hook has been skipped.",
-                name,
-                type(exc).__name__,
-                exc,
+        except Exception as exc:
+            hook_err = HookError(
+                middleware_name=middleware_name,
+                hook_name=hook_name,
+                exception=exc,
+                critical=critical,
             )
+            ctx.hook_errors.append(hook_err)
+            if critical:
+                logger.error(
+                    "Critical middleware hook %s raised %s: %s.",
+                    hook_name,
+                    type(exc).__name__,
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "Best-effort middleware hook %s raised %s: %s. Hook has been skipped.",
+                    hook_name,
+                    type(exc).__name__,
+                    exc,
+                )
+
+    @staticmethod
+    def _raise_if_critical_errors(ctx: HookContext) -> None:
+        critical_errors = [e for e in ctx.hook_errors if e.critical]
+        if critical_errors:
+            raise MiddlewareError(critical_errors)
 
     # ------------------------------------------------------------------
     # sync runner
@@ -290,6 +402,9 @@ class MiddlewareManager:
         The yielded context manager runs ``before_<op>`` on ``__enter__``
         and ``after_<op>`` on ``__exit__`` (guaranteed, even if the body
         raises).
+
+        If any *critical* middleware hook raises, a
+        :class:`MiddlewareError` is raised after all hooks have executed.
         """
         self._validate_operation(ctx.operation)
         return _SyncCtxManager(self, ctx)
@@ -303,11 +418,6 @@ class MiddlewareManager:
         return _AsyncCtxManager(self, ctx)
 
 
-# ---------------------------------------------------------------------------
-# Context managers returned by MiddlewareManager
-# ---------------------------------------------------------------------------
-
-
 class _SyncCtxManager:
     def __init__(self, manager: MiddlewareManager, ctx: HookContext):
         self._manager = manager
@@ -319,7 +429,10 @@ class _SyncCtxManager:
         for mw in self._manager._middleware:
             fn = getattr(mw, hook_name, None)
             if callable(fn):
-                MiddlewareManager._safe_call(fn, self._ctx, f"{mw.name}.{hook_name}")
+                MiddlewareManager._call_hook(
+                    fn, self._ctx, f"{mw.name}.{hook_name}", mw.name, mw.critical
+                )
+        MiddlewareManager._raise_if_critical_errors(self._ctx)
         return self._ctx
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -330,8 +443,10 @@ class _SyncCtxManager:
         for mw in self._manager._middleware:
             fn = getattr(mw, hook_name, None)
             if callable(fn):
-                MiddlewareManager._safe_call(fn, self._ctx, f"{mw.name}.{hook_name}")
-        # Do not suppress exceptions raised by the core operation.
+                MiddlewareManager._call_hook(
+                    fn, self._ctx, f"{mw.name}.{hook_name}", mw.name, mw.critical
+                )
+        MiddlewareManager._raise_if_critical_errors(self._ctx)
         return None
 
 
@@ -348,15 +463,25 @@ class _AsyncCtxManager:
         sync_hook = f"before_{op}"
         for mw in self._manager._middleware:
             if hasattr(mw, async_hook) and callable(getattr(mw, async_hook)):
-                await MiddlewareManager._safe_call_async(
-                    getattr(mw, async_hook), self._ctx, f"{mw.name}.{async_hook}"
+                await MiddlewareManager._call_hook_async(
+                    getattr(mw, async_hook),
+                    self._ctx,
+                    f"{mw.name}.{async_hook}",
+                    mw.name,
+                    mw.critical,
                 )
             else:
                 fn = getattr(mw, sync_hook, None)
                 if callable(fn):
                     await asyncio.to_thread(
-                        MiddlewareManager._safe_call, fn, self._ctx, f"{mw.name}.{sync_hook}"
+                        MiddlewareManager._call_hook,
+                        fn,
+                        self._ctx,
+                        f"{mw.name}.{sync_hook}",
+                        mw.name,
+                        mw.critical,
                     )
+        MiddlewareManager._raise_if_critical_errors(self._ctx)
         return self._ctx
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
@@ -369,13 +494,23 @@ class _AsyncCtxManager:
         sync_hook = f"after_{op}"
         for mw in self._manager._middleware:
             if hasattr(mw, async_hook) and callable(getattr(mw, async_hook)):
-                await MiddlewareManager._safe_call_async(
-                    getattr(mw, async_hook), self._ctx, f"{mw.name}.{async_hook}"
+                await MiddlewareManager._call_hook_async(
+                    getattr(mw, async_hook),
+                    self._ctx,
+                    f"{mw.name}.{async_hook}",
+                    mw.name,
+                    mw.critical,
                 )
             else:
                 fn = getattr(mw, sync_hook, None)
                 if callable(fn):
                     await asyncio.to_thread(
-                        MiddlewareManager._safe_call, fn, self._ctx, f"{mw.name}.{sync_hook}"
+                        MiddlewareManager._call_hook,
+                        fn,
+                        self._ctx,
+                        f"{mw.name}.{sync_hook}",
+                        mw.name,
+                        mw.critical,
                     )
+        MiddlewareManager._raise_if_critical_errors(self._ctx)
         return None

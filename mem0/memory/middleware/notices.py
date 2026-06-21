@@ -1,26 +1,41 @@
 """
 Notices Middleware.
 
-Handles the display of best-effort user-facing notices:
+Handles the *display* of best-effort user-facing notices.  This middleware
+does **not** decide which notice to show — that is the responsibility of
+:class:`FeedbackMiddleware`, which writes detection results to
+``ctx.extras``.  This middleware reads those results and dispatches to
+the appropriate ``display_*_notice`` function.
 
-* First-run notice
-* Temporal usage notice
-* Scale threshold notice
-* Decay usage notice
-* Performance slow-query notice
+Hook contract
+-------------
 
-The actual notice implementation lives in :mod:`mem0.memory.notices`.  The core
-Memory methods no longer decide *when* to display notices; instead they simply
-stash pre-computed detection results on ``ctx.extras`` under well-known keys
-and this middleware dispatches to the right notice function in the appropriate
-``after_*`` hook.
+All hooks are ``after_*`` — notices are displayed after the core
+operation completes.  Each hook delegates to :meth:`_dispatch` which
+reads from ``ctx.extras`` in priority order:
 
-If no notice flag is set on ``ctx.extras`` we fall back to the generic
-``display_first_run_notice`` call (the original default behaviour.
+    temporal > scale > slow_query > decay > first_run
 
-This middleware also owns the *display logic and order of precedence: temporal >
-scale > slow-query > first-run for every operation — exactly the same order
-as the inline ``if/elif/elif/else`` ladder previously embedded in each memory method.
+===========  ===================  ===================================================  ==============================
+Phase        Hook                  Effect                                                Reads
+===========  ===================  ===================================================  ==============================
+after_*      ``after_add``,         Dispatches the appropriate notice based on           ``ctx.extras["temporal_usage_notice"]``,
+(all ops)    ``after_get``,         ``ctx.extras`` flags set by FeedbackMiddleware.       ``ctx.extras["scale_threshold_notice"]``,
+             ``after_get_all``,                                                          ``ctx.extras["slow_query_notice"]``,
+             ``after_search``,                                                           ``ctx.extras["decay_usage_notice"]``,
+             ``after_update``,                                                           ``ctx.extras["first_run_notice"]``
+             ``after_delete``,                                                           ``ctx.error`` (skips if error)
+             ``after_delete_all``,
+             ``after_history``,
+             ``after_reset``
+             (all have async
+              variants too)
+===========  ===================  ===================================================  ==============================
+
+Best-effort
+-----------
+This middleware is **best-effort** (``critical = False``).  If displaying
+a notice raises, the error is logged at WARNING level and skipped.
 """
 
 from __future__ import annotations

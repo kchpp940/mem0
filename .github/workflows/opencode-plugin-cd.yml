@@ -23,9 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: integrations/mem0-plugin/.opencode-plugin
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,12 +40,17 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
+        working-directory: integrations/mem0-plugin/.opencode-plugin
         run: bun install --frozen-lockfile
 
+      - name: Type check
+        run: make typecheck-opencode-plugin
+
       - name: Build
-        run: bun run build
+        run: make build-opencode-plugin
 
       - name: Publish to npm
+        working-directory: integrations/mem0-plugin/.opencode-plugin
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PREID=$(node -p "require('./package.json').version.split('-')[1].split('.')[0]")

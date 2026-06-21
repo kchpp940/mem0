@@ -22,9 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: mem0-ts
     steps:
       - uses: actions/checkout@v4
         with:
@@ -44,12 +41,20 @@ jobs:
           cache-dependency-path: mem0-ts/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: mem0-ts
         run: pnpm install --frozen-lockfile
 
+      - name: Lint
+        run: make lint-ts-sdk
+
+      - name: Type check
+        run: make typecheck-ts-sdk
+
       - name: Build
-        run: pnpm run build
+        run: make build-ts-sdk
 
       - name: Publish to npm
+        working-directory: mem0-ts
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PREID=$(node -p "require('./package.json').version.split('-')[1].split('.')[0]")

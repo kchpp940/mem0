@@ -22,9 +22,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: cli/python
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,8 +35,15 @@ jobs:
       - name: Install Hatch
         run: pip install hatch
 
+      - name: Install dev dependencies
+        working-directory: cli/python
+        run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: make lint-python-cli
+
       - name: Build a binary wheel and a source tarball
-        run: hatch build --clean
+        run: make build-python-cli
 
       - name: Publish distribution 📦 to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1

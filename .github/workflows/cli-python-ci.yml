@@ -12,6 +12,20 @@ on:
   workflow_call:
 
 jobs:
+  contract:
+    name: CLI payload contract check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify Python and Node CLI contract files are in sync
+        run: make contract-check
+
   lint:
     runs-on: ubuntu-latest
     steps:

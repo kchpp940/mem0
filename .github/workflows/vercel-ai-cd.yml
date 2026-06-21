@@ -23,9 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: integrations/vercel-ai-sdk
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,12 +42,20 @@ jobs:
           cache-dependency-path: integrations/vercel-ai-sdk/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: integrations/vercel-ai-sdk
         run: pnpm install --frozen-lockfile
 
+      - name: Lint
+        run: make lint-vercel-ai-sdk
+
+      - name: Type check
+        run: make typecheck-vercel-ai-sdk
+
       - name: Build
-        run: pnpm run build
+        run: make build-vercel-ai-sdk
 
       - name: Publish to npm
+        working-directory: integrations/vercel-ai-sdk
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PREID=$(node -p "require('./package.json').version.split('-')[1].split('.')[0]")

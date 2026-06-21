@@ -8,15 +8,66 @@
         install-pi-agent-plugin format-pi-agent-plugin lint-pi-agent-plugin typecheck-pi-agent-plugin check-pi-agent-plugin build-pi-agent-plugin test-pi-agent-plugin clean-pi-agent-plugin \
         install-opencode-plugin typecheck-opencode-plugin check-opencode-plugin build-opencode-plugin clean-opencode-plugin \
         build-server build-openmemory \
+        install-core format-core lint-core typecheck-core check-core build-core test-core clean-core \
+        install-integrations format-integrations lint-integrations typecheck-integrations check-integrations build-integrations test-integrations clean-integrations \
+        install-infra build-infra clean-infra \
         install-all format-all lint-all typecheck-all check-all build-all test-all clean-all \
+        release-check-core release-check-integrations release-check-all release-check \
         contract-check
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  Package groups & skip strategy
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Packages are divided into three groups so that local preflight checks can
+# skip heavy dependencies. Use the SKIP_* variables or SKIP_PKGS to opt out:
+#
+#   make release-check SKIP_PKGS="opencode-plugin"
+#   make check-all SKIP_INFRA=1
+#
+# ── Group 1: CORE ─────────────────────────────────────────────────────────
+# Libraries and CLIs that every developer touches. Always run in CI and by
+# default in local release checks.
+CORE_PACKAGES = python-sdk python-cli node-cli ts-sdk
+#
+# ── Group 2: INTEGRATIONS ─────────────────────────────────────────────────
+# IDE and framework plugins. Run in CI but can be skipped locally with
+# SKIP_INTEGRATIONS=1 or by listing packages in SKIP_PKGS.
+INTEGRATION_PACKAGES = openclaw vercel-ai-sdk pi-agent-plugin
+# opencode-plugin requires bun and is excluded from INTEGRATION_PACKAGES by
+# default. Add it explicitly or set INCLUDE_OPENCODE=1.
+ifdef INCLUDE_OPENCODE
+INTEGRATION_PACKAGES += opencode-plugin
+endif
+#
+# ── Group 3: INFRASTRUCTURE ──────────────────────────────────────────────
+# Docker-based services (server, openmemory). Never run by default — opt in
+# with SKIP_INFRA=0 or make build-server / make build-openmemory directly.
+INFRA_PACKAGES = server openmemory
+#
+# ── Skip handling ─────────────────────────────────────────────────────────
+# Space-separated list of package short names to exclude, e.g.
+#   make check-all SKIP_PKGS="opencode-plugin openmemory"
+SKIP_PKGS ?=
+
+# Helper: filter out packages listed in SKIP_PKGS from a list
+filter-skip = $(filter-out $(SKIP_PKGS),$(1))
+
+# Resolve each group respecting SKIP_PKGS and optional opt-out flags
+ACTIVE_CORE         = $(call filter-skip,$(CORE_PACKAGES))
+ACTIVE_INTEGRATIONS = $(if $(SKIP_INTEGRATIONS),,$(call filter-skip,$(INTEGRATION_PACKAGES)))
+# Infra is opt-in: only active when SKIP_INFRA is explicitly set to "0"
+ACTIVE_INFRA        = $(if $(filter 0,$(SKIP_INFRA)),$(call filter-skip,$(INFRA_PACKAGES)),)
+
+# Convenience: all active non-infra packages (used by the default *-all)
+ALL_PACKAGES = $(ACTIVE_CORE) $(ACTIVE_INTEGRATIONS)
 
 # ── Variables ─────────────────────────────────────────────────────────────
 
 ISORT_OPTIONS = --profile black
 PROJECT_NAME := mem0ai
 
-# Python versions for matrix testing (used by CI)
+# Python / Node versions (informational, used by CI matrix configs)
 PYTHON_VERSIONS ?= 3.10 3.11 3.12
 NODE_VERSIONS ?= 20 22
 
@@ -27,34 +78,42 @@ all: format lint
 help:
 	@echo "Mem0 monorepo — unified task entry points"
 	@echo ""
-	@echo "Meta targets (run across all sub-projects):"
-	@echo "  make install          Install dependencies for all packages"
-	@echo "  make format           Format code in all packages"
-	@echo "  make lint             Lint all packages"
-	@echo "  make typecheck        Type-check all TypeScript packages"
-	@echo "  make check            Full quality gate (format-check + lint + typecheck)"
-	@echo "  make build            Build all packages"
-	@echo "  make test             Run all tests"
-	@echo "  make clean            Remove build artifacts everywhere"
+	@echo "Package groups:"
+	@echo "  core           python-sdk, python-cli, node-cli, ts-sdk"
+	@echo "  integrations   openclaw, vercel-ai-sdk, pi-agent-plugin"
+	@echo "                   (+ opencode-plugin if INCLUDE_OPENCODE=1)"
+	@echo "  infra          server, openmemory  (Docker — opt-in only)"
 	@echo ""
-	@echo "Per-package targets (replace <pkg> with the package name):"
-	@echo "  make install-<pkg>    Install deps for one package"
-	@echo "  make format-<pkg>     Format one package"
-	@echo "  make lint-<pkg>       Lint one package"
-	@echo "  make typecheck-<pkg>  Type-check one package (TS only)"
-	@echo "  make check-<pkg>      Full check on one package"
-	@echo "  make build-<pkg>      Build one package"
-	@echo "  make test-<pkg>       Test one package"
-	@echo "  make clean-<pkg>      Clean one package"
+	@echo "Skip-control variables:"
+	@echo "  SKIP_PKGS=\"a b\"        Exclude specific packages by short name"
+	@echo "  SKIP_INTEGRATIONS=1     Skip all integrations"
+	@echo "  SKIP_INFRA=0            Enable infra targets (default: skipped)"
+	@echo "  INCLUDE_OPENCODE=1      Add opencode-plugin to integrations"
+	@echo ""
+	@echo "Meta targets — aggregate across groups:"
+	@echo "  make install-core / format-core / lint-core / typecheck-core"
+	@echo "  make check-core / build-core / test-core / clean-core"
+	@echo "  make install-integrations / check-integrations / build-integrations / ..."
+	@echo "  make install-all / format-all / lint-all / typecheck-all"
+	@echo "  make check-all / build-all / test-all / clean-all"
+	@echo ""
+	@echo "Per-package targets (replace <pkg>):"
+	@echo "  make install-<pkg> / format-<pkg> / lint-<pkg> / typecheck-<pkg>"
+	@echo "  make check-<pkg> / build-<pkg> / test-<pkg> / clean-<pkg>"
 	@echo ""
 	@echo "Available packages:"
 	@echo "  python-sdk, python-cli, node-cli, ts-sdk,"
 	@echo "  openclaw, vercel-ai-sdk, pi-agent-plugin, opencode-plugin,"
 	@echo "  server, openmemory"
 	@echo ""
-	@echo "Contract / release targets:"
-	@echo "  make contract-check   Verify CLI payload contract files are in sync"
-	@echo "  make release-check    Pre-release quality gate (check + build + contract-check)"
+	@echo "Release preflight (layered):"
+	@echo "  make release-check-core        Core only — must pass before cutting any release"
+	@echo "  make release-check-integrations  Integration plugins only"
+	@echo "  make release-check             Core + integrations (DEFAULT local preflight)"
+	@echo "  make release-check-all         Core + integrations + infra (CI full gate)"
+	@echo ""
+	@echo "Contract / cross-cutting:"
+	@echo "  make contract-check            Verify CLI payload contract files are in sync"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Python SDK  (mem0/)
@@ -83,7 +142,8 @@ test-python-sdk:
 clean-python-sdk:
 	rm -rf dist
 
-# Legacy aliases (keep backward-compat with the old root Makefile)
+# Legacy aliases — keep default targets pointing at python-sdk for backward
+# compatibility with contributors who only touch the core Python SDK.
 install: install-python-sdk
 format: format-python-sdk
 lint: lint-python-sdk
@@ -259,6 +319,7 @@ clean-pi-agent-plugin:
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  OpenCode plugin  (integrations/mem0-plugin/.opencode-plugin/)
+#  Requires bun — excluded from default integrations; set INCLUDE_OPENCODE=1
 # ═══════════════════════════════════════════════════════════════════════════
 
 install-opencode-plugin:
@@ -276,58 +337,78 @@ clean-opencode-plugin:
 	rm -rf integrations/mem0-plugin/.opencode-plugin/dist
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Server  (server/)
+#  Server  (server/)  — Docker build only; opt-in via SKIP_INFRA=0
 # ═══════════════════════════════════════════════════════════════════════════
 
 build-server:
 	cd server && make build
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  OpenMemory  (openmemory/)
+#  OpenMemory  (openmemory/)  — Docker build only; opt-in via SKIP_INFRA=0
 # ═══════════════════════════════════════════════════════════════════════════
 
 build-openmemory:
 	cd openmemory && make build
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Aggregate meta-targets
+#  Group aggregates
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# Each verb (install / format / lint / typecheck / check / build / test /
+# clean) has a group-level target (e.g. check-core, check-integrations) and
+# a package-level target (e.g. check-python-sdk). The group targets expand
+# to their per-package counterparts filtered through the skip strategy.
 
-# Note: opencode-plugin uses bun and is excluded from the default meta-targets
-# to avoid requiring bun on every dev machine. Use make install-opencode-plugin
-# explicitly if you need it.
+# ── CORE ───────────────────────────────────────────────────────────────────
+install-core:     $(addprefix install-,$(ACTIVE_CORE))
+format-core:      $(addprefix format-,$(ACTIVE_CORE))
+lint-core:        $(addprefix lint-,$(ACTIVE_CORE))
+typecheck-core:   $(addprefix typecheck-,$(ACTIVE_CORE))
+check-core:       $(addprefix check-,$(ACTIVE_CORE))
+build-core:       $(addprefix build-,$(ACTIVE_CORE))
+test-core:        $(addprefix test-,$(ACTIVE_CORE))
+clean-core:       $(addprefix clean-,$(ACTIVE_CORE))
 
-TS_PACKAGES = ts-sdk node-cli openclaw vercel-ai-sdk pi-agent-plugin
-PY_PACKAGES = python-sdk python-cli
-ALL_PACKAGES = $(PY_PACKAGES) $(TS_PACKAGES)
+# ── INTEGRATIONS ──────────────────────────────────────────────────────────
+install-integrations:     $(addprefix install-,$(ACTIVE_INTEGRATIONS))
+format-integrations:      $(addprefix format-,$(ACTIVE_INTEGRATIONS))
+lint-integrations:        $(addprefix lint-,$(ACTIVE_INTEGRATIONS))
+typecheck-integrations:   $(addprefix typecheck-,$(ACTIVE_INTEGRATIONS))
+check-integrations:       $(addprefix check-,$(ACTIVE_INTEGRATIONS))
+build-integrations:       $(addprefix build-,$(ACTIVE_INTEGRATIONS))
+test-integrations:        $(addprefix test-,$(ACTIVE_INTEGRATIONS))
+clean-integrations:       $(addprefix clean-,$(ACTIVE_INTEGRATIONS))
 
-install-all: install-python-sdk install-python-cli install-ts-sdk install-node-cli \
-             install-openclaw install-vercel-ai-sdk install-pi-agent-plugin
+# ── INFRA (opt-in) ────────────────────────────────────────────────────────
+install-infra:
+	@echo "Infra packages (server, openmemory) use Docker — no install step."
+	@echo "Use 'make build-server' or 'make build-openmemory' directly."
 
-format-all: format-python-sdk format-python-cli format-ts-sdk format-node-cli \
-            format-openclaw format-vercel-ai-sdk format-pi-agent-plugin
+build-infra:   $(addprefix build-,$(ACTIVE_INFRA))
+clean-infra:
+	@echo "Infra packages use docker compose down -v — run from their own directories."
 
-lint-all: lint-python-sdk lint-python-cli lint-ts-sdk lint-node-cli \
-          lint-openclaw lint-vercel-ai-sdk
-
-typecheck-all: typecheck-ts-sdk typecheck-node-cli typecheck-openclaw \
-               typecheck-vercel-ai-sdk typecheck-pi-agent-plugin
-
-check-all: check-python-sdk check-python-cli check-ts-sdk check-node-cli \
-           check-openclaw check-vercel-ai-sdk check-pi-agent-plugin
-
-build-all: build-python-sdk build-python-cli build-ts-sdk build-node-cli \
-           build-openclaw build-vercel-ai-sdk build-pi-agent-plugin
-
-test-all: test-python-sdk test-python-cli test-ts-sdk test-node-cli \
-          test-openclaw test-vercel-ai-sdk test-pi-agent-plugin
-
-clean-all: clean-python-sdk clean-python-cli clean-ts-sdk clean-node-cli \
-           clean-openclaw clean-vercel-ai-sdk clean-pi-agent-plugin clean-opencode-plugin
+# ── ALL (core + integrations; infra always opt-in) ────────────────────────
+install-all:     install-core install-integrations
+format-all:      format-core format-integrations
+lint-all:        lint-core lint-integrations
+typecheck-all:   typecheck-core typecheck-integrations
+check-all:       check-core check-integrations
+build-all:       build-core build-integrations
+test-all:        test-core test-integrations
+clean-all:       clean-core clean-integrations clean-opencode-plugin
 
 # ═══════════════════════════════════════════════════════════════════════════
-#  Contract / release gates
+#  Contract / release gates (layered)
 # ═══════════════════════════════════════════════════════════════════════════
+#
+# Release preflight is split into three layers so a developer can run just
+# what's relevant to the change they're about to ship:
+#
+#   release-check-core          Always required — core quality gate + contract
+#   release-check-integrations  Integration plugin quality gate
+#   release-check               Core + integrations (DEFAULT local preflight)
+#   release-check-all           Everything including infra Docker builds (CI)
 
 # Verify that the two CLI payload contract files are semantically identical.
 # Both Python and Node CLIs derive their payload builders from this file;
@@ -343,10 +424,38 @@ contract-check:
 	  exit 1)
 	@echo "Contract check passed ✓"
 
-# Pre-release quality gate — everything that should be green before cutting a release.
-release-check: check-all build-all contract-check
+# Layer 1 — core packages + cross-cutting contract. This is the minimum
+# bar every release must clear regardless of scope.
+release-check-core: check-core build-core contract-check
+	@echo ""
+	@echo "══════════════════════════════════════════════════════════════"
+	@echo "  Core release preflight passed ✓"
+	@echo "  Packages: $(ACTIVE_CORE)"
+	@echo "══════════════════════════════════════════════════════════════"
+
+# Layer 2 — integration plugins only. Used when cutting a plugin release
+# or when a core change might affect plugin behaviour.
+release-check-integrations: check-integrations build-integrations
+	@echo ""
+	@echo "══════════════════════════════════════════════════════════════"
+	@echo "  Integrations release preflight passed ✓"
+	@echo "  Packages: $(ACTIVE_INTEGRATIONS)"
+	@echo "══════════════════════════════════════════════════════════════"
+
+# Default local release check — core + integrations (infra excluded to
+# avoid pulling Docker dependencies on developer laptops).
+release-check: release-check-core release-check-integrations
 	@echo ""
 	@echo "All release checks passed ✓"
+
+# Full CI gate — everything including infra Docker builds.
+# Explicitly sets SKIP_INFRA=0 so infra targets participate.
+release-check-all:
+	@$(MAKE) --no-print-directory release-check-core SKIP_PKGS="$(SKIP_PKGS)" SKIP_INFRA=0
+	@$(MAKE) --no-print-directory release-check-integrations SKIP_PKGS="$(SKIP_PKGS)" SKIP_INFRA=0
+	@$(MAKE) --no-print-directory build-infra SKIP_PKGS="$(SKIP_PKGS)" SKIP_INFRA=0
+	@echo ""
+	@echo "Full release preflight passed ✓"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  Docs

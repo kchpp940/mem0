@@ -23,9 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: integrations/pi-agent-plugin
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,12 +42,17 @@ jobs:
           cache-dependency-path: integrations/pi-agent-plugin/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: integrations/pi-agent-plugin
         run: pnpm install --frozen-lockfile
 
+      - name: Type check
+        run: make typecheck-pi-agent-plugin
+
       - name: Build
-        run: pnpm build
+        run: make build-pi-agent-plugin
 
       - name: Publish to npm
+        working-directory: integrations/pi-agent-plugin
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PREID=$(node -p "require('./package.json').version.split('-')[1].split('.')[0]")

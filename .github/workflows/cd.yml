@@ -39,12 +39,13 @@ jobs:
           pip install hatch
 
       - name: Install dependencies
-        run: |
-          hatch env create
+        run: make install-python-sdk
+
+      - name: Run Linting
+        run: make lint-python-sdk
 
       - name: Build a binary wheel and a source tarball
-        run: |
-          hatch build --clean
+        run: make build-python-sdk
 
       # TODO: Needs to setup mem0 repo on Test PyPI
       # - name: Publish distribution 📦 to Test PyPI

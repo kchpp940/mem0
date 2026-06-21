@@ -23,9 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: cli/node
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,12 +42,20 @@ jobs:
           cache-dependency-path: cli/node/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: cli/node
         run: pnpm install --frozen-lockfile
 
+      - name: Lint
+        run: make lint-node-cli
+
+      - name: Type check
+        run: make typecheck-node-cli
+
       - name: Build
-        run: pnpm run build
+        run: make build-node-cli
 
       - name: Publish to npm
+        working-directory: cli/node
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PREID=$(node -p "require('./package.json').version.split('-')[1].split('.')[0]")

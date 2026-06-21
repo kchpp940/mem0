@@ -23,9 +23,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       id-token: write
-    defaults:
-      run:
-        working-directory: integrations/openclaw
     steps:
       - uses: actions/checkout@v4
         with:
@@ -45,12 +42,17 @@ jobs:
           cache-dependency-path: integrations/openclaw/pnpm-lock.yaml
 
       - name: Install dependencies
+        working-directory: integrations/openclaw
         run: pnpm install --frozen-lockfile
 
+      - name: Type check
+        run: make typecheck-openclaw
+
       - name: Build
-        run: pnpm build
+        run: make build-openclaw
 
       - name: Publish to npm
+        working-directory: integrations/openclaw
         run: |
           if [ "${{ inputs.prerelease }}" = "true" ]; then
             PREID=$(node -p "require('./package.json').version.split('-')[1].split('.')[0]")

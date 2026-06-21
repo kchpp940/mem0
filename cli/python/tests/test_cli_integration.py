@@ -50,13 +50,6 @@ def _run(
             del env[key]
     env.pop("FORCE_COLOR", None)
     env["PYTHONIOENCODING"] = "utf-8"
-    # Ensure PYTHONPATH includes the src directory for editable installs
-    src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
-    existing_pythonpath = env.get("PYTHONPATH", "")
-    if existing_pythonpath:
-        env["PYTHONPATH"] = f"{src_path}{os.pathsep}{existing_pythonpath}"
-    else:
-        env["PYTHONPATH"] = src_path
     if home_dir:
         env["HOME"] = home_dir
     if env_override:

@@ -1,416 +1,122 @@
 {
-  "defaults": {},
-  "fieldMapping": {
-    "memory": "text",
-    "score": "similarity",
-    "created_at": "created",
-    "updated_at": "updated",
-    "categories": "tags"
-  },
-  "agentPickFields": {
-    "add": {
-      "pending": [
-        "status",
-        "event_id"
-      ],
-      "normal": [
-        "id",
-        "memory",
-        "event"
-      ]
-    },
-    "search": [
-      "id",
-      "memory",
-      "score",
-      "created_at",
-      "categories"
-    ],
-    "list": [
-      "id",
-      "memory",
-      "created_at",
-      "categories"
-    ],
-    "get": [
-      "id",
-      "memory",
-      "created_at",
-      "updated_at",
-      "categories",
-      "metadata"
-    ],
-    "update": [
-      "id",
-      "memory"
-    ],
-    "event_list": [
-      "id",
-      "event_type",
-      "status",
-      "latency",
-      "created_at"
-    ],
-    "event_status": [
-      "id",
-      "event_type",
-      "status",
-      "latency",
-      "created_at",
-      "updated_at",
-      "results"
-    ]
-  },
-  "pendingDedup": {
-    "statusKey": "status",
-    "pendingValue": "PENDING",
-    "dedupKey": "event_id"
-  },
-  "jsonEnvelope": {
-    "success": {
-      "status": "success",
-      "command": "<command_name>",
-      "duration_ms": "<number|null>",
-      "scope": "<object|null>",
-      "count": "<number|null>",
-      "data": "<any>"
-    },
-    "error": {
-      "status": "error",
-      "command": "<command_name>",
-      "error": "<string>",
-      "error_code": "<string|null>",
-      "data": null
-    },
-    "optionalFields": [
-      "duration_ms",
-      "scope",
-      "count",
-      "error_code",
-      "mem0_notice"
-    ],
-    "scopeFields": [
-      "user_id",
-      "agent_id",
-      "app_id",
-      "run_id"
-    ]
-  },
-  "agentSanitization": {
-    "add": {
-      "pending": [
-        "status",
-        "event_id"
-      ],
-      "normal": [
-        "id",
-        "memory",
-        "event"
-      ]
-    },
-    "search": [
-      "id",
-      "memory",
-      "score",
-      "created_at",
-      "categories"
-    ],
-    "list": [
-      "id",
-      "memory",
-      "created_at",
-      "categories"
-    ],
-    "get": [
-      "id",
-      "memory",
-      "created_at",
-      "updated_at",
-      "categories",
-      "metadata"
-    ],
-    "update": [
-      "id",
-      "memory"
-    ],
-    "delete": "passthrough",
-    "delete-all": "passthrough",
-    "entity list": [
-      "name",
-      "type",
-      "count"
-    ],
-    "entity delete": "passthrough",
-    "event list": [
-      "id",
-      "event_type",
-      "status",
-      "latency",
-      "created_at"
-    ],
-    "event status": [
-      "id",
-      "event_type",
-      "status",
-      "latency",
-      "created_at",
-      "updated_at",
-      "results"
-    ],
-    "event status results": [
-      "id",
-      "event",
-      "user_id",
-      "memory"
-    ],
-    "status": "passthrough",
-    "import": "passthrough",
-    "config show": "passthrough"
-  },
-  "batchStatus": {
-    "add": {
-      "allPendingMessage": "Memory queued — {count} event{s} pending",
-      "allProcessedMessage": "Memory processed — {count} memor{y/ies} extracted",
-      "statuses": {
-        "PENDING": {
-          "icon": "⧗",
-          "label": "Queued",
-          "color": "accent"
-        },
-        "ADD": {
-          "icon": "+",
-          "label": "Added",
-          "color": "success"
-        },
-        "UPDATE": {
-          "icon": "~",
-          "label": "Updated",
-          "color": "accent"
-        },
-        "DELETE": {
-          "icon": "-",
-          "label": "Deleted",
-          "color": "error"
-        },
-        "NOOP": {
-          "icon": "·",
-          "label": "No change",
-          "color": "dim"
-        }
-      },
-      "dedupBy": "event_id",
-      "dedupStatuses": [
-        "PENDING"
-      ]
-    },
-    "events": {
-      "statuses": {
-        "PENDING": {
-          "color": "accent"
-        },
-        "PROCESSING": {
-          "color": "warning"
-        },
-        "SUCCEEDED": {
-          "color": "success"
-        },
-        "FAILED": {
-          "color": "error"
-        }
-      }
-    }
-  },
-  "notice": {
-    "key": "mem0_notice",
-    "stderrBannerColor": "yellow",
-    "agentModeInline": true
-  },
-  "traceEpilogue": {
-    "enabled": true,
-    "stream": "stderr",
-    "format": "table",
-    "key": "mem0_trace",
-    "fields": [
-      "label",
-      "duration_ms",
-      "status"
-    ],
-    "labelColumnWidth": 20,
-    "labelWidth": 18,
-    "statusWidth": 10,
-    "durationWidth": 10,
-    "headerLabel": "STEP",
-    "headerDuration": "DURATION",
-    "headerStatus": "STATUS",
-    "statusColors": {
-      "success": "green",
-      "failed": "red",
-      "skipped": "yellow",
-      "pending": "dim"
-    },
-    "defaultStatus": "success",
-    "minDurationMs": 5,
-    "totalLabel": "Total",
-    "traceCommand": "mem0 trace {event_id}"
-  },
-  "filterBuilding": {
-    "entityOrder": [
-      "user_id",
-      "agent_id",
-      "app_id",
-      "run_id"
-    ],
-    "passthroughKeys": [
-      "AND",
-      "OR"
-    ],
-    "combineOperator": "AND",
-    "listExtra": {
-      "category": {
-        "field": "categories",
-        "op": "contains"
-      },
-      "after": {
-        "field": "created_at",
-        "op": "gte"
-      },
-      "before": {
-        "field": "created_at",
-        "op": "lte"
-      }
-    }
-  },
-  "responseNormalization": {
-    "searchListKeys": [
-      "results",
-      "memories"
-    ],
-    "addResultKey": "results"
-  },
-  "validation": {
-    "expires": {
-      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
-      "formatError": "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
-      "futureError": "--expires date must be in the future."
-    },
-    "top_k": {
-      "min": 1,
-      "error": "--top-k must be >= 1."
-    },
-    "page_size": {
-      "min": 1,
-      "error": "--page-size must be >= 1."
-    },
-    "page": {
-      "min": 1,
-      "error": "--page must be >= 1."
-    },
-    "threshold": {
-      "min": 0.0,
-      "max": 1.0,
-      "error": "--threshold must be between 0.0 and 1.0."
-    },
-    "categories": {
-      "arrayError": "--categories JSON must be an array."
-    },
-    "filters": {
-      "objectError": "--filter must be a JSON object.",
-      "jsonError": "Invalid JSON in --filter: {error}"
-    }
-  },
-  "exitCodes": {
-    "success": 0,
-    "genericError": 1,
-    "validationError": 2,
-    "authError": 3,
-    "notFound": 4,
-    "networkError": 5
-  },
-  "parameterNaming": {
-    "cliStyle": "kebab-case",
-    "pythonStyle": "snake_case",
-    "nodeStyle": "camelCase",
-    "scopeFields": [
-      "user_id",
-      "agent_id",
-      "app_id",
-      "run_id"
-    ],
-    "cliToSnake": {
-      "user-id": "user_id",
-      "agent-id": "agent_id",
-      "app-id": "app_id",
-      "run-id": "run_id",
-      "top-k": "top_k",
-      "page-size": "page_size",
-      "no-infer": "no_infer",
-      "dry-run": "dry_run",
-      "api-key": "api_key",
-      "base-url": "base_url",
-      "filter-json": "filter_json",
-      "no-graph": "no_graph",
-      "file-path": "file_path",
-      "entity-type": "entity_type",
-      "event-id": "event_id",
-      "memory-id": "memory_id"
-    },
-    "cliToCamel": {
-      "user-id": "userId",
-      "agent-id": "agentId",
-      "app-id": "appId",
-      "run-id": "runId",
-      "top-k": "topK",
-      "page-size": "pageSize",
-      "no-infer": "noInfer",
-      "dry-run": "dryRun",
-      "api-key": "apiKey",
-      "base-url": "baseUrl",
-      "filter-json": "filterJson",
-      "no-graph": "noGraph",
-      "file-path": "filePath",
-      "entity-type": "entityType",
-      "event-id": "eventId",
-      "memory-id": "memoryId",
-      "agent-caller": "agentCaller"
-    }
-  },
-  "outputFormats": [
-    "text",
-    "json",
-    "table",
-    "quiet",
-    "agent"
-  ],
-  "progressEvents": {
-    "import": {
-      "added": "number",
-      "failed": "number",
-      "total": "number",
-      "current": "number"
-    },
-    "batch": {
-      "processed": "number",
-      "total": "number",
-      "failed": "number"
-    }
-  },
-  "timedStatus": {
-    "stream": "stderr",
-    "format": "{message}...",
-    "elapsedFormat": "{seconds:.2f}s",
-    "agentModeSuppress": true
-  },
-  "searchListKeys": [
-    "results",
-    "memories"
-  ],
-  "addResultKey": "results",
-  "_meta": {
-    "generated": true,
-    "source": "cli/cli-spec.json",
-    "generator": "cli/generate_contracts.py",
-    "generated_at": "2026-06-21T04:19:20.143206+00:00",
-    "source_hash": "07adefcea7e450d9dbd4c0011d61723589cc65c51b902d8494d5784d979817f3",
-    "do_not_edit": "DO NOT EDIT — generated from cli/cli-spec.json. Run `python cli/generate_contracts.py` to regenerate."
-  }
+	"$version": 1,
+	"description": "Canonical payload contract for Mem0 CLI add/search/list operations. Both Python and Node builders MUST derive field names, defaults, error messages, filter merge order, PENDING dedup rules, and agent pick fields from this file.",
+
+	"source": "CLI",
+
+	"defaults": {
+		"top_k": 10,
+		"threshold": 0.3,
+		"infer": true,
+		"immutable": false,
+		"rerank": false,
+		"keyword": false
+	},
+
+	"fieldMapping": {
+		"expires": "expiration_date",
+		"keyword": "keyword_search"
+	},
+
+	"payloadRules": {
+		"immutable": "includeWhenTrue",
+		"infer": "includeWhenFalse",
+		"source": "always"
+	},
+
+	"addFields": [
+		{ "api": "messages", "from": "messages", "type": "messages_or_content" },
+		{ "api": "user_id", "from": "user_id" },
+		{ "api": "agent_id", "from": "agent_id" },
+		{ "api": "app_id", "from": "app_id" },
+		{ "api": "run_id", "from": "run_id" },
+		{ "api": "metadata", "from": "metadata" },
+		{ "api": "immutable", "from": "immutable", "rule": "includeWhenTrue" },
+		{ "api": "infer", "from": "infer", "rule": "includeWhenFalse" },
+		{ "api": "expiration_date", "from": "expires", "mapped": true },
+		{ "api": "categories", "from": "categories" },
+		{ "api": "source", "literal": "CLI" }
+	],
+
+	"searchFields": [
+		{ "api": "query", "from": "query", "required": true },
+		{ "api": "top_k", "from": "top_k", "hasDefault": true },
+		{ "api": "threshold", "from": "threshold", "hasDefault": true },
+		{ "api": "filters", "from": "filters", "built": true },
+		{ "api": "rerank", "from": "rerank", "rule": "includeWhenTrue" },
+		{
+			"api": "keyword_search",
+			"from": "keyword",
+			"mapped": true,
+			"rule": "includeWhenTrue"
+		},
+		{ "api": "fields", "from": "fields" },
+		{ "api": "source", "literal": "CLI" }
+	],
+
+	"listFields": [
+		{ "api": "filters", "from": "filters", "built": true },
+		{ "api": "source", "literal": "CLI" }
+	],
+
+	"addMessageRole": "user",
+
+	"validation": {
+		"categories": {
+			"arrayError": "--categories JSON must be an array."
+		},
+		"expires": {
+			"pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+			"formatError": "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
+			"futureError": "--expires date must be in the future."
+		},
+		"filters": {
+			"objectError": "--filter must be a JSON object.",
+			"jsonError": "Invalid JSON in --filter: {error}"
+		}
+	},
+
+	"filterBuilding": {
+		"entityOrder": ["user_id", "agent_id", "app_id", "run_id"],
+		"passthroughKeys": ["AND", "OR"],
+		"combineOperator": "AND",
+		"listExtra": {
+			"category": { "field": "categories", "op": "contains" },
+			"after": { "field": "created_at", "op": "gte" },
+			"before": { "field": "created_at", "op": "lte" }
+		}
+	},
+
+	"pendingDedup": {
+		"statusKey": "status",
+		"pendingValue": "PENDING",
+		"dedupKey": "event_id"
+	},
+
+	"agentPickFields": {
+		"add": {
+			"pending": ["status", "event_id"],
+			"normal": ["id", "memory", "event"]
+		},
+		"search": ["id", "memory", "score", "created_at", "categories"],
+		"list": ["id", "memory", "created_at", "categories"],
+		"get": [
+			"id",
+			"memory",
+			"created_at",
+			"updated_at",
+			"categories",
+			"metadata"
+		],
+		"update": ["id", "memory"],
+		"event_list": ["id", "event_type", "status", "latency", "created_at"],
+		"event_status": [
+			"id",
+			"event_type",
+			"status",
+			"latency",
+			"created_at",
+			"updated_at"
+		]
+	}
 }

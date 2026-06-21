@@ -22,19 +22,9 @@ from mem0_cli.branding import (
     print_success,
     timed_status,
 )
-from mem0_cli.option_builder import build_scope
-from mem0_cli.output import OutputRenderer
 
 console = Console()
 err_console = Console(stderr=True)
-
-
-def _resolve_output(output: str) -> str:
-    from mem0_cli.state import is_agent_mode
-
-    if is_agent_mode():
-        return "agent"
-    return output
 
 
 def cmd_status(
@@ -45,25 +35,29 @@ def cmd_status(
     output: str = "text",
 ) -> None:
     """Check connectivity and auth."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.output import format_agent_envelope
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("status")
-    output = _resolve_output(output)
-    renderer = OutputRenderer(console, output_format=output, command="status", err_console=err_console)
+    if is_agent_mode():
+        output = "agent"
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Checking connection...") as _ts:
         result = backend.status(user_id=user_id, agent_id=agent_id)
     _elapsed = _time.perf_counter() - _start
 
-    renderer.set_duration(seconds=_elapsed)
-
     if output in ("json", "agent"):
-        renderer.data({
-            "connected": result.get("connected", False),
-            "backend": result.get("backend", "?"),
-            "base_url": result.get("base_url", ""),
-        })
+        format_agent_envelope(
+            console,
+            command="status",
+            data={
+                "connected": result.get("connected", False),
+                "backend": result.get("backend", "?"),
+                "base_url": result.get("base_url", ""),
+            },
+            duration_ms=int(_elapsed * 1000),
+        )
         return
 
     lines = []
@@ -114,17 +108,17 @@ def cmd_import(
     output: str = "text",
 ) -> None:
     """Import memories from a JSON file."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.output import format_agent_envelope
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("import")
-    output = _resolve_output(output)
-    scope = build_scope(user_id=user_id, agent_id=agent_id)
-    renderer = OutputRenderer(console, output_format=output, command="import", scope=scope, err_console=err_console)
+    if is_agent_mode():
+        output = "agent"
 
     try:
         data = json.loads(Path(file_path).read_text())
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        renderer.error(f"Failed to read file: {e}", error_code="file_error")
+        print_error(err_console, f"Failed to read file: {e}")
         raise typer.Exit(1) from None
 
     if not isinstance(data, list):
@@ -152,10 +146,15 @@ def cmd_import(
             failed += 1
     _elapsed = _time.perf_counter() - _start
 
-    renderer.set_duration(seconds=_elapsed)
-
     if output in ("json", "agent"):
-        renderer.data({"added": added, "failed": failed})
+        scope = {k: v for k, v in {"user_id": user_id, "agent_id": agent_id}.items() if v}
+        format_agent_envelope(
+            console,
+            command="import",
+            data={"added": added, "failed": failed},
+            scope=scope or None,
+            duration_ms=int(_elapsed * 1000),
+        )
         return
 
     print_success(err_console, f"Imported {added} memories ({_elapsed:.2f}s)")

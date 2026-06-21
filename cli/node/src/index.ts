@@ -14,8 +14,6 @@ import type { Mem0Config } from "./config.js";
 import { loadConfig, saveConfig } from "./config.js";
 import { richFormatHelp } from "./help.js";
 import {
-	clearTraceSteps,
-	emitTraceEpilogue,
 	isAgentMode,
 	setAgentMode,
 	setCurrentCommand,
@@ -879,8 +877,4 @@ function surfaceNotice(): void {
 
 program.parseAsync().finally(() => {
 	surfaceNotice();
-	if (!isAgentMode()) {
-		emitTraceEpilogue();
-	}
-	clearTraceSteps();
 });

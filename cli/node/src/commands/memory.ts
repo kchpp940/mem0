@@ -11,11 +11,19 @@ import {
 	printSuccess,
 	timedStatus,
 } from "../branding.js";
-import { OutputRenderer } from "../output.js";
-import { buildScope, parseCategories, parseJsonOption, validateTopK, validateThreshold, validatePage, validatePageSize } from "../option-builder.js";
-import { dedupPending, extractAddResults } from "../result-normalizer.js";
+import {
+	formatAddResult,
+	formatAgentEnvelope,
+	formatJson,
+	formatJsonEnvelope,
+	formatMemoriesTable,
+	formatMemoriesText,
+	formatSingleMemory,
+	printResultSummary,
+} from "../output.js";
 import { isAgentMode, setCurrentCommand } from "../state.js";
 
+/** True only when stdin is an actual pipe or file redirect — never in agent mode. */
 function _stdinIsPiped(): boolean {
 	if (isAgentMode()) return false;
 	try {
@@ -24,11 +32,6 @@ function _stdinIsPiped(): boolean {
 	} catch {
 		return false;
 	}
-}
-
-function _resolveOutput(output: string): string {
-	if (isAgentMode()) return "agent";
-	return output;
 }
 
 export async function cmdAdd(
@@ -50,53 +53,56 @@ export async function cmdAdd(
 	},
 ): Promise<void> {
 	setCurrentCommand("add");
-	const output = _resolveOutput(opts.output);
-	const scope = buildScope({
-		userId: opts.userId,
-		agentId: opts.agentId,
-		appId: opts.appId,
-		runId: opts.runId,
-	});
-	const renderer = new OutputRenderer({ outputFormat: output, command: "add", scope });
-
 	let msgs: Record<string, unknown>[] | undefined;
 	let content = text;
 
+	// Read from file
 	if (opts.file) {
 		try {
 			const raw = fs.readFileSync(opts.file, "utf-8");
 			msgs = JSON.parse(raw);
 		} catch (e) {
-			renderer.error(`Failed to read file: ${e instanceof Error ? e.message : e}`, { errorCode: "file_error" });
+			printError(`Failed to read file: ${e instanceof Error ? e.message : e}`);
 			process.exit(1);
 		}
-	} else if (opts.messages) {
+	}
+	// Parse messages JSON
+	else if (opts.messages) {
 		try {
 			msgs = JSON.parse(opts.messages);
 		} catch (e) {
-			renderer.error(`Invalid JSON in --messages: ${e instanceof Error ? e.message : e}`, { errorCode: "validation" });
+			printError(
+				`Invalid JSON in --messages: ${e instanceof Error ? e.message : e}`,
+			);
 			process.exit(1);
 		}
-	} else if (!content && _stdinIsPiped()) {
+	}
+	// Read from stdin only if stdin is an actual pipe or file redirect
+	else if (!content && _stdinIsPiped()) {
 		content = fs.readFileSync(0, "utf-8").trim();
 	}
 
 	if (content !== undefined && content.trim() === "") {
-		renderer.error("Content cannot be empty.", { errorCode: "validation" });
+		printError("Content cannot be empty.");
 		process.exit(1);
 	}
 	if (!content && !msgs) {
-		renderer.error("No content provided. Pass text, --messages, --file, or pipe via stdin.", { errorCode: "validation" });
+		printError(
+			"No content provided. Pass text, --messages, --file, or pipe via stdin.",
+		);
 		process.exit(1);
 	}
 
+	// Validate --expires
 	if (opts.expires) {
 		if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.expires)) {
-			renderer.error("Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).", { errorCode: "validation" });
+			printError(
+				"Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
+			);
 			process.exit(1);
 		}
 		if (new Date(opts.expires) <= new Date()) {
-			renderer.error("--expires date must be in the future.", { errorCode: "validation" });
+			printError("--expires date must be in the future.");
 			process.exit(1);
 		}
 	}
@@ -106,12 +112,19 @@ export async function cmdAdd(
 		try {
 			meta = JSON.parse(opts.metadata);
 		} catch {
-			renderer.error("Invalid JSON in --metadata.", { errorCode: "validation" });
+			printError("Invalid JSON in --metadata.");
 			process.exit(1);
 		}
 	}
 
-	const cats = parseCategories(opts.categories);
+	let cats: string[] | undefined;
+	if (opts.categories) {
+		try {
+			cats = JSON.parse(opts.categories);
+		} catch {
+			cats = opts.categories.split(",").map((c) => c.trim());
+		}
+	}
 
 	let result: Record<string, unknown>;
 	try {
@@ -125,21 +138,53 @@ export async function cmdAdd(
 				immutable: opts.immutable,
 				infer: opts.infer !== false,
 				expires: opts.expires,
-				categories: cats ?? undefined,
+				categories: cats,
 			});
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 
-	if (output === "quiet") return;
+	if (opts.output === "quiet") return;
 
-	const rawResults = extractAddResults(result);
-	const deduped = dedupPending(rawResults as Record<string, unknown>[]);
+	// Deduplicate PENDING entries sharing the same event_id across all output modes
+	const rawResults: Record<string, unknown>[] = Array.isArray(result)
+		? result
+		: ((result.results as Record<string, unknown>[]) ?? [result]);
+	const seenEvents = new Set<string>();
+	const deduped: Record<string, unknown>[] = [];
+	for (const r of rawResults) {
+		if (r.status === "PENDING") {
+			const eid = (r.event_id as string) ?? "";
+			if (eid && seenEvents.has(eid)) continue;
+			if (eid) seenEvents.add(eid);
+		}
+		deduped.push(r);
+	}
+	// Write back so downstream formatters see deduplicated data
+	const dedupedResult: Record<string, unknown> = Array.isArray(result)
+		? (deduped as unknown as Record<string, unknown>)
+		: { ...result, results: deduped };
 
-	if (output === "json" || output === "agent") {
-		renderer.addResult(deduped);
+	if (opts.output === "agent") {
+		const scope: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+		};
+		formatAgentEnvelope({
+			command: "add",
+			data: deduped,
+			scope,
+			count: deduped.length,
+		});
+		return;
+	}
+
+	if (opts.output === "json") {
+		formatAddResult(dedupedResult, opts.output);
 		return;
 	}
 
@@ -153,11 +198,15 @@ export async function cmdAdd(
 	const count = deduped.length;
 	const allPending = count > 0 && deduped.every((r) => r.status === "PENDING");
 	if (allPending) {
-		printSuccess(`Memory queued — ${count} event${count !== 1 ? "s" : ""} pending`);
+		printSuccess(
+			`Memory queued — ${count} event${count !== 1 ? "s" : ""} pending`,
+		);
 	} else {
-		printSuccess(`Memory processed — ${count} memor${count === 1 ? "y" : "ies"} extracted`);
+		printSuccess(
+			`Memory processed — ${count} memor${count === 1 ? "y" : "ies"} extracted`,
+		);
 	}
-	renderer.addResult(deduped);
+	formatAddResult(dedupedResult, opts.output);
 }
 
 export async function cmdSearch(
@@ -178,42 +227,31 @@ export async function cmdSearch(
 	},
 ): Promise<void> {
 	setCurrentCommand("search");
-	const output = _resolveOutput(opts.output);
-	const scope = buildScope({
-		userId: opts.userId,
-		agentId: opts.agentId,
-		appId: opts.appId,
-		runId: opts.runId,
-	});
-	const renderer = new OutputRenderer({ outputFormat: output, command: "search", scope });
-
 	if (!query) {
-		renderer.error("No query provided. Pass a query argument or pipe via stdin.", { errorCode: "validation" });
+		printError("No query provided. Pass a query argument or pipe via stdin.");
 		process.exit(1);
 	}
 
 	let filters: Record<string, unknown> | undefined;
-	try {
-		filters = parseJsonOption(opts.filterJson, "--filter") as Record<string, unknown> | undefined;
-	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e), { errorCode: "validation" });
-		process.exit(1);
+	if (opts.filterJson) {
+		try {
+			filters = JSON.parse(opts.filterJson);
+		} catch {
+			printError("Invalid JSON in --filter.");
+			process.exit(1);
+		}
 	}
 
 	const fieldList = opts.fields
 		? opts.fields.split(",").map((f) => f.trim())
 		: undefined;
 
-	try {
-		validateTopK(opts.topK);
-	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e), { errorCode: "validation" });
+	if (opts.topK < 1) {
+		printError("--top-k must be >= 1.");
 		process.exit(1);
 	}
-	try {
-		validateThreshold(opts.threshold);
-	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e), { errorCode: "validation" });
+	if (opts.threshold < 0 || opts.threshold > 1) {
+		printError("--threshold must be between 0.0 and 1.0.");
 		process.exit(1);
 	}
 
@@ -221,7 +259,8 @@ export async function cmdSearch(
 	let results: Record<string, unknown>[];
 	try {
 		results = await timedStatus("Searching memories...", async () => {
-			return backend.search(query, {
+			// biome-ignore lint/style/noNonNullAssertion: guarded by process.exit above
+			return backend.search(query!, {
 				userId: opts.userId,
 				agentId: opts.agentId,
 				appId: opts.appId,
@@ -235,26 +274,58 @@ export async function cmdSearch(
 			});
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	if (output === "quiet") return;
+	if (opts.output === "quiet") return;
 
-	renderer.setDuration({ seconds: elapsed });
-
-	if (output === "json" || output === "agent") {
-		renderer.memoryList(results, { showScore: true });
+	if (opts.output === "agent") {
+		const scope: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+		};
+		formatAgentEnvelope({
+			command: "search",
+			data: results,
+			scope,
+			count: results.length,
+			durationMs: Math.round(elapsed * 1000),
+		});
 		return;
 	}
 
-	if (results.length > 0) {
-		renderer.memoryList(results, { showScore: true });
+	if (opts.output === "json") {
+		formatJson(results);
+	} else if (opts.output === "table") {
+		if (results.length > 0) {
+			formatMemoriesTable(results, { showScore: true });
+			printResultSummary({
+				count: results.length,
+				durationSecs: elapsed,
+				scopeIds: { user_id: opts.userId, agent_id: opts.agentId },
+			});
+		} else {
+			console.log();
+			printInfo("No memories found matching your query.");
+			console.log();
+		}
 	} else {
-		console.log();
-		printInfo("No memories found matching your query.");
-		console.log();
+		if (results.length > 0) {
+			formatMemoriesText(results);
+			printResultSummary({
+				count: results.length,
+				durationSecs: elapsed,
+				scopeIds: { user_id: opts.userId, agent_id: opts.agentId },
+			});
+		} else {
+			console.log();
+			printInfo("No memories found matching your query.");
+			console.log();
+		}
 	}
 }
 
@@ -264,20 +335,21 @@ export async function cmdGet(
 	opts: { output: string },
 ): Promise<void> {
 	setCurrentCommand("get");
-	const output = _resolveOutput(opts.output);
-	const renderer = new OutputRenderer({ outputFormat: output, command: "get" });
-
 	let result: Record<string, unknown>;
 	try {
 		result = await timedStatus("Fetching memory...", async () => {
 			return backend.get(memoryId);
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 
-	renderer.singleMemory(result);
+	if (opts.output === "agent") {
+		formatAgentEnvelope({ command: "get", data: result });
+	} else {
+		formatSingleMemory(result, opts.output);
+	}
 }
 
 export async function cmdList(
@@ -296,25 +368,12 @@ export async function cmdList(
 	},
 ): Promise<void> {
 	setCurrentCommand("list");
-	const output = _resolveOutput(opts.output);
-	const scope = buildScope({
-		userId: opts.userId,
-		agentId: opts.agentId,
-		appId: opts.appId,
-		runId: opts.runId,
-	});
-	const renderer = new OutputRenderer({ outputFormat: output, command: "list", scope });
-
-	try {
-		validatePageSize(opts.pageSize);
-	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e), { errorCode: "validation" });
+	if (opts.pageSize < 1) {
+		printError("--page-size must be >= 1.");
 		process.exit(1);
 	}
-	try {
-		validatePage(opts.page);
-	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e), { errorCode: "validation" });
+	if (opts.page < 1) {
+		printError("--page must be >= 1.");
 		process.exit(1);
 	}
 
@@ -335,26 +394,55 @@ export async function cmdList(
 			});
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	if (output === "quiet") return;
+	if (opts.output === "quiet") return;
 
-	renderer.setDuration({ seconds: elapsed });
-
-	if (output === "json" || output === "agent") {
-		renderer.memoryList(results, { page: opts.page });
-		return;
-	}
-
-	if (results.length > 0) {
-		renderer.memoryList(results, { page: opts.page });
+	if (opts.output === "agent" || opts.output === "json") {
+		const scope: Record<string, string | undefined> = {
+			user_id: opts.userId,
+			agent_id: opts.agentId,
+			app_id: opts.appId,
+			run_id: opts.runId,
+		};
+		formatAgentEnvelope({
+			command: "list",
+			data: results,
+			scope,
+			count: results.length,
+			durationMs: Math.round(elapsed * 1000),
+		});
+	} else if (opts.output === "table") {
+		if (results.length > 0) {
+			formatMemoriesTable(results);
+			printResultSummary({
+				count: results.length,
+				durationSecs: elapsed,
+				page: opts.page,
+				scopeIds: { user_id: opts.userId, agent_id: opts.agentId },
+			});
+		} else {
+			console.log();
+			printInfo("No memories found.");
+			console.log();
+		}
 	} else {
-		console.log();
-		printInfo("No memories found.");
-		console.log();
+		if (results.length > 0) {
+			formatMemoriesText(results, "memories");
+			printResultSummary({
+				count: results.length,
+				durationSecs: elapsed,
+				page: opts.page,
+				scopeIds: { user_id: opts.userId, agent_id: opts.agentId },
+			});
+		} else {
+			console.log();
+			printInfo("No memories found.");
+			console.log();
+		}
 	}
 }
 
@@ -365,15 +453,12 @@ export async function cmdUpdate(
 	opts: { metadata?: string; output: string },
 ): Promise<void> {
 	setCurrentCommand("update");
-	const output = _resolveOutput(opts.output);
-	const renderer = new OutputRenderer({ outputFormat: output, command: "update" });
-
 	let meta: Record<string, unknown> | undefined;
 	if (opts.metadata) {
 		try {
 			meta = JSON.parse(opts.metadata);
 		} catch {
-			renderer.error("Invalid JSON in --metadata.", { errorCode: "validation" });
+			printError("Invalid JSON in --metadata.");
 			process.exit(1);
 		}
 	}
@@ -385,17 +470,23 @@ export async function cmdUpdate(
 			return backend.update(memoryId, text, meta);
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	renderer.setDuration({ seconds: elapsed });
-
-	if (output === "json" || output === "agent") {
-		renderer.singleMemory(result);
-	} else if (output !== "quiet") {
-		printSuccess(`Memory ${memoryId.slice(0, 8)} updated (${elapsed.toFixed(2)}s)`);
+	if (opts.output === "agent") {
+		formatAgentEnvelope({
+			command: "update",
+			data: result,
+			durationMs: Math.round(elapsed * 1000),
+		});
+	} else if (opts.output === "json") {
+		formatJson(result);
+	} else if (opts.output !== "quiet") {
+		printSuccess(
+			`Memory ${memoryId.slice(0, 8)} updated (${elapsed.toFixed(2)}s)`,
+		);
 	}
 }
 
@@ -405,15 +496,12 @@ export async function cmdDelete(
 	opts: { output: string; dryRun?: boolean; force?: boolean },
 ): Promise<void> {
 	setCurrentCommand("delete");
-	const output = _resolveOutput(opts.output);
-	const renderer = new OutputRenderer({ outputFormat: output, command: "delete" });
-
 	if (opts.dryRun) {
 		let mem: Record<string, unknown>;
 		try {
 			mem = await backend.get(memoryId);
 		} catch (e) {
-			renderer.error(e instanceof Error ? e.message : String(e));
+			printError(e instanceof Error ? e.message : String(e));
 			process.exit(1);
 		}
 		const text = (mem.memory ?? mem.text ?? "") as string;
@@ -429,17 +517,23 @@ export async function cmdDelete(
 			return backend.delete(memoryId);
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	renderer.setDuration({ seconds: elapsed });
-
-	if (output === "json" || output === "agent") {
-		renderer.data({ id: memoryId, deleted: true });
-	} else if (output !== "quiet") {
-		printSuccess(`Memory ${memoryId.slice(0, 8)} deleted (${elapsed.toFixed(2)}s)`);
+	if (opts.output === "agent") {
+		formatAgentEnvelope({
+			command: "delete",
+			data: { id: memoryId, deleted: true },
+			durationMs: Math.round(elapsed * 1000),
+		});
+	} else if (opts.output === "json") {
+		formatJson(result);
+	} else if (opts.output !== "quiet") {
+		printSuccess(
+			`Memory ${memoryId.slice(0, 8)} deleted (${elapsed.toFixed(2)}s)`,
+		);
 	}
 }
 
@@ -457,21 +551,15 @@ export async function cmdDeleteAll(
 	},
 ): Promise<void> {
 	setCurrentCommand("delete-all");
-	const output = _resolveOutput(opts.output);
-	const scope = buildScope({
-		userId: opts.userId,
-		agentId: opts.agentId,
-		appId: opts.appId,
-		runId: opts.runId,
-	});
-	const renderer = new OutputRenderer({ outputFormat: output, command: "delete-all", scope });
-
+	const { isAgentMode } = await import("../state.js");
 	if (isAgentMode() && !opts.force) {
-		renderer.error("Destructive operation requires --force in agent mode.", { errorCode: "auth" });
+		printError("Destructive operation requires --force in agent mode.");
 		process.exit(1);
 	}
-
 	if (opts.all) {
+		// Project-wide wipe using wildcard entity IDs
+		// Note: --dry-run is ignored here because the API has no count-before-delete endpoint.
+
 		if (!opts.force) {
 			const readline = await import("node:readline");
 			const rl = readline.createInterface({
@@ -507,18 +595,24 @@ export async function cmdDeleteAll(
 				},
 			);
 		} catch (e) {
-			renderer.error(e instanceof Error ? e.message : String(e));
+			printError(e instanceof Error ? e.message : String(e));
 			process.exit(1);
 		}
 		const elapsed = (performance.now() - start) / 1000;
 
-		renderer.setDuration({ seconds: elapsed });
-
-		if (output === "json" || output === "agent") {
-			renderer.data({ deleted: true, scope: "project" });
-		} else if (output !== "quiet") {
+		if (opts.output === "agent") {
+			formatAgentEnvelope({
+				command: "delete-all",
+				data: result,
+				durationMs: Math.round(elapsed * 1000),
+			});
+		} else if (opts.output === "json") {
+			formatJson(result);
+		} else if (opts.output !== "quiet") {
 			if (result.message) {
-				printInfo("Deletion started. Memories will be removed in the background.");
+				printInfo(
+					"Deletion started. Memories will be removed in the background.",
+				);
 			} else {
 				printSuccess(`All project memories deleted (${elapsed.toFixed(2)}s)`);
 			}
@@ -536,7 +630,7 @@ export async function cmdDeleteAll(
 				runId: opts.runId,
 			});
 		} catch (e) {
-			renderer.error(e instanceof Error ? e.message : String(e));
+			printError(e instanceof Error ? e.message : String(e));
 			process.exit(1);
 		}
 		printInfo(`Would delete ${memories.length} memories.`);
@@ -550,7 +644,7 @@ export async function cmdDeleteAll(
 		if (opts.agentId) scopeParts.push(`agent=${opts.agentId}`);
 		if (opts.appId) scopeParts.push(`app=${opts.appId}`);
 		if (opts.runId) scopeParts.push(`run=${opts.runId}`);
-		const scopeStr =
+		const scope =
 			scopeParts.length > 0 ? scopeParts.join(", ") : "ALL entities";
 
 		const readline = await import("node:readline");
@@ -560,7 +654,7 @@ export async function cmdDeleteAll(
 		});
 		const answer = await new Promise<string>((resolve) => {
 			rl.question(
-				`\n  \u26a0  Delete ALL memories for ${scopeStr}? This cannot be undone. [y/N] `,
+				`\n  \u26a0  Delete ALL memories for ${scope}? This cannot be undone. [y/N] `,
 				resolve,
 			);
 		});
@@ -584,18 +678,24 @@ export async function cmdDeleteAll(
 			});
 		});
 	} catch (e) {
-		renderer.error(e instanceof Error ? e.message : String(e));
+		printError(e instanceof Error ? e.message : String(e));
 		process.exit(1);
 	}
 	const elapsed = (performance.now() - start) / 1000;
 
-	renderer.setDuration({ seconds: elapsed });
-
-	if (output === "json" || output === "agent") {
-		renderer.data({ deleted: true });
-	} else if (output !== "quiet") {
+	if (opts.output === "agent") {
+		formatAgentEnvelope({
+			command: "delete-all",
+			data: result,
+			durationMs: Math.round(elapsed * 1000),
+		});
+	} else if (opts.output === "json") {
+		formatJson(result);
+	} else if (opts.output !== "quiet") {
 		if (result.message) {
-			printInfo("Deletion started. Memories will be removed in the background.");
+			printInfo(
+				"Deletion started. Memories will be removed in the background.",
+			);
 		} else {
 			printSuccess(`All matching memories deleted (${elapsed.toFixed(2)}s)`);
 		}

@@ -1324,18 +1324,10 @@ def main() -> None:
         # primary output. In JSON/agent mode the notice is folded into the
         # envelope by format_json_envelope, so skip the stderr banner there
         # to avoid duplicate output.
-        from mem0_cli.state import clear_trace_steps, emit_trace_epilogue, is_agent_mode, take_notice
+        from mem0_cli.state import is_agent_mode, take_notice
 
         notice = take_notice()
         if notice and not is_agent_mode():
             from rich.console import Console
 
             Console(stderr=True).print(f"\n[yellow]🔔 {notice}[/yellow]\n")
-
-        # Emit trace epilogue to stderr if trace steps were collected
-        if not is_agent_mode():
-            from rich.console import Console
-
-            emit_trace_epilogue(Console(stderr=True))
-
-        clear_trace_steps()

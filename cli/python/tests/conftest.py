@@ -2,20 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
-import sys
-from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from mem0_cli.backend.base import Backend
 from mem0_cli.config import Mem0Config
-
-CLI_ROOT = Path(__file__).parent.parent.parent
-SPEC_PATH = CLI_ROOT / "cli-spec.json"
-CONTRACT_PATH = Path(__file__).parent.parent / "src" / "mem0_cli" / "contract" / "payload_contract.json"
 
 
 @pytest.fixture(autouse=True)
@@ -151,61 +144,3 @@ def sample_config():
     config.platform.api_key = "m0-test-key-12345678"
     config.platform.base_url = "https://api.mem0.ai"
     return config
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Validate the payload contract before running any tests.
-
-    Ensures the generated payload_contract.json is in sync with cli-spec.json
-    and has not be manually edited.
-    """
-    if not SPEC_PATH.exists():
-        print(f"[contract-warn] cli-spec.json not found at {SPEC_PATH}; skipping contract validation")
-        sys.stdout.flush()
-        return
-
-    if not CONTRACT_PATH.exists():
-        pytest.exit(
-            f"ERROR: payload_contract.json not found at {CONTRACT_PATH}\n"
-            f"  Run: python cli/generate_contracts.py",
-            returncode=1,
-        )
-
-    with open(SPEC_PATH, encoding="utf-8") as f:
-        spec_json = f.read()
-
-    with open(CONTRACT_PATH, encoding="utf-8") as f:
-        contract = json.load(f)
-
-    meta = contract.get("_meta", {})
-    if not meta.get("generated"):
-        pytest.exit(
-            f"ERROR: {CONTRACT_PATH} is not a generated contract (missing _meta.generated)\n"
-            f"  Do not edit payload_contract.json manually.\n"
-            f"  Run: python cli/generate_contracts.py",
-            returncode=1,
-        )
-
-    script_path = CLI_ROOT / "generate_contracts.py"
-    if script_path.exists():
-        import importlib.util
-
-        spec_module = importlib.util.spec_from_file_location("generate_contracts", script_path)
-        module = importlib.util.module_from_spec(spec_module)
-        spec_module.loader.exec_module(module)
-
-        expected_hash = module.compute_source_hash(spec_json, SPEC_PATH)
-        actual_hash = meta.get("source_hash")
-
-        if actual_hash != expected_hash:
-            pytest.exit(
-                f"ERROR: payload_contract.json source hash does not match cli-spec.json\n"
-                f"  Expected: {expected_hash}\n"
-                f"  Actual:   {actual_hash}\n"
-                f"  The contract may have been manually edited.\n"
-                f"  Run: python cli/generate_contracts.py",
-                returncode=1,
-            )
-
-    print(f"[contract-ok] payload_contract.json is in sync with cli-spec.json")
-    sys.stdout.flush()

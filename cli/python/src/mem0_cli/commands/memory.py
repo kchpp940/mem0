@@ -10,30 +10,32 @@ import time as _time
 from pathlib import Path
 
 import typer
-from mem0.schema.fields import (
-    SCOPE_DISPLAY_NAMES,
-    validate_expires,
-)
 from rich.console import Console
 
+from mem0.schema.fields import (
+    ENTITY_FIELDS,
+    FIELD_VALIDATION,
+    SCOPE_DISPLAY_NAMES,
+    validate_expires,
+    validate_field,
+)
 from mem0_cli.backend.base import Backend
 from mem0_cli.branding import (
+    print_error,
     print_info,
     print_scope,
     print_success,
     timed_status,
 )
-from mem0_cli.option_builder import (
-    build_scope,
-    parse_categories,
-    parse_json_option,
-    validate_page,
-    validate_page_size,
-    validate_threshold,
-    validate_top_k,
+from mem0_cli.output import (
+    format_add_result,
+    format_agent_envelope,
+    format_json,
+    format_memories_table,
+    format_memories_text,
+    format_single_memory,
+    print_result_summary,
 )
-from mem0_cli.output import OutputRenderer
-from mem0_cli.result_normalizer import dedup_pending, extract_add_results
 
 console = Console()
 err_console = Console(stderr=True)
@@ -50,14 +52,6 @@ def _stdin_is_piped() -> bool:
         return _stat_mod.S_ISFIFO(mode) or _stat_mod.S_ISREG(mode)
     except Exception:
         return False
-
-
-def _resolve_output(output: str) -> str:
-    from mem0_cli.state import is_agent_mode
-
-    if is_agent_mode():
-        return "agent"
-    return output
 
 
 def cmd_add(
@@ -78,54 +72,61 @@ def cmd_add(
     output: str = "text",
 ) -> None:
     """Add a memory."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("add")
-    output = _resolve_output(output)
-    scope = build_scope(user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    renderer = OutputRenderer(console, output_format=output, command="add", scope=scope, err_console=err_console)
-
+    if is_agent_mode():
+        output = "agent"
     msgs = None
     content = text
 
+    # Read from file
     if file:
         try:
             raw = Path(file).read_text()
             msgs = json.loads(raw)
         except (FileNotFoundError, json.JSONDecodeError) as e:
-            renderer.error(f"Failed to read file: {e}", error_code="file_error")
+            print_error(err_console, f"Failed to read file: {e}")
             raise typer.Exit(1) from None
 
+    # Parse messages JSON
     elif messages:
         try:
             msgs = json.loads(messages)
         except json.JSONDecodeError as e:
-            renderer.error(f"Invalid JSON in --messages: {e}", error_code="validation")
+            print_error(err_console, f"Invalid JSON in --messages: {e}")
             raise typer.Exit(1) from None
 
+    # Read from stdin only if stdin is an actual pipe or file redirect
     elif not content and _stdin_is_piped():
         content = sys.stdin.read().strip()
 
     if not content and not msgs:
-        renderer.error(
-            "No content provided. Pass text, --messages, --file, or pipe via stdin.",
-            error_code="validation",
+        print_error(
+            err_console, "No content provided. Pass text, --messages, --file, or pipe via stdin."
         )
         raise typer.Exit(1)
 
-    try:
-        meta = parse_json_option(metadata, name="--metadata")
-    except ValueError:
-        renderer.error("Invalid JSON in --metadata.", error_code="validation")
-        raise typer.Exit(1) from None
+    meta = None
+    if metadata:
+        try:
+            meta = json.loads(metadata)
+        except json.JSONDecodeError:
+            print_error(err_console, "Invalid JSON in --metadata.")
+            raise typer.Exit(1) from None
 
-    cats = parse_categories(categories)
+    cats = None
+    if categories:
+        try:
+            cats = json.loads(categories)
+        except json.JSONDecodeError:
+            cats = [c.strip() for c in categories.split(",")]
 
     if expires:
         try:
             validate_expires(expires)
         except ValueError as e:
-            renderer.error(str(e), error_code="validation")
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
 
     with timed_status(err_console, "Adding memory...") as ts:
@@ -145,17 +146,51 @@ def cmd_add(
             )
         except Exception as e:
             ts.error_msg = str(e)
-            renderer.error(str(e))
             raise typer.Exit(1) from None
 
     if output == "quiet":
         return
 
-    results_list = extract_add_results(result)
-    deduped = dedup_pending(results_list)
+    # Deduplicate PENDING entries sharing the same event_id across all output modes
+    results_list = result if isinstance(result, list) else result.get("results", [result])
+    seen_events: set[str] = set()
+    deduped: list[dict] = []
+    for r in results_list:
+        if r.get("status") == "PENDING":
+            eid = r.get("event_id", "")
+            if eid and eid in seen_events:
+                continue
+            if eid:
+                seen_events.add(eid)
+        deduped.append(r)
+    # Write back so downstream formatters see deduplicated data
+    if isinstance(result, dict) and "results" in result:
+        result = {**result, "results": deduped}
+    else:
+        result = deduped
 
-    if output in ("json", "agent"):
-        renderer.add_result(deduped)
+    if output == "agent":
+        scope = {
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "app_id": app_id,
+                "run_id": run_id,
+            }.items()
+            if v
+        }
+        format_agent_envelope(
+            console,
+            command="add",
+            data=deduped,
+            scope=scope or None,
+            count=len(deduped),
+        )
+        return
+
+    if output == "json":
+        format_add_result(console, result, output)
         return
 
     console.print()
@@ -171,7 +206,7 @@ def cmd_add(
         print_success(
             console, f"Memory processed — {count} memor{'y' if count == 1 else 'ies'} extracted"
         )
-    renderer.add_result(deduped)
+    format_add_result(console, result, output)
 
 
 def cmd_search(
@@ -191,32 +226,29 @@ def cmd_search(
     output: str = "text",
 ) -> None:
     """Search memories."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("search")
-    output = _resolve_output(output)
-    scope = build_scope(user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    renderer = OutputRenderer(console, output_format=output, command="search", scope=scope, err_console=err_console)
+    if is_agent_mode():
+        output = "agent"
+    filters = None
+    if filter_json:
+        try:
+            filters = json.loads(filter_json)
+        except json.JSONDecodeError:
+            print_error(err_console, "Invalid JSON in --filter.")
+            raise typer.Exit(1) from None
 
-    try:
-        filters = parse_json_option(filter_json, name="--filter")
-    except ValueError:
-        renderer.error("Invalid JSON in --filter.", error_code="validation")
-        raise typer.Exit(1) from None
+    field_list = None
+    if fields:
+        field_list = [f.strip() for f in fields.split(",")]
 
-    field_list = [f.strip() for f in fields.split(",")] if fields else None
-
-    try:
-        validate_top_k(top_k)
-    except ValueError as e:
-        renderer.error(str(e), error_code="validation")
-        raise typer.Exit(1) from None
-
-    try:
-        validate_threshold(threshold)
-    except ValueError as e:
-        renderer.error(str(e), error_code="validation")
-        raise typer.Exit(1) from None
+    if top_k < 1:
+        print_error(err_console, FIELD_VALIDATION["top_k"]["error"])
+        raise typer.Exit(1)
+    if not (0.0 <= threshold <= 1.0):
+        print_error(err_console, FIELD_VALIDATION["threshold"]["error"])
+        raise typer.Exit(1)
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Searching memories...") as _ts:
@@ -235,43 +267,76 @@ def cmd_search(
                 fields=field_list,
             )
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
     if output == "quiet":
         return
 
-    renderer.set_duration(seconds=_elapsed)
-
-    if output in ("json", "agent"):
-        renderer.memory_list(results, show_score=True)
+    if output == "agent":
+        scope = {
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "app_id": app_id,
+                "run_id": run_id,
+            }.items()
+            if v
+        }
+        format_agent_envelope(
+            console,
+            command="search",
+            data=results,
+            scope=scope or None,
+            count=len(results),
+            duration_ms=int(_elapsed * 1000),
+        )
         return
 
-    if results:
-        renderer.memory_list(results, show_score=True)
+    if output == "json":
+        format_json(console, results)
+    elif output == "table":
+        if results:
+            format_memories_table(console, results, show_score=True)
+            print_result_summary(
+                console, len(results), duration_secs=_elapsed, user_id=user_id, agent_id=agent_id
+            )
+        else:
+            console.print()
+            print_info(console, "No memories found matching your query.")
+            console.print()
     else:
-        console.print()
-        print_info(console, "No memories found matching your query.")
-        console.print()
+        if results:
+            format_memories_text(console, results)
+            print_result_summary(
+                console, len(results), duration_secs=_elapsed, user_id=user_id, agent_id=agent_id
+            )
+        else:
+            console.print()
+            print_info(console, "No memories found matching your query.")
+            console.print()
 
 
 def cmd_get(backend: Backend, memory_id: str, *, output: str) -> None:
     """Get a specific memory by ID."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("get")
-    output = _resolve_output(output)
-    renderer = OutputRenderer(console, output_format=output, command="get", err_console=err_console)
-
+    if is_agent_mode():
+        output = "agent"
     with timed_status(err_console, "Fetching memory...") as _ts:
         try:
             result = backend.get(memory_id)
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
 
-    renderer.single_memory(result)
+    if output == "agent":
+        format_agent_envelope(console, command="get", data=result)
+    else:
+        format_single_memory(console, result, output)
 
 
 def cmd_list(
@@ -289,24 +354,17 @@ def cmd_list(
     output: str = "table",
 ) -> None:
     """List memories."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("list")
-    output = _resolve_output(output)
-    scope = build_scope(user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    renderer = OutputRenderer(console, output_format=output, command="list", scope=scope, err_console=err_console)
-
-    try:
-        validate_page_size(page_size)
-    except ValueError as e:
-        renderer.error(str(e), error_code="validation")
-        raise typer.Exit(1) from None
-
-    try:
-        validate_page(page)
-    except ValueError as e:
-        renderer.error(str(e), error_code="validation")
-        raise typer.Exit(1) from None
+    if is_agent_mode():
+        output = "agent"
+    if page_size < 1:
+        print_error(err_console, FIELD_VALIDATION["page_size"]["error"])
+        raise typer.Exit(1)
+    if page < 1:
+        print_error(err_console, FIELD_VALIDATION["page"]["error"])
+        raise typer.Exit(1)
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Listing memories...") as _ts:
@@ -323,25 +381,62 @@ def cmd_list(
                 before=before,
             )
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
     if output == "quiet":
         return
 
-    renderer.set_duration(seconds=_elapsed)
-
     if output in ("json", "agent"):
-        renderer.memory_list(results, page=page)
-        return
-
-    if results:
-        renderer.memory_list(results, page=page)
+        scope = {
+            k: v
+            for k, v in {
+                "user_id": user_id,
+                "agent_id": agent_id,
+                "app_id": app_id,
+                "run_id": run_id,
+            }.items()
+            if v
+        }
+        format_agent_envelope(
+            console,
+            command="list",
+            data=results,
+            scope=scope or None,
+            count=len(results),
+            duration_ms=int(_elapsed * 1000),
+        )
+    elif output == "table":
+        if results:
+            format_memories_table(console, results)
+            print_result_summary(
+                console,
+                len(results),
+                duration_secs=_elapsed,
+                page=page,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        else:
+            console.print()
+            print_info(console, "No memories found.")
+            console.print()
     else:
-        console.print()
-        print_info(console, "No memories found.")
-        console.print()
+        if results:
+            format_memories_text(console, results, title="memories")
+            print_result_summary(
+                console,
+                len(results),
+                duration_secs=_elapsed,
+                page=page,
+                user_id=user_id,
+                agent_id=agent_id,
+            )
+        else:
+            console.print()
+            print_info(console, "No memories found.")
+            console.print()
 
 
 def cmd_update(
@@ -353,31 +448,37 @@ def cmd_update(
     output: str,
 ) -> None:
     """Update a memory."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("update")
-    output = _resolve_output(output)
-    renderer = OutputRenderer(console, output_format=output, command="update", err_console=err_console)
-
-    try:
-        meta = parse_json_option(metadata, name="--metadata")
-    except ValueError:
-        renderer.error("Invalid JSON in --metadata.", error_code="validation")
-        raise typer.Exit(1) from None
+    if is_agent_mode():
+        output = "agent"
+    meta = None
+    if metadata:
+        try:
+            meta = json.loads(metadata)
+        except json.JSONDecodeError:
+            print_error(err_console, "Invalid JSON in --metadata.")
+            raise typer.Exit(1) from None
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Updating memory...") as _ts:
         try:
             result = backend.update(memory_id, content=text, metadata=meta)
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
-    renderer.set_duration(seconds=_elapsed)
-
-    if output in ("json", "agent"):
-        renderer.single_memory(result)
+    if output == "agent":
+        format_agent_envelope(
+            console,
+            command="update",
+            data=result,
+            duration_ms=int(_elapsed * 1000),
+        )
+    elif output == "json":
+        format_json(console, result)
     elif output != "quiet":
         print_success(console, f"Memory {memory_id[:8]} updated ({_elapsed:.2f}s)")
 
@@ -391,35 +492,40 @@ def cmd_delete(
     output: str,
 ) -> None:
     """Delete a single memory by ID."""
-    from mem0_cli.state import set_current_command
+    from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("delete")
-    output = _resolve_output(output)
-    renderer = OutputRenderer(console, output_format=output, command="delete", err_console=err_console)
-
+    if is_agent_mode():
+        output = "agent"
     if dry_run:
+        # Fetch and display what would be deleted
         try:
             mem = backend.get(memory_id)
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
-        renderer.single_memory(mem)
+        format_single_memory(console, mem, output)
         print_info(console, "No changes made (dry run).")
         return
 
     _start = _time.perf_counter()
     with timed_status(err_console, "Deleting...") as _ts:
         try:
-            backend.delete(memory_id=memory_id)
+            result = backend.delete(memory_id=memory_id)
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
-    renderer.set_duration(seconds=_elapsed)
-
-    if output in ("json", "agent"):
-        renderer.data({"id": memory_id, "deleted": True})
+    if output == "agent":
+        format_agent_envelope(
+            console,
+            command="delete",
+            data={"id": memory_id, "deleted": True},
+            duration_ms=int(_elapsed * 1000),
+        )
+    elif output == "json":
+        format_json(console, result)
     elif output != "quiet":
         print_success(console, f"Memory {memory_id[:8]} deleted ({_elapsed:.2f}s)")
 
@@ -440,15 +546,15 @@ def cmd_delete_all(
     from mem0_cli.state import is_agent_mode, set_current_command
 
     set_current_command("delete-all")
-    output = _resolve_output(output)
-    scope = build_scope(user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-    renderer = OutputRenderer(console, output_format=output, command="delete-all", scope=scope, err_console=err_console)
-
-    if is_agent_mode() and not force:
-        renderer.error("Destructive operation requires --force in agent mode.", error_code="auth")
-        raise typer.Exit(1)
-
+    if is_agent_mode():
+        output = "agent"
+        if not force:
+            print_error(err_console, "Destructive operation requires --force in agent mode.")
+            raise typer.Exit(1)
     if all_:
+        # Project-wide wipe using wildcard entity IDs
+        # Note: --dry-run is ignored here because the API has no count-before-delete endpoint.
+
         if not force:
             confirm = typer.confirm(
                 "\n  ⚠  Delete ALL memories across the ENTIRE project? This cannot be undone."
@@ -468,14 +574,19 @@ def cmd_delete_all(
                     run_id="*",
                 )
             except Exception as e:
-                renderer.error(str(e))
+                print_error(err_console, str(e))
                 raise typer.Exit(1) from None
         _elapsed = _time.perf_counter() - _start
 
-        renderer.set_duration(seconds=_elapsed)
-
-        if output in ("json", "agent"):
-            renderer.data({"deleted": True, "scope": "project"})
+        if output == "agent":
+            format_agent_envelope(
+                console,
+                command="delete-all",
+                data={"deleted": True, "scope": "project"},
+                duration_ms=int(_elapsed * 1000),
+            )
+        elif output == "json":
+            format_json(console, result)
         elif output != "quiet":
             if isinstance(result, dict) and "message" in result:
                 print_info(console, "Deletion started. Memories will be removed in the background.")
@@ -484,6 +595,7 @@ def cmd_delete_all(
         return
 
     if dry_run:
+        # List matching memories and show count
         try:
             results = backend.list_memories(
                 user_id=user_id,
@@ -492,7 +604,7 @@ def cmd_delete_all(
                 run_id=run_id,
             )
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
         count = len(results)
         print_info(console, f"Would delete {count} memor{'y' if count == 1 else 'ies'}.")
@@ -506,9 +618,9 @@ def cmd_delete_all(
             if value:
                 display_name = SCOPE_DISPLAY_NAMES.get(field, field)
                 scope_parts.append(f"{display_name}={value}")
-        scope_str = ", ".join(scope_parts) if scope_parts else "ALL entities"
+        scope = ", ".join(scope_parts) if scope_parts else "ALL entities"
 
-        confirm = typer.confirm(f"\n  ⚠  Delete ALL memories for {scope_str}? This cannot be undone.")
+        confirm = typer.confirm(f"\n  ⚠  Delete ALL memories for {scope}? This cannot be undone.")
         if not confirm:
             print_info(console, "Cancelled.")
             raise typer.Exit(0)
@@ -524,14 +636,30 @@ def cmd_delete_all(
                 run_id=run_id,
             )
         except Exception as e:
-            renderer.error(str(e))
+            print_error(err_console, str(e))
             raise typer.Exit(1) from None
     _elapsed = _time.perf_counter() - _start
 
-    renderer.set_duration(seconds=_elapsed)
-
-    if output in ("json", "agent"):
-        renderer.data({"deleted": True})
+    scope = {
+        k: v
+        for k, v in {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "app_id": app_id,
+            "run_id": run_id,
+        }.items()
+        if v
+    }
+    if output == "agent":
+        format_agent_envelope(
+            console,
+            command="delete-all",
+            data={"deleted": True},
+            scope=scope or None,
+            duration_ms=int(_elapsed * 1000),
+        )
+    elif output == "json":
+        format_json(console, result)
     elif output != "quiet":
         if isinstance(result, dict) and "message" in result:
             print_info(console, "Deletion started. Memories will be removed in the background.")

@@ -7,17 +7,15 @@ import {
 	ENTITY_FIELDS,
 	FIELD_DEFAULTS,
 	SCOPE_DISPLAY_NAMES,
+	type AddOptions,
+	type Backend,
+	type DeleteOptions,
+	type EntityIds,
+	type ListOptions,
+	type SearchOptions,
 	getAddApiKey,
 	getSearchApiKey,
 } from "../schema/index.js";
-import type {
-	AddOptions,
-	Backend,
-	DeleteOptions,
-	EntityIds,
-	ListOptions,
-	SearchOptions,
-} from "./base.js";
 import { captureNotice, isAgentMode } from "../state.js";
 import { CLI_VERSION } from "../version.js";
 import { APIError, AuthError, NotFoundError } from "./base.js";

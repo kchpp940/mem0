@@ -1,0 +1,207 @@
+{
+  "$schema": "./monorepo-manifest.schema.json",
+  "version": "1.0.0",
+  "description": "Monorepo project manifest — single source of truth for all sub-project metadata. Both Makefile and CI workflows read from this file.",
+  "groups": {
+    "core": {
+      "description": "Core libraries and CLIs — always run in CI and local release checks",
+      "default_in_release": true
+    },
+    "integrations": {
+      "description": "IDE and framework plugins — run in CI, skippable locally",
+      "default_in_release": true
+    },
+    "infra": {
+      "description": "Docker-based services — opt-in only, not run by default",
+      "default_in_release": false
+    }
+  },
+  "packages": [
+    {
+      "name": "python-sdk",
+      "path": "mem0",
+      "group": "core",
+      "runtime": "python",
+      "default_in_release": true,
+      "description": "Core Python SDK (mem0ai on PyPI)",
+      "ci_paths": ["mem0/**", "tests/**", "pyproject.toml", ".github/workflows/ci.yml", ".github/workflows/cd.yml"],
+      "commands": {
+        "install": "hatch env create",
+        "format": "hatch run format",
+        "lint": "hatch run lint",
+        "typecheck": null,
+        "build": "hatch build",
+        "test": "hatch run test",
+        "clean": "rm -rf dist"
+      }
+    },
+    {
+      "name": "python-cli",
+      "path": "cli/python",
+      "group": "core",
+      "runtime": "python",
+      "default_in_release": true,
+      "description": "Python CLI (mem0-cli on PyPI)",
+      "ci_paths": ["cli/python/**", ".github/workflows/cli-python-ci.yml", ".github/workflows/cli-python-cd.yml"],
+      "commands": {
+        "install": "cd cli/python && pip install -e \".[dev]\"",
+        "format": "cd cli/python && ruff format .",
+        "lint": "cd cli/python && ruff check .",
+        "typecheck": null,
+        "build": "cd cli/python && hatch build --clean",
+        "test": "cd cli/python && pytest",
+        "clean": "rm -rf cli/python/dist"
+      }
+    },
+    {
+      "name": "node-cli",
+      "path": "cli/node",
+      "group": "core",
+      "runtime": "node",
+      "default_in_release": true,
+      "description": "Node CLI (@mem0/cli on npm)",
+      "ci_paths": ["cli/node/**", ".github/workflows/cli-node-ci.yml", ".github/workflows/cli-node-cd.yml"],
+      "commands": {
+        "install": "cd cli/node && pnpm install",
+        "format": "cd cli/node && pnpm run lint:fix",
+        "lint": "cd cli/node && pnpm run lint",
+        "typecheck": "cd cli/node && pnpm run typecheck",
+        "build": "cd cli/node && pnpm run build",
+        "test": "cd cli/node && pnpm run test",
+        "clean": "rm -rf cli/node/dist"
+      }
+    },
+    {
+      "name": "ts-sdk",
+      "path": "mem0-ts",
+      "group": "core",
+      "runtime": "node",
+      "default_in_release": true,
+      "description": "TypeScript SDK (mem0ai on npm)",
+      "ci_paths": ["mem0-ts/**", ".github/workflows/ts-sdk-ci.yml", ".github/workflows/ts-sdk-cd.yml"],
+      "commands": {
+        "install": "cd mem0-ts && pnpm install",
+        "format": "cd mem0-ts && pnpm run format",
+        "lint": "cd mem0-ts && npx prettier --check .",
+        "typecheck": "cd mem0-ts && npx tsc --noEmit",
+        "build": "cd mem0-ts && pnpm run build",
+        "test": "cd mem0-ts && pnpm run test:unit",
+        "clean": "rm -rf mem0-ts/dist"
+      }
+    },
+    {
+      "name": "openclaw",
+      "path": "integrations/openclaw",
+      "group": "integrations",
+      "runtime": "node",
+      "default_in_release": true,
+      "description": "OpenClaw plugin (@mem0/openclaw-mem0 on npm)",
+      "ci_paths": ["integrations/openclaw/**", ".github/workflows/openclaw-checks.yml", ".github/workflows/openclaw-cd.yml"],
+      "commands": {
+        "install": "cd integrations/openclaw && pnpm install",
+        "format": "cd integrations/openclaw && pnpm exec prettier --write .",
+        "lint": "echo \"openclaw: no lint step configured (relies on tsc + vitest)\"",
+        "typecheck": "cd integrations/openclaw && pnpm exec tsc --noEmit",
+        "build": "cd integrations/openclaw && pnpm build",
+        "test": "cd integrations/openclaw && pnpm test",
+        "clean": "rm -rf integrations/openclaw/dist"
+      }
+    },
+    {
+      "name": "vercel-ai-sdk",
+      "path": "integrations/vercel-ai-sdk",
+      "group": "integrations",
+      "runtime": "node",
+      "default_in_release": true,
+      "description": "Vercel AI SDK provider (@mem0/vercel-ai-provider on npm)",
+      "ci_paths": ["integrations/vercel-ai-sdk/**", ".github/workflows/vercel-ai-cd.yml"],
+      "commands": {
+        "install": "cd integrations/vercel-ai-sdk && pnpm install",
+        "format": "cd integrations/vercel-ai-sdk && pnpm exec prettier --write .",
+        "lint": "cd integrations/vercel-ai-sdk && pnpm run lint",
+        "typecheck": "cd integrations/vercel-ai-sdk && pnpm run type-check",
+        "build": "cd integrations/vercel-ai-sdk && pnpm run build",
+        "test": "cd integrations/vercel-ai-sdk && pnpm run test",
+        "clean": "rm -rf integrations/vercel-ai-sdk/dist"
+      }
+    },
+    {
+      "name": "pi-agent-plugin",
+      "path": "integrations/pi-agent-plugin",
+      "group": "integrations",
+      "runtime": "node",
+      "default_in_release": true,
+      "description": "Pi Agent plugin (@mem0/pi-agent-plugin on npm)",
+      "ci_paths": ["integrations/pi-agent-plugin/**", ".github/workflows/pi-agent-plugin-checks.yml", ".github/workflows/pi-agent-plugin-cd.yml"],
+      "commands": {
+        "install": "cd integrations/pi-agent-plugin && pnpm install",
+        "format": "cd integrations/pi-agent-plugin && pnpm exec prettier --write .",
+        "lint": "echo \"pi-agent-plugin: no lint step configured (relies on tsc + vitest)\"",
+        "typecheck": "cd integrations/pi-agent-plugin && pnpm run typecheck",
+        "build": "cd integrations/pi-agent-plugin && pnpm run build",
+        "test": "cd integrations/pi-agent-plugin && pnpm test",
+        "clean": "rm -rf integrations/pi-agent-plugin/dist"
+      }
+    },
+    {
+      "name": "opencode-plugin",
+      "path": "integrations/mem0-plugin/.opencode-plugin",
+      "group": "integrations",
+      "runtime": "bun",
+      "default_in_release": false,
+      "description": "OpenCode plugin (@mem0/opencode-plugin on npm) — requires bun, excluded by default",
+      "ci_paths": ["integrations/mem0-plugin/.opencode-plugin/**", ".github/workflows/opencode-plugin-checks.yml", ".github/workflows/opencode-plugin-cd.yml"],
+      "commands": {
+        "install": "cd integrations/mem0-plugin/.opencode-plugin && bun install",
+        "format": null,
+        "lint": null,
+        "typecheck": "cd integrations/mem0-plugin/.opencode-plugin && bun run type-check",
+        "build": "cd integrations/mem0-plugin/.opencode-plugin && bun run build",
+        "test": null,
+        "clean": "rm -rf integrations/mem0-plugin/.opencode-plugin/dist"
+      }
+    },
+    {
+      "name": "server",
+      "path": "server",
+      "group": "infra",
+      "runtime": "docker",
+      "default_in_release": false,
+      "description": "Self-hosted FastAPI server (Docker)",
+      "ci_paths": ["server/**"],
+      "commands": {
+        "install": "echo \"server: Docker-based — no install step. Use 'make build-server' directly.\"",
+        "format": null,
+        "lint": null,
+        "typecheck": null,
+        "build": "cd server && make build",
+        "test": null,
+        "clean": "echo \"server: use 'docker compose down -v' from server/ directory\""
+      }
+    },
+    {
+      "name": "openmemory",
+      "path": "openmemory",
+      "group": "infra",
+      "runtime": "docker",
+      "default_in_release": false,
+      "description": "OpenMemory self-hosted platform (Docker — API + UI)",
+      "ci_paths": ["openmemory/**"],
+      "commands": {
+        "install": "echo \"openmemory: Docker-based — no install step. Use 'make build-openmemory' directly.\"",
+        "format": null,
+        "lint": null,
+        "typecheck": null,
+        "build": "cd openmemory && make build",
+        "test": null,
+        "clean": "echo \"openmemory: use 'docker compose down -v' from openmemory/ directory\""
+      }
+    }
+  ],
+  "cross_cutting": {
+    "contract_check": {
+      "description": "Verify Python and Node CLI payload contract files are semantically identical",
+      "command": "python3 -c \"import json,sys; py=json.load(open('cli/python/src/mem0_cli/contract/payload_contract.json')); node=json.load(open('cli/node/src/contract/payload_contract.json')); sys.exit(0 if py==node else 1)\""
+    }
+  }
+}

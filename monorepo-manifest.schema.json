@@ -1,0 +1,64 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Mem0 Monorepo Project Manifest",
+  "type": "object",
+  "required": ["version", "packages"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "description": { "type": "string" },
+    "groups": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "properties": {
+            "description": { "type": "string" },
+            "default_in_release": { "type": "boolean" }
+          }
+        }
+      }
+    },
+    "packages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "path", "group", "runtime", "commands"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z-]+$" },
+          "path": { "type": "string" },
+          "group": { "type": "string", "enum": ["core", "integrations", "infra"] },
+          "runtime": { "type": "string", "enum": ["python", "node", "bun", "docker"] },
+          "default_in_release": { "type": "boolean" },
+          "description": { "type": "string" },
+          "ci_paths": { "type": "array", "items": { "type": "string" } },
+          "commands": {
+            "type": "object",
+            "required": ["install", "format", "lint", "typecheck", "build", "test", "clean"],
+            "properties": {
+              "install": { "type": ["string", "null"] },
+              "format": { "type": ["string", "null"] },
+              "lint": { "type": ["string", "null"] },
+              "typecheck": { "type": ["string", "null"] },
+              "build": { "type": ["string", "null"] },
+              "test": { "type": ["string", "null"] },
+              "clean": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "cross_cutting": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z_]+$": {
+          "type": "object",
+          "properties": {
+            "description": { "type": "string" },
+            "command": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -189,3 +189,6 @@ eval/
 qdrant_storage/
 .crossnote
 testing.ipynb
+
+# Auto-generated monorepo Makefile targets (from monorepo-manifest.json)
+monorepo-targets.mk

@@ -29,8 +29,31 @@ permissions:
   pull-requests: read
 
 jobs:
+  generate-filters:
+    name: Generate path filters from manifest
+    runs-on: ubuntu-latest
+    outputs:
+      filters: ${{ steps.generate.outputs.filters }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Generate filters from monorepo-manifest.json
+        id: generate
+        run: |
+          FILTERS=$(python3 scripts/ci_manifest.py paths-filter --all \
+            --ci-gate-file .github/workflows/ci-gate.yml \
+            --extra 'docs_llms_txt=docs/**/*.mdx,docs/llms.txt,scripts/check-llms-txt-coverage.py,scripts/llms-txt-ignore.txt,.github/workflows/docs-llms-txt-check.yml')
+          # Write multiline output to GITHUB_OUTPUT
+          printf 'filters<<EOF\n%s\nEOF\n' "$FILTERS" >> "$GITHUB_OUTPUT"
+
   changes:
     name: Detect changed packages
+    needs: generate-filters
     runs-on: ubuntu-latest
     outputs:
       python_sdk: ${{ steps.filter.outputs.python_sdk }}
@@ -45,47 +68,10 @@ jobs:
       - uses: dorny/paths-filter@v3
         id: filter
         with:
-          # Each filter mirrors the package workflow's old pull_request
-          # paths, plus the package workflow file itself and this gate file
-          # (changing either must re-exercise the pipeline).
-          filters: |
-            python_sdk:
-              - 'mem0/**'
-              - 'tests/**'
-              - 'pyproject.toml'
-              - '.github/workflows/ci.yml'
-              - '.github/workflows/ci-gate.yml'
-            ts_sdk:
-              - 'mem0-ts/**'
-              - '.github/workflows/ts-sdk-ci.yml'
-              - '.github/workflows/ci-gate.yml'
-            cli_python:
-              - 'cli/python/**'
-              - '.github/workflows/cli-python-ci.yml'
-              - '.github/workflows/ci-gate.yml'
-            cli_node:
-              - 'cli/node/**'
-              - '.github/workflows/cli-node-ci.yml'
-              - '.github/workflows/ci-gate.yml'
-            openclaw:
-              - 'integrations/openclaw/**'
-              - '.github/workflows/openclaw-checks.yml'
-              - '.github/workflows/ci-gate.yml'
-            opencode_plugin:
-              - 'integrations/mem0-plugin/.opencode-plugin/**'
-              - '.github/workflows/opencode-plugin-checks.yml'
-              - '.github/workflows/ci-gate.yml'
-            pi_agent_plugin:
-              - 'integrations/pi-agent-plugin/**'
-              - '.github/workflows/pi-agent-plugin-checks.yml'
-              - '.github/workflows/ci-gate.yml'
-            docs_llms_txt:
-              - 'docs/**/*.mdx'
-              - 'docs/llms.txt'
-              - 'scripts/check-llms-txt-coverage.py'
-              - 'scripts/llms-txt-ignore.txt'
-              - '.github/workflows/docs-llms-txt-check.yml'
-              - '.github/workflows/ci-gate.yml'
+          # Filters are generated from monorepo-manifest.json by the
+          # generate-filters job above. To add a new package, update the
+          # manifest, not this file.
+          ${{ fromJson(needs.generate-filters.outputs.filters) }}
 
   python-sdk:
     name: Python SDK

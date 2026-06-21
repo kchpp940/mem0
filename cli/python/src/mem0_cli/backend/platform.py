@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+
 from mem0.schema.fields import (
     ENTITY_FIELDS,
     FIELD_DEFAULTS,
@@ -12,7 +13,6 @@ from mem0.schema.fields import (
     get_add_api_key,
     get_search_api_key,
 )
-
 from mem0_cli import __version__
 from mem0_cli.backend.base import Backend
 from mem0_cli.config import PlatformConfig

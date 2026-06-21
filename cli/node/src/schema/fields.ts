@@ -1,372 +1,176 @@
-// ================================================================
-// 🔒 AUTO-GENERATED FILE — DO NOT EDIT DIRECTLY UNDER ANY CIRCUMSTANCES
-// 📄 Source:   mem0/schema/*.py (Python single source of truth for fields.ts)
-// 🔑 SOURCE_HASH:396b6fca5444a196
-// 🛠️  Regenerate: python -m mem0.schema.generator --output cli/node/src/schema/
-// 🧪  Verify:     python -m mem0.schema.generator --check --output cli/node/src/schema/
-//
-// Hand-edits will be REJECTED by the CI / pretypecheck / prelint
-// pipeline (MANIFEST.json + content hashes). If something here is
-// wrong, fix the Python schema in mem0/schema/ and regenerate.
-// ================================================================
-// biome-ignore format: auto-generated file, formatting is controlled by Python generator
-// biome-ignore lint/suspicious/noExplicitAny: any/unknown types come from Python's flexible dict types
-// biome-ignore lint/style/useNamingConvention: const names follow Python convention
+/**
+ * Canonical schema contract for memory operations.
+ *
+ * This module is the TypeScript counterpart to `mem0/schema/fields.py`.
+ * All field names, defaults, validation rules, and name mappings are
+ * derived from the shared contract so that Python and Node CLI backends
+ * stay in sync automatically.
+ *
+ * The contract JSON file (`contract/payload_contract.json`) is the
+ * machine-readable version consumed at runtime. This module re-exports
+ * its values as typed constants for compile-time safety.
+ */
 
+import contract from "../contract/payload_contract.json" with { type: "json" };
 
-// ─── Entity identifiers ───────────────────────────────────────────────
-/** Canonical entity identifier field names (snake_case, API format). */
-export const ENTITY_FIELDS: readonly string[] = ["user_id", "agent_id", "app_id", "run_id"] as const;
+export const ENTITY_FIELDS = contract.filterBuilding.entityOrder as readonly string[];
 
-// ─── CLI ↔ API name mappings ────────────────────────────────────────
-/** Map from TypeScript/CLI camelCase field names to API snake_case names. */
-export const CLI_TO_API_MAP = {
-  "userId": "user_id",
-  "agentId": "agent_id",
-  "appId": "app_id",
-  "runId": "run_id",
-  "topK": "top_k",
-  "pageSize": "page_size",
-  "filterJson": "filters",
-  "feedbackReason": "feedback_reason",
-  "memoryExportId": "memory_export_id",
-  "exportInstructions": "export_instructions",
-  "startDate": "start_date",
-  "endDate": "end_date",
-} as const;
+export const ENTITY_FIELD_SET = new Set(ENTITY_FIELDS);
 
-/** Reverse map from API snake_case field names to TypeScript/CLI camelCase names. */
-export const API_TO_CLI_MAP = {
-  "user_id": "userId",
-  "agent_id": "agentId",
-  "app_id": "appId",
-  "run_id": "runId",
-  "top_k": "topK",
-  "page_size": "pageSize",
-  "filters": "filterJson",
-  "feedback_reason": "feedbackReason",
-  "memory_export_id": "memoryExportId",
-  "export_instructions": "exportInstructions",
-  "start_date": "startDate",
-  "end_date": "endDate",
-} as const;
+export const FIELD_DEFAULTS = contract.defaults as {
+	readonly top_k: number;
+	readonly threshold: number;
+	readonly infer: boolean;
+	readonly immutable: boolean;
+	readonly rerank: boolean;
+	readonly keyword: boolean;
+};
 
-// ─── Default values ──────────────────────────────────────────────────
-/** Default values for optional memory operation parameters. */
-export const FIELD_DEFAULTS = {
-  "top_k": 10,
-  "threshold": 0.3,
-  "page": 1,
-  "page_size": 100,
-  "infer": true,
-  "rerank": false,
-  "keyword": false,
-  "immutable": false,
-} as const;
+export const FIELD_MAPPING = contract.fieldMapping as Record<string, string>;
 
-// ─── Expires validation ──────────────────────────────────────────────
-/** Regular expression for validating expires date format (YYYY-MM-DD). */
-export const EXPIRES_PATTERN = /\d{4}-\d{2}-\d{2}/;
+export const REVERSE_FIELD_MAPPING: Record<string, string> = Object.fromEntries(
+	Object.entries(FIELD_MAPPING).map(([k, v]) => [v, k]),
+);
 
-/** Human-readable display format for expires date validation errors. */
-export const EXPIRES_FORMAT_DISPLAY = "YYYY-MM-DD";
+export const CLI_TO_API_MAP: Record<string, string> = {
+	userId: "user_id",
+	agentId: "agent_id",
+	appId: "app_id",
+	runId: "run_id",
+	topK: "top_k",
+	pageSize: "page_size",
+	filterJson: "filters",
+};
 
-/** Error message for invalid expires date format. */
-export const EXPIRES_FORMAT_ERROR = "Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).";
+export const API_TO_CLI_MAP: Record<string, string> = Object.fromEntries(
+	Object.entries(CLI_TO_API_MAP).map(([k, v]) => [v, k]),
+);
 
-// ─── Validation rules ───────────────────────────────────────────────
-/** Validation rules for numeric fields (min/max and error messages). Keys are CLI option names (camelCase). */
+export const SCOPE_DISPLAY_NAMES: Record<string, string> = {
+	user_id: "user",
+	agent_id: "agent",
+	app_id: "app",
+	run_id: "run",
+};
+
+export const EXPIRES_PATTERN = contract.validation.expires.pattern;
+export const EXPIRES_FORMAT_ERROR = contract.validation.expires.formatError;
+export const EXPIRES_FUTURE_ERROR = contract.validation.expires.futureError;
+
 export const VALIDATION_RULES = {
-  "topK": {"min": 1, "error": "--top-k must be >= 1."},
-  "threshold": {"min": 0.0, "max": 1.0, "error": "--threshold must be between 0.0 and 1.0."},
-  "page": {"min": 1, "error": "--page must be >= 1."},
-  "pageSize": {"min": 1, "error": "--page-size must be >= 1."},
+	top_k: { min: 1, error: "--top-k must be >= 1." },
+	threshold: { min: 0, max: 1, error: "--threshold must be between 0.0 and 1.0." },
+	page: { min: 1, error: "--page must be >= 1." },
+	pageSize: { min: 1, error: "--page-size must be >= 1." },
 } as const;
 
-// ─── API field aliases ──────────────────────────────────────────────
-/** Field name aliases for add-memory API payloads (logical name → payload key). */
-export const ADD_API_FIELD_MAP = {
-  "expires": "expiration_date",
-  "keyword": "keyword_search",
-} as const;
-
-/** Field name aliases for search API payloads (logical name → payload key). */
-export const SEARCH_API_FIELD_MAP = {
-  "keyword": "keyword_search",
-} as const;
-
-// ─── Scope display names ────────────────────────────────────────────
-/** Human-readable display names for entity scope fields. */
-export const SCOPE_DISPLAY_NAMES = {
-  "user_id": "user",
-  "agent_id": "agent",
-  "app_id": "app",
-  "run_id": "run",
-} as const;
-
-// ─── Response / payload field classification ────────────────────────
-/** Core payload keys that are always present and map to top-level response fields. */
-export const CORE_PAYLOAD_KEYS: readonly string[] = ["data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", "expires_at", "ttl_source", "ttl_state"] as const;
-
-/** Payload keys that should be promoted to top-level response fields (not nested under metadata). */
-export const PROMOTED_PAYLOAD_KEYS: readonly string[] = ["user_id", "agent_id", "run_id", "actor_id", "role", "categories", "feedback_status", "operation_id"] as const;
-
-// ─── Memory response field order ────────────────────────────────────
-/** Canonical field ordering for memory response objects. */
-export const MEMORY_RESPONSE_FIELDS: readonly string[] = ["id", "memory", "hash", "user_id", "agent_id", "run_id", "actor_id", "role", "categories", "created_at", "updated_at", "expires_at", "ttl_state", "ttl_source", "score", "feedback_status", "operation_id", "metadata"] as const;
-
-// ─── History response fields ────────────────────────────────────────
-/** Canonical field ordering for history response objects. */
-export const HISTORY_RESPONSE_FIELDS: readonly string[] = ["id", "memory_id", "old_memory", "new_memory", "event", "created_at", "updated_at", "is_deleted", "actor_id", "role"] as const;
-
-// ─── Feedback values ────────────────────────────────────────────────
-/** Allowed feedback values. */
-export const FEEDBACK_VALUES: readonly string[] = ["POSITIVE", "NEGATIVE", "VERY_NEGATIVE"] as const;
-
-// ─── Export / Import ───────────────────────────────────────────────
-/** Fields related to memory export operations. */
-export const EXPORT_FIELDS: readonly string[] = ["schema", "filters", "export_instructions"] as const;
-
-/** Fields related to memory import operations. */
-export const IMPORT_FIELDS: readonly string[] = ["data", "format", "mode"] as const;
-
-// ─── CLI option interfaces ────────────────────────────────────────
-/** Entity identifier fields used for scoping operations. */
-export interface EntityIds {
-  /** ID of the user */
-
-  userId?: string;
-  /** ID of the agent */
-
-  agentId?: string;
-  /** ID of the app */
-
-  appId?: string;
-  /** ID of the run */
-
-  runId?: string;
+export interface FieldSpec {
+	readonly apiName: string;
+	readonly cliName: string;
+	readonly tsName: string;
+	readonly default?: unknown;
+	readonly description: string;
+	readonly required: boolean;
+	readonly apiAlias?: string;
 }
 
-/** Options for the memory add command. */
-export interface AddOptions {
-  /** ID of the user */
+export const ENTITY_FIELD_SPECS: readonly FieldSpec[] = [
+	{ apiName: "user_id", cliName: "user-id", tsName: "userId", description: "ID of the user", required: false },
+	{ apiName: "agent_id", cliName: "agent-id", tsName: "agentId", description: "ID of the agent", required: false },
+	{ apiName: "app_id", cliName: "app-id", tsName: "appId", description: "ID of the app", required: false },
+	{ apiName: "run_id", cliName: "run-id", tsName: "runId", description: "ID of the run", required: false },
+];
 
-  userId?: string;
-  /** ID of the agent */
+export const ADD_FIELD_SPECS: readonly FieldSpec[] = [
+	...ENTITY_FIELD_SPECS,
+	{ apiName: "metadata", cliName: "metadata", tsName: "metadata", description: "Additional metadata", required: false },
+	{ apiName: "infer", cliName: "infer", tsName: "infer", default: FIELD_DEFAULTS.infer, description: "Whether to infer memories", required: false },
+	{ apiName: "immutable", cliName: "immutable", tsName: "immutable", default: FIELD_DEFAULTS.immutable, description: "Mark memory as immutable", required: false },
+	{ apiName: "expires", cliName: "expires", tsName: "expires", description: "Expiration date (YYYY-MM-DD)", required: false, apiAlias: "expiration_date" },
+	{ apiName: "categories", cliName: "categories", tsName: "categories", description: "Categories for classification", required: false },
+];
 
-  agentId?: string;
-  /** ID of the app */
+export const SEARCH_FIELD_SPECS: readonly FieldSpec[] = [
+	...ENTITY_FIELD_SPECS,
+	{ apiName: "filters", cliName: "filter", tsName: "filters", description: "Filters for the search", required: false },
+	{ apiName: "top_k", cliName: "top-k", tsName: "topK", default: FIELD_DEFAULTS.top_k, description: "Number of results to return", required: false },
+	{ apiName: "threshold", cliName: "threshold", tsName: "threshold", default: FIELD_DEFAULTS.threshold, description: "Minimum similarity score", required: false },
+	{ apiName: "rerank", cliName: "rerank", tsName: "rerank", default: FIELD_DEFAULTS.rerank, description: "Whether to rerank results", required: false },
+	{ apiName: "keyword", cliName: "keyword", tsName: "keyword", default: FIELD_DEFAULTS.keyword, description: "Enable keyword search", required: false, apiAlias: "keyword_search" },
+	{ apiName: "fields", cliName: "fields", tsName: "fields", description: "Fields to include in response", required: false },
+];
 
-  appId?: string;
-  /** ID of the run */
+export const LIST_FIELD_SPECS: readonly FieldSpec[] = [
+	...ENTITY_FIELD_SPECS,
+	{ apiName: "page", cliName: "page", tsName: "page", default: 1, description: "Page number", required: false },
+	{ apiName: "page_size", cliName: "page-size", tsName: "pageSize", default: 100, description: "Items per page", required: false },
+	{ apiName: "category", cliName: "category", tsName: "category", description: "Filter by category", required: false },
+	{ apiName: "after", cliName: "after", tsName: "after", description: "Filter created on or after", required: false },
+	{ apiName: "before", cliName: "before", tsName: "before", description: "Filter created on or before", required: false },
+];
 
-  runId?: string;
-  /** Additional metadata for the memory */
+export const UPDATE_FIELD_SPECS: readonly FieldSpec[] = [
+	{ apiName: "text", cliName: "text", tsName: "text", description: "New text content", required: false },
+	{ apiName: "metadata", cliName: "metadata", tsName: "metadata", description: "Updated metadata", required: false },
+];
 
-  metadata?: Record<string, unknown>;
-  /** Whether to infer memories from the input */
-
-  infer?: boolean;
-  /** Mark memory as immutable */
-
-  immutable?: boolean;
-  /** Expiration date (YYYY-MM-DD) */
-
-  expires?: string;
-  /** Categories for memory classification */
-
-  categories?: string[];
-  /** Custom categories for memory classification */
-
-  customCategories?: Record<string, unknown>[];
-  /** Custom instructions for fact extraction */
-
-  customInstructions?: string;
-  /** Type of memory (e.g. procedural_memory) */
-
-  memoryType?: string;
-  /** Custom prompt for fact extraction */
-
-  prompt?: string;
-}
-
-/** Options for the memory search command. */
-export interface SearchOptions {
-  /** ID of the user */
-
-  userId?: string;
-  /** ID of the agent */
-
-  agentId?: string;
-  /** ID of the app */
-
-  appId?: string;
-  /** ID of the run */
-
-  runId?: string;
-  /** Filters for the search */
-
-  filters?: Record<string, unknown>;
-  /** Number of results to return */
-
-  topK?: number;
-  /** Minimum similarity score */
-
-  threshold?: number;
-  /** Whether to rerank results */
-
-  rerank?: boolean;
-  /** Enable keyword search */
-
-  keyword?: boolean;
-  /** Fields to include in response */
-
-  fields?: string[];
-  /** Categories to filter by */
-
-  categories?: string[];
-  /** Include score details */
-
-  explain?: boolean;
-}
-
-/** Options for the memory list command. */
-export interface ListOptions {
-  /** ID of the user */
-
-  userId?: string;
-  /** ID of the agent */
-
-  agentId?: string;
-  /** ID of the app */
-
-  appId?: string;
-  /** ID of the run */
-
-  runId?: string;
-  /** Filters for retrieval */
-
-  filters?: Record<string, unknown>;
-  /** Page number */
-
-  page?: number;
-  /** Items per page */
-
-  pageSize?: number;
-  /** Categories to filter by */
-
-  categories?: string[];
-  /** Filter memories created on or after (ISO 8601) */
-
-  startDate?: string;
-  /** Filter memories created on or before (ISO 8601) */
-
-  endDate?: string;
-}
-
-/** Options for the memory delete-all command. */
-export interface DeleteOptions {
-  /** ID of the user */
-
-  userId?: string;
-  /** ID of the agent */
-
-  agentId?: string;
-  /** ID of the app */
-
-  appId?: string;
-  /** ID of the run */
-
-  runId?: string;
-}
-
-// ─── Helper functions ──────────────────────────────────────────────
-
-/**
- * Map a TypeScript/CLI camelCase field name to an API snake_case name.
- * @param cliName The camelCase field name
- * @returns The snake_case API field name
- */
-export function cliToApi(cliName: string): string {
-  return (CLI_TO_API_MAP as Record<string, string>)[cliName] ?? cliName;
-}
-
-/**
- * Map an API snake_case field name to a TypeScript/CLI camelCase name.
- * @param apiName The snake_case API field name
- * @returns The camelCase field name
- */
-export function apiToCli(apiName: string): string {
-  return (API_TO_CLI_MAP as Record<string, string>)[apiName] ?? apiName;
-}
-
-/**
- * Get the API payload key for an add-memory field (handles aliases like expires → expiration_date).
- * @param fieldName The logical field name
- * @returns The key to use in the API payload
- */
 export function getAddApiKey(fieldName: string): string {
-  return (ADD_API_FIELD_MAP as Record<string, string>)[fieldName] ?? fieldName;
+	const spec = ADD_FIELD_SPECS.find((s) => s.apiName === fieldName);
+	if (spec?.apiAlias) return spec.apiAlias;
+	return FIELD_MAPPING[fieldName] ?? fieldName;
 }
 
-/**
- * Get the API payload key for a search field (handles aliases like keyword → keyword_search).
- * @param fieldName The logical field name
- * @returns The key to use in the API payload
- */
 export function getSearchApiKey(fieldName: string): string {
-  return (SEARCH_API_FIELD_MAP as Record<string, string>)[fieldName] ?? fieldName;
+	const spec = SEARCH_FIELD_SPECS.find((s) => s.apiName === fieldName);
+	if (spec?.apiAlias) return spec.apiAlias;
+	return FIELD_MAPPING[fieldName] ?? fieldName;
 }
 
-/**
- * Build a scope display string from entity IDs (e.g. "user=alice, agent=bot").
- * @param entityIds Object with entity ID values
- * @returns Human-readable scope string
- */
-export function buildScopeDisplay(entityIds: Record<string, string | null | undefined>): string {
-  const parts: string[] = [];
-  for (const field of ENTITY_FIELDS) {
-    const value = entityIds[field];
-    if (value) {
-      const displayName = (SCOPE_DISPLAY_NAMES as Record<string, string>)[field] ?? field;
-      parts.push(`${displayName}=${value}`);
-    }
-  }
-  return parts.length > 0 ? parts.join(", ") : "ALL entities";
+export function cliToApi(cliName: string): string {
+	return CLI_TO_API_MAP[cliName] ?? cliName;
 }
 
-/**
- * Validate an expires date string (format and future check).
- * @param expires Date string in YYYY-MM-DD format
- * @returns The validated date string
- * @throws Error if the date is invalid or in the past
- */
+export function apiToCli(apiName: string): string {
+	return API_TO_CLI_MAP[apiName] ?? apiName;
+}
+
+export function buildScopeDict(entityIds: Record<string, string | undefined>): Record<string, string> {
+	const result: Record<string, string> = {};
+	for (const [k, v] of Object.entries(entityIds)) {
+		if (v && ENTITY_FIELD_SET.has(k)) {
+			result[k] = v;
+		}
+	}
+	return result;
+}
+
+export function buildScopeDisplay(entityIds: Record<string, string | undefined>): string {
+	const parts: string[] = [];
+	for (const [field, value] of Object.entries(entityIds)) {
+		if (value && ENTITY_FIELD_SET.has(field)) {
+			const displayName = SCOPE_DISPLAY_NAMES[field] ?? field;
+			parts.push(`${displayName}=${value}`);
+		}
+	}
+	return parts.length > 0 ? parts.join(", ") : "ALL entities";
+}
+
 export function validateExpires(expires: string): string {
-  if (!EXPIRES_PATTERN.test(expires)) {
-    throw new Error(EXPIRES_FORMAT_ERROR);
-  }
-  const date = new Date(expires);
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  if (date <= today) {
-    throw new Error("--expires date must be in the future.");
-  }
-  return expires;
+	if (!new RegExp(EXPIRES_PATTERN).test(expires)) {
+		throw new Error(EXPIRES_FORMAT_ERROR);
+	}
+	if (new Date(expires) <= new Date()) {
+		throw new Error(EXPIRES_FUTURE_ERROR);
+	}
+	return expires;
 }
 
-/**
- * Validate that a feedback value is one of the allowed values.
- * @param feedback The feedback value to validate
- * @returns The uppercased feedback value if valid
- * @throws Error if the feedback value is not valid
- */
-export function validateFeedbackValue(feedback: string): string {
-  const upper = feedback.toUpperCase();
-  if (!(FEEDBACK_VALUES as readonly string[]).includes(upper)) {
-    throw new Error(
-      `Invalid feedback value '${feedback}'. ` +
-      `Must be one of: ${FEEDBACK_VALUES.join(", ")}.`
-    );
-  }
-  return upper;
+export function validateField(name: keyof typeof VALIDATION_RULES, value: number): void {
+	const rule = VALIDATION_RULES[name];
+	if ("min" in rule && value < rule.min) {
+		throw new Error(rule.error);
+	}
+	if ("max" in rule && value > rule.max) {
+		throw new Error(rule.error);
+	}
 }

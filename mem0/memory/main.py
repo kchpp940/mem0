@@ -14,9 +14,8 @@ from typing import Any, Dict, Optional
 
 from pydantic import ValidationError
 
-from mem0.configs.base import MemoryConfig
+from mem0.configs.base import MemoryConfig, MemoryItem
 from mem0.configs.enums import MemoryType
-from mem0.schema.response import format_memory_item
 from mem0.configs.prompts import (
     ADDITIVE_EXTRACTION_PROMPT,
     AGENT_CONTEXT_SUFFIX,
@@ -25,6 +24,14 @@ from mem0.configs.prompts import (
 )
 from mem0.exceptions import ValidationError as Mem0ValidationError
 from mem0.memory.base import MemoryBase
+from mem0.memory.middleware import (
+    HookContext,
+    HistoryMiddleware,
+    LifecycleMiddleware,
+    MiddlewareManager,
+    NoticesMiddleware,
+    TelemetryMiddleware,
+)
 from mem0.memory.setup import mem0_dir, setup_config
 from mem0.memory.storage import SQLiteManager
 from mem0.memory.telemetry import MEM0_TELEMETRY, capture_event
@@ -36,25 +43,10 @@ from mem0.memory.notices import (
     detect_decay_usage_from_delete_all,
     detect_temporal_usage_from_metadata,
     detect_temporal_usage_from_search,
-    display_decay_usage_notice,
-    display_decay_usage_notice_async,
-    display_first_run_notice,
-    display_first_run_notice_async,
-    display_performance_slow_query_notice,
-    display_performance_slow_query_notice_async,
-    display_scale_threshold_notice,
-    display_scale_threshold_notice_async,
-    display_temporal_usage_notice,
-    display_temporal_usage_notice_async,
     get_decay_feature_error_message,
     get_decay_feature_error_message_async,
     get_temporal_feature_error_message,
     get_temporal_feature_error_message_async,
-)
-from mem0.memory.lifecycle import (
-    LifecyclePolicy,
-    annotate_memory_result,
-    resolve_expiration,
 )
 from mem0.memory.utils import (
     extract_json,
@@ -475,6 +467,14 @@ class Memory(MemoryBase):
                 self.config.vector_store.provider,
             )
 
+        # Initialize middleware manager with default side-effect middleware
+        self.middleware = MiddlewareManager([
+            LifecycleMiddleware(),
+            HistoryMiddleware(),
+            TelemetryMiddleware(),
+            NoticesMiddleware(),
+        ])
+
         capture_event("mem0.init", self, {"sync_type": "sync"})
 
     @property
@@ -713,87 +713,97 @@ class Memory(MemoryBase):
         if timestamp is not None:
             raise ValueError(get_temporal_feature_error_message("sync", "add", "timestamp"))
 
-        temporal_usage_notice = detect_temporal_usage_from_metadata(metadata)
-        processed_metadata, effective_filters = _build_filters_and_metadata(
-            user_id=user_id,
-            agent_id=agent_id,
-            run_id=run_id,
-            input_metadata=metadata,
-        )
+        ctx_kwargs = {
+            "messages": messages,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "run_id": run_id,
+            "metadata": metadata,
+            "infer": infer,
+            "memory_type": memory_type,
+            "prompt": prompt,
+            "expires": expires,
+            "ttl_days": ttl_days,
+        }
+        ctx = HookContext(operation="add", memory=self, kwargs=ctx_kwargs)
 
-        # ---- Resolve lifecycle expiration once for this add() call ----
-        lifecycle_cfg = getattr(self.config, "lifecycle_policies", None)
-        default_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.default.model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "default", None)
-            else None
-        )
-        workspace_policy = (
-            LifecyclePolicy.from_dict(lifecycle_cfg.workspace.model_dump())
-            if lifecycle_cfg and getattr(lifecycle_cfg, "workspace", None)
-            else None
-        )
-        effective_expires_at, effective_ttl_source = resolve_expiration(
-            request_expires=expires,
-            request_ttl_days=ttl_days,
-            workspace_policy=workspace_policy,
-            default_policy=default_policy,
-        )
-        if effective_expires_at is not None:
-            processed_metadata["expires_at"] = effective_expires_at
-            processed_metadata["ttl_source"] = effective_ttl_source.value
+        with self.middleware.run(ctx):
+            messages = ctx.kwargs.get("messages", messages)
+            user_id = ctx.kwargs.get("user_id", user_id)
+            agent_id = ctx.kwargs.get("agent_id", agent_id)
+            run_id = ctx.kwargs.get("run_id", run_id)
+            metadata = ctx.kwargs.get("metadata", metadata)
+            infer = ctx.kwargs.get("infer", infer)
+            memory_type = ctx.kwargs.get("memory_type", memory_type)
+            prompt = ctx.kwargs.get("prompt", prompt)
 
-        if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
-            raise Mem0ValidationError(
-                message=f"Invalid 'memory_type'. Please pass {MemoryType.PROCEDURAL.value} to create procedural memories.",
-                error_code="VALIDATION_002",
-                details={"provided_type": memory_type, "valid_type": MemoryType.PROCEDURAL.value},
-                suggestion=f"Use '{MemoryType.PROCEDURAL.value}' to create procedural memories."
-            )
-
-        if isinstance(messages, str):
-            messages = [{"role": "user", "content": messages}]
-
-        elif isinstance(messages, dict):
-            messages = [messages]
-
-        elif not isinstance(messages, list):
-            raise Mem0ValidationError(
-                message="messages must be str, dict, or list[dict]",
-                error_code="VALIDATION_003",
-                details={"provided_type": type(messages).__name__, "valid_types": ["str", "dict", "list[dict]"]},
-                suggestion="Convert your input to a string, dictionary, or list of dictionaries."
-            )
-
-        if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
-            results = self._create_procedural_memory(messages, metadata=processed_metadata, prompt=prompt)
-            scale_threshold_notice = detect_scale_threshold_from_add_result(self, results)
+            temporal_usage_notice = detect_temporal_usage_from_metadata(metadata)
             if temporal_usage_notice:
-                display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
-            elif scale_threshold_notice:
-                display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
+                ctx.extras["temporal_usage_notice"] = temporal_usage_notice
+
+            processed_metadata, effective_filters = _build_filters_and_metadata(
+                user_id=user_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                input_metadata=metadata,
+            )
+
+            # Telemetry extras (used by TelemetryMiddleware)
+            keys, encoded_ids = process_telemetry_filters(effective_filters)
+            ctx.extras["keys"] = keys
+            ctx.extras["encoded_ids"] = encoded_ids
+
+            if memory_type is not None and memory_type != MemoryType.PROCEDURAL.value:
+                raise Mem0ValidationError(
+                    message=f"Invalid 'memory_type'. Please pass {MemoryType.PROCEDURAL.value} to create procedural memories.",
+                    error_code="VALIDATION_002",
+                    details={"provided_type": memory_type, "valid_type": MemoryType.PROCEDURAL.value},
+                    suggestion=f"Use '{MemoryType.PROCEDURAL.value}' to create procedural memories."
+                )
+
+            if isinstance(messages, str):
+                messages = [{"role": "user", "content": messages}]
+
+            elif isinstance(messages, dict):
+                messages = [messages]
+
+            elif not isinstance(messages, list):
+                raise Mem0ValidationError(
+                    message="messages must be str, dict, or list[dict]",
+                    error_code="VALIDATION_003",
+                    details={"provided_type": type(messages).__name__, "valid_types": ["str", "dict", "list[dict]"]},
+                    suggestion="Convert your input to a string, dictionary, or list of dictionaries."
+                )
+
+            if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
+                results = self._create_procedural_memory(messages, metadata=processed_metadata, prompt=prompt)
+                scale_threshold_notice = detect_scale_threshold_from_add_result(self, results)
+                if scale_threshold_notice:
+                    ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+                ctx.result = results
+                return ctx.result
+
+            if self.config.llm.config.get("enable_vision"):
+                messages = parse_vision_messages(messages, self.llm, self.config.llm.config.get("vision_details"))
             else:
-                display_first_run_notice(self, "sync", "add")
-            return results
+                messages = parse_vision_messages(messages)
 
-        if self.config.llm.config.get("enable_vision"):
-            messages = parse_vision_messages(messages, self.llm, self.config.llm.config.get("vision_details"))
-        else:
-            messages = parse_vision_messages(messages)
+            vector_store_result, history_records = self._add_to_vector_store(
+                messages, processed_metadata, effective_filters, infer, prompt=prompt
+            )
+            ctx.extras["history_records"] = history_records
 
-        vector_store_result = self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
-        scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
-        if temporal_usage_notice:
-            display_temporal_usage_notice(self, "sync", "add", *temporal_usage_notice)
-        elif scale_threshold_notice:
-            display_scale_threshold_notice(self, "sync", "add", *scale_threshold_notice)
-        else:
-            display_first_run_notice(self, "sync", "add")
-        return {"results": vector_store_result}
+            scale_threshold_notice = detect_scale_threshold_from_add_result(self, vector_store_result)
+            if scale_threshold_notice:
+                ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+
+            ctx.result = {"results": vector_store_result}
+            return ctx.result
 
     def _add_to_vector_store(self, messages, metadata, filters, infer, prompt=None):
         if not infer:
             returned_memories = []
+            history_records = []
             for message_dict in messages:
                 if (
                     not isinstance(message_dict, dict)
@@ -815,7 +825,11 @@ class Memory(MemoryBase):
 
                 msg_content = message_dict["content"]
                 msg_embeddings = self.embedding_model.embed(msg_content, "add")
-                mem_id = self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
+                mem_id, history_record = self._create_memory(
+                    msg_content, {msg_content: msg_embeddings}, per_msg_meta
+                )
+                if history_record:
+                    history_records.append(history_record)
 
                 returned_memories.append(
                     {
@@ -826,7 +840,7 @@ class Memory(MemoryBase):
                         "role": message_dict["role"],
                     }
                 )
-            return returned_memories
+            return returned_memories, history_records
 
         # === V3 PHASED BATCH PIPELINE ===
 
@@ -897,7 +911,7 @@ class Memory(MemoryBase):
         if not extracted_memories:
             # Save messages even if nothing extracted
             self.db.save_messages(messages, session_scope)
-            return []
+            return [], []
 
         # Phase 3: Batch embed all extracted memory texts
         mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
@@ -951,7 +965,7 @@ class Memory(MemoryBase):
 
         if not records:
             self.db.save_messages(messages, session_scope)
-            return []
+            return [], []
 
         # Phase 6: Batch persist
         all_vectors = [r[2] for r in records]
@@ -972,7 +986,7 @@ class Memory(MemoryBase):
                 except Exception as e:
                     logger.error(f"Failed to insert memory {mid}: {e}")
 
-        # Batch history
+        # Batch history records (actual DB write is handled by HistoryMiddleware)
         history_records = [
             {
                 "memory_id": r[0],
@@ -984,15 +998,6 @@ class Memory(MemoryBase):
             }
             for r in records
         ]
-        try:
-            self.db.batch_add_history(history_records)
-        except Exception:
-            # Fallback: add one by one
-            for hr in history_records:
-                try:
-                    self.db.add_history(hr["memory_id"], None, hr["new_memory"], "ADD", created_at=hr.get("created_at"))
-                except Exception as e:
-                    logger.error(f"Failed to add history for {hr['memory_id']}: {e}")
 
         # Phase 7: Batch entity linking
         try:
@@ -1094,13 +1099,7 @@ class Memory(MemoryBase):
             for r in records
         ]
 
-        keys, encoded_ids = process_telemetry_filters(filters)
-        capture_event(
-            "mem0.add",
-            self,
-            {"version": self.api_version, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"},
-        )
-        return returned_memories
+        return returned_memories, history_records
 
     def get(self, memory_id):
         """
@@ -1112,17 +1111,47 @@ class Memory(MemoryBase):
         Returns:
             dict: Retrieved memory.
         """
-        capture_event("mem0.get", self, {"memory_id": memory_id, "sync_type": "sync"})
-        memory = self.vector_store.get(vector_id=memory_id)
-        if not memory:
-            display_first_run_notice(self, "sync", "get")
-            return None
+        ctx = HookContext(operation="get", memory=self, kwargs={"memory_id": memory_id})
+        with self.middleware.run(ctx):
+            memory = self.vector_store.get(vector_id=memory_id)
+            if not memory:
+                ctx.result = None
+                return ctx.result
 
-        result_item = format_memory_item(memory.id, memory.payload)
-        annotate_memory_result(result_item)
+            promoted_payload_keys = [
+                "user_id",
+                "agent_id",
+                "run_id",
+                "actor_id",
+                "role",
+            ]
 
-        display_first_run_notice(self, "sync", "get")
-        return result_item
+            core_and_promoted_keys = {
+                "data", "hash", "created_at", "updated_at", "id",
+                "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+                *promoted_payload_keys,
+            }
+
+            result_item = MemoryItem(
+                id=memory.id,
+                memory=memory.payload.get("data", ""),
+                hash=memory.payload.get("hash"),
+                created_at=memory.payload.get("created_at"),
+                updated_at=memory.payload.get("updated_at"),
+                expires_at=memory.payload.get("expires_at"),
+                ttl_source=memory.payload.get("ttl_source"),
+            ).model_dump()
+
+            for key in promoted_payload_keys:
+                if key in memory.payload:
+                    result_item[key] = memory.payload[key]
+
+            additional_metadata = {k: v for k, v in memory.payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                result_item["metadata"] = additional_metadata
+
+            ctx.result = result_item
+            return ctx.result
 
     def get_all(
         self,
@@ -1178,19 +1207,28 @@ class Memory(MemoryBase):
 
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
-
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"}
+
+        ctx = HookContext(
+            operation="get_all",
+            memory=self,
+            kwargs={
+                "filters": effective_filters,
+                "top_k": top_k,
+                "limit": limit,
+            },
         )
-
-        all_memories_result = self._get_all_from_vector_store(effective_filters, limit)
-
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
         if scale_threshold_notice:
-            display_scale_threshold_notice(self, "sync", "get_all", *scale_threshold_notice)
+            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
         else:
-            display_first_run_notice(self, "sync", "get_all")
-        return {"results": all_memories_result}
+            ctx.extras["first_run_notice"] = True
+
+        with self.middleware.run(ctx):
+            all_memories_result = self._get_all_from_vector_store(effective_filters, limit)
+            ctx.result = {"results": all_memories_result}
+            return ctx.result
 
     def _get_all_from_vector_store(self, filters, limit):
         memories_result = self.vector_store.list(filters=filters, top_k=limit)
@@ -1208,10 +1246,39 @@ class Memory(MemoryBase):
         else:
             actual_memories = memories_result
 
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+        ]
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
+
         formatted_memories = []
         for mem in actual_memories:
-            memory_item_dict = format_memory_item(mem.id, mem.payload)
-            annotate_memory_result(memory_item_dict)
+            memory_item_dict = MemoryItem(
+                id=mem.id,
+                memory=mem.payload.get("data", ""),
+                hash=mem.payload.get("hash"),
+                created_at=mem.payload.get("created_at"),
+                updated_at=mem.payload.get("updated_at"),
+                expires_at=mem.payload.get("expires_at"),
+                ttl_source=mem.payload.get("ttl_source"),
+            ).model_dump(exclude={"score"})
+
+            for key in promoted_payload_keys:
+                if key in mem.payload:
+                    memory_item_dict[key] = mem.payload[key]
+
+            additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                memory_item_dict["metadata"] = additional_metadata
+
             formatted_memories.append(memory_item_dict)
 
         return formatted_memories
@@ -1302,7 +1369,8 @@ class Memory(MemoryBase):
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
         # Apply enhanced metadata filtering if advanced operators are detected
-        if self._has_advanced_operators(effective_filters):
+        advanced_operators_present = bool(filters and self._has_advanced_operators(filters))
+        if advanced_operators_present:
             processed_filters = self._process_metadata_filters(effective_filters)
             # Remove logical/operator keys that have been reprocessed
             for logical_key in ("AND", "OR", "NOT"):
@@ -1313,49 +1381,48 @@ class Memory(MemoryBase):
             effective_filters.update(processed_filters)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
+
+        ctx = HookContext(
+            operation="search",
+            memory=self,
+            kwargs={
+                "query": query,
+                "filters": effective_filters,
+                "top_k": top_k,
                 "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "sync",
                 "threshold": threshold,
                 "explain": explain,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+                "advanced_filters": advanced_operators_present,
             },
         )
-
-        search_start = time.perf_counter()
-        original_memories = self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
-        search_elapsed_seconds = time.perf_counter() - search_start
-
-        # Apply reranking if enabled and reranker is available
-        if rerank and self.reranker and original_memories:
-            try:
-                reranked_memories = self.reranker.rerank(query, original_memories, limit)
-                original_memories = reranked_memories
-            except Exception as e:
-                logger.warning(f"Reranking failed, using original results: {e}")
-
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
         if temporal_usage_notice:
-            display_temporal_usage_notice(self, "sync", "search", *temporal_usage_notice)
+            ctx.extras["temporal_usage_notice"] = temporal_usage_notice
         elif scale_threshold_notice:
-            display_scale_threshold_notice(self, "sync", "search", *scale_threshold_notice)
-        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-            display_performance_slow_query_notice(
-                self,
-                "sync",
-                "search",
-                search_elapsed_seconds,
-                top_k,
-                len(original_memories),
-            )
-        else:
-            display_first_run_notice(self, "sync", "search")
-        return {"results": original_memories}
+            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+
+        with self.middleware.run(ctx):
+            search_start = time.perf_counter()
+            original_memories = self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
+            search_elapsed_seconds = time.perf_counter() - search_start
+            ctx.extras["search_elapsed_seconds"] = search_elapsed_seconds
+
+            # Apply reranking if enabled and reranker is available
+            if rerank and self.reranker and original_memories:
+                try:
+                    reranked_memories = self.reranker.rerank(query, original_memories, limit)
+                    original_memories = reranked_memories
+                except Exception as e:
+                    logger.warning(f"Reranking failed, using original results: {e}")
+
+            if not temporal_usage_notice and not scale_threshold_notice and search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
+                ctx.extras["slow_query_notice"] = (search_elapsed_seconds, top_k, len(original_memories))
+            elif not temporal_usage_notice and not scale_threshold_notice:
+                ctx.extras["first_run_notice"] = True
+
+            ctx.result = {"results": original_memories}
+            return ctx.result
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1520,6 +1587,19 @@ class Memory(MemoryBase):
         )
 
         # Step 9: Format results
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+        ]
+        core_and_promoted_keys = {
+            "data", "hash", "created_at", "updated_at", "id",
+            "text_lemmatized", "attributed_to", "expires_at", "ttl_source",
+            *promoted_payload_keys,
+        }
+
         original_memories = []
         for scored in scored_results:
             payload = scored.get("payload") or {}
@@ -1527,14 +1607,28 @@ class Memory(MemoryBase):
             if not payload.get("data"):
                 continue  # Skip candidates with no payload data
 
-            memory_item_dict = format_memory_item(
-                scored["id"],
-                payload,
-                score=scored.get("score"),
-                score_details=scored.get("score_details") if explain else None,
-                include_score=True,
-            )
-            annotate_memory_result(memory_item_dict)
+            memory_item_dict = MemoryItem(
+                id=scored["id"],
+                memory=payload.get("data", ""),
+                hash=payload.get("hash"),
+                created_at=payload.get("created_at"),
+                updated_at=payload.get("updated_at"),
+                expires_at=payload.get("expires_at"),
+                ttl_source=payload.get("ttl_source"),
+                score=scored["score"],
+            ).model_dump()
+
+            for key in promoted_payload_keys:
+                if key in payload:
+                    memory_item_dict[key] = payload[key]
+
+            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                if not memory_item_dict.get("metadata"):
+                    memory_item_dict["metadata"] = {}
+                memory_item_dict["metadata"].update(additional_metadata)
+            if explain and "score_details" in scored:
+                memory_item_dict["score_details"] = scored["score_details"]
 
             original_memories.append(memory_item_dict)
 
@@ -1638,13 +1732,22 @@ class Memory(MemoryBase):
             >>> m.update(memory_id="mem_123", data="Likes to play tennis on weekends")
             {'message': 'Memory updated successfully!'}
         """
-        capture_event("mem0.update", self, {"memory_id": memory_id, "sync_type": "sync"})
+        ctx = HookContext(
+            operation="update",
+            memory=self,
+            kwargs={"memory_id": memory_id, "data": data, "metadata": metadata},
+        )
+        ctx.extras["first_run_notice"] = True
 
-        existing_embeddings = {data: self.embedding_model.embed(data, "update")}
+        with self.middleware.run(ctx):
+            existing_embeddings = {data: self.embedding_model.embed(data, "update")}
 
-        self._update_memory(memory_id, data, existing_embeddings, metadata)
-        display_first_run_notice(self, "sync", "update")
-        return {"message": "Memory updated successfully!"}
+            _, history_record = self._update_memory(memory_id, data, existing_embeddings, metadata)
+            if history_record:
+                ctx.extras["history_record"] = history_record
+
+            ctx.result = {"message": "Memory updated successfully!"}
+            return ctx.result
 
     def delete(self, memory_id):
         """
@@ -1653,19 +1756,28 @@ class Memory(MemoryBase):
         Args:
             memory_id (str): ID of the memory to delete.
         """
-        capture_event("mem0.delete", self, {"memory_id": memory_id, "sync_type": "sync"})
-
-        existing_memory = self.vector_store.get(vector_id=memory_id)
-        if existing_memory is None:
-            raise ValueError(f"Memory with id {memory_id} not found")
-
-        self._delete_memory(memory_id, existing_memory)
+        ctx = HookContext(
+            operation="delete",
+            memory=self,
+            kwargs={"memory_id": memory_id},
+        )
         decay_usage_notice = detect_decay_usage_from_delete()
         if decay_usage_notice:
-            display_decay_usage_notice(self, "sync", "delete", *decay_usage_notice)
+            ctx.extras["decay_usage_notice"] = decay_usage_notice
         else:
-            display_first_run_notice(self, "sync", "delete")
-        return {"message": "Memory deleted successfully!"}
+            ctx.extras["first_run_notice"] = True
+
+        with self.middleware.run(ctx):
+            existing_memory = self.vector_store.get(vector_id=memory_id)
+            if existing_memory is None:
+                raise ValueError(f"Memory with id {memory_id} not found")
+
+            _, history_record = self._delete_memory(memory_id, existing_memory)
+            if history_record:
+                ctx.extras["history_record"] = history_record
+
+            ctx.result = {"message": "Memory deleted successfully!"}
+            return ctx.result
 
     def delete_all(self, user_id: Optional[str] = None, agent_id: Optional[str] = None, run_id: Optional[str] = None):
         """
@@ -1690,20 +1802,35 @@ class Memory(MemoryBase):
             )
 
         keys, encoded_ids = process_telemetry_filters(filters)
-        capture_event("mem0.delete_all", self, {"keys": keys, "encoded_ids": encoded_ids, "sync_type": "sync"})
-        # delete all vector memories and reset the collections
-        memories = self.vector_store.list(filters=filters)[0]
-        for memory in memories:
-            self._delete_memory(memory.id)
+        ctx = HookContext(
+            operation="delete_all",
+            memory=self,
+            kwargs={"user_id": user_id, "agent_id": agent_id, "run_id": run_id, "filters": filters},
+        )
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
 
-        logger.info(f"Deleted {len(memories)} memories")
+        with self.middleware.run(ctx):
+            # delete all vector memories and reset the collections
+            memories = self.vector_store.list(filters=filters)[0]
+            history_records = []
+            for memory in memories:
+                _, history_record = self._delete_memory(memory.id)
+                if history_record:
+                    history_records.append(history_record)
+            if history_records:
+                ctx.extras["history_records"] = history_records
 
-        decay_usage_notice = detect_decay_usage_from_delete_all(len(memories))
-        if decay_usage_notice:
-            display_decay_usage_notice(self, "sync", "delete_all", *decay_usage_notice)
-        else:
-            display_first_run_notice(self, "sync", "delete_all")
-        return {"message": "Memories deleted successfully!"}
+            logger.info(f"Deleted {len(memories)} memories")
+
+            decay_usage_notice = detect_decay_usage_from_delete_all(len(memories))
+            if decay_usage_notice:
+                ctx.extras["decay_usage_notice"] = decay_usage_notice
+            else:
+                ctx.extras["first_run_notice"] = True
+
+            ctx.result = {"message": "Memories deleted successfully!"}
+            return ctx.result
 
     def history(self, memory_id):
         """
@@ -1715,10 +1842,17 @@ class Memory(MemoryBase):
         Returns:
             list: List of changes for the memory.
         """
-        capture_event("mem0.history", self, {"memory_id": memory_id, "sync_type": "sync"})
-        history = self.db.get_history(memory_id)
-        display_first_run_notice(self, "sync", "history")
-        return history
+        ctx = HookContext(
+            operation="history",
+            memory=self,
+            kwargs={"memory_id": memory_id},
+        )
+        ctx.extras["first_run_notice"] = True
+
+        with self.middleware.run(ctx):
+            history = self.db.get_history(memory_id)
+            ctx.result = history
+            return ctx.result
 
     def _create_memory(self, data, existing_embeddings, metadata=None):
         logger.debug(f"Creating memory with {data=}")
@@ -1740,17 +1874,18 @@ class Memory(MemoryBase):
             ids=[memory_id],
             payloads=[new_metadata],
         )
-        self.db.add_history(
-            memory_id,
-            None,
-            data,
-            "ADD",
-            created_at=new_metadata.get("created_at"),
-            updated_at=new_metadata.get("updated_at"),
-            actor_id=new_metadata.get("actor_id"),
-            role=new_metadata.get("role"),
-        )
-        return memory_id
+        history_record = {
+            "memory_id": memory_id,
+            "old_memory": None,
+            "new_memory": data,
+            "event": "ADD",
+            "created_at": new_metadata.get("created_at"),
+            "updated_at": new_metadata.get("updated_at"),
+            "actor_id": new_metadata.get("actor_id"),
+            "role": new_metadata.get("role"),
+            "is_deleted": 0,
+        }
+        return memory_id, history_record
 
     def _create_procedural_memory(self, messages, metadata=None, prompt=None):
         """
@@ -1784,12 +1919,11 @@ class Memory(MemoryBase):
 
         metadata = {**metadata, "memory_type": MemoryType.PROCEDURAL.value}
         embeddings = self.embedding_model.embed(procedural_memory, memory_action="add")
-        memory_id = self._create_memory(procedural_memory, {procedural_memory: embeddings}, metadata=metadata)
-        capture_event("mem0._create_procedural_memory", self, {"memory_id": memory_id, "sync_type": "sync"})
+        memory_id, history_record = self._create_memory(procedural_memory, {procedural_memory: embeddings}, metadata=metadata)
 
         result = {"results": [{"id": memory_id, "memory": procedural_memory, "event": "ADD"}]}
 
-        return result
+        return result, history_record
 
     def _update_memory(self, memory_id, data, existing_embeddings, metadata=None):
         logger.info(f"Updating memory with {data=}")
@@ -1831,16 +1965,17 @@ class Memory(MemoryBase):
         )
         logger.info(f"Updating memory with ID {memory_id=} with {data=}")
 
-        self.db.add_history(
-            memory_id,
-            prev_value,
-            data,
-            "UPDATE",
-            created_at=new_metadata["created_at"],
-            updated_at=new_metadata["updated_at"],
-            actor_id=new_metadata.get("actor_id"),
-            role=new_metadata.get("role"),
-        )
+        history_record = {
+            "memory_id": memory_id,
+            "old_memory": prev_value,
+            "new_memory": data,
+            "event": "UPDATE",
+            "created_at": new_metadata["created_at"],
+            "updated_at": new_metadata["updated_at"],
+            "actor_id": new_metadata.get("actor_id"),
+            "role": new_metadata.get("role"),
+            "is_deleted": 0,
+        }
 
         # Entity-store cleanup: strip this memory's id from old-text entities,
         # then re-extract entities from the new text and link them back.
@@ -1848,7 +1983,7 @@ class Memory(MemoryBase):
         self._remove_memory_from_entity_store(memory_id, session_filters)
         self._link_entities_for_memory(memory_id, data, session_filters)
 
-        return memory_id
+        return memory_id, history_record
 
     def _delete_memory(self, memory_id, existing_memory=None):
         logger.info(f"Deleting memory with {memory_id=}")
@@ -1862,23 +1997,23 @@ class Memory(MemoryBase):
         payload = existing_memory.payload or {}
         session_filters = {k: payload[k] for k in ("user_id", "agent_id", "run_id") if payload.get(k)}
         self.vector_store.delete(vector_id=memory_id)
-        self.db.add_history(
-            memory_id,
-            prev_value,
-            None,
-            "DELETE",
-            created_at=created_at,
-            updated_at=updated_at,
-            actor_id=existing_memory.payload.get("actor_id"),
-            role=existing_memory.payload.get("role"),
-            is_deleted=1,
-        )
+        history_record = {
+            "memory_id": memory_id,
+            "old_memory": prev_value,
+            "new_memory": None,
+            "event": "DELETE",
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "actor_id": existing_memory.payload.get("actor_id"),
+            "role": existing_memory.payload.get("role"),
+            "is_deleted": 1,
+        }
 
         # Entity-store cleanup: strip this memory's id from any entity records
         # that linked to it. Non-fatal — the helper swallows errors.
         self._remove_memory_from_entity_store(memory_id, session_filters)
 
-        return memory_id
+        return memory_id, history_record
 
     def reset(self):
         """
@@ -1887,32 +2022,40 @@ class Memory(MemoryBase):
             Resets the database
             Recreates the vector store with a new client
         """
-        logger.warning("Resetting all memories")
+        ctx = HookContext(
+            operation="reset",
+            memory=self,
+            kwargs={},
+        )
+        ctx.extras["first_run_notice"] = True
 
-        if hasattr(self.db, "connection") and self.db.connection:
-            self.db.connection.execute("DROP TABLE IF EXISTS history")
-            self.db.connection.close()
+        with self.middleware.run(ctx):
+            logger.warning("Resetting all memories")
 
-        self.db = SQLiteManager(self.config.history_db_path)
+            if hasattr(self.db, "connection") and self.db.connection:
+                self.db.connection.execute("DROP TABLE IF EXISTS history")
+                self.db.connection.close()
 
-        if hasattr(self.vector_store, "reset"):
-            self.vector_store = VectorStoreFactory.reset(self.vector_store)
-        else:
-            logger.warning("Vector store does not support reset. Skipping.")
-            self.vector_store.delete_col()
-            self.vector_store = VectorStoreFactory.create(
-                self.config.vector_store.provider, self.config.vector_store.config
-            )
-        # Reset entity store if initialized
-        if self._entity_store is not None:
-            try:
-                self._entity_store.reset()
-            except Exception as e:
-                logger.warning(f"Failed to reset entity store: {e}")
-            self._entity_store = None
+            self.db = SQLiteManager(self.config.history_db_path)
 
-        capture_event("mem0.reset", self, {"sync_type": "sync"})
-        display_first_run_notice(self, "sync", "reset")
+            if hasattr(self.vector_store, "reset"):
+                self.vector_store = VectorStoreFactory.reset(self.vector_store)
+            else:
+                logger.warning("Vector store does not support reset. Skipping.")
+                self.vector_store.delete_col()
+                self.vector_store = VectorStoreFactory.create(
+                    self.config.vector_store.provider, self.config.vector_store.config
+                )
+            # Reset entity store if initialized
+            if self._entity_store is not None:
+                try:
+                    self._entity_store.reset()
+                except Exception as e:
+                    logger.warning(f"Failed to reset entity store: {e}")
+                self._entity_store = None
+
+            ctx.result = None
+            return ctx.result
 
     def close(self):
         """Release resources held by this Memory instance (SQLite connections, etc.)."""
@@ -1968,6 +2111,13 @@ class AsyncMemory(MemoryBase):
                 "store with keyword_search support (e.g. qdrant, elasticsearch, pgvector).",
                 self.config.vector_store.provider,
             )
+
+        self.middleware = MiddlewareManager([
+            LifecycleMiddleware(),
+            HistoryMiddleware(),
+            TelemetryMiddleware(),
+            NoticesMiddleware(),
+        ])
 
         capture_event("mem0.init", self, {"sync_type": "async"})
 
@@ -2195,33 +2345,55 @@ class AsyncMemory(MemoryBase):
                 suggestion="Convert your input to a string, dictionary, or list of dictionaries."
             )
 
-        if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
-            results = await self._create_procedural_memory(
-                messages, metadata=processed_metadata, prompt=prompt, llm=llm
-            )
-            scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, results)
-            if temporal_usage_notice:
-                await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
-            elif scale_threshold_notice:
-                await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
-            else:
-                await display_first_run_notice_async(self, "async", "add")
-            return results
-
-        if self.config.llm.config.get("enable_vision"):
-            messages = parse_vision_messages(messages, self.llm, self.config.llm.config.get("vision_details"))
-        else:
-            messages = parse_vision_messages(messages)
-
-        vector_store_result = await self._add_to_vector_store(messages, processed_metadata, effective_filters, infer, prompt=prompt)
-        scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
+        ctx_kwargs = {
+            "user_id": user_id, "agent_id": agent_id, "run_id": run_id,
+            "metadata": metadata, "infer": infer, "memory_type": memory_type,
+        }
         if temporal_usage_notice:
-            await display_temporal_usage_notice_async(self, "async", "add", *temporal_usage_notice)
-        elif scale_threshold_notice:
-            await display_scale_threshold_notice_async(self, "async", "add", *scale_threshold_notice)
-        else:
-            await display_first_run_notice_async(self, "async", "add")
-        return {"results": vector_store_result}
+            ctx_kwargs["temporal_usage_notice"] = temporal_usage_notice
+        keys, encoded_ids = process_telemetry_filters(effective_filters)
+
+        ctx = HookContext(operation="add", memory=self, kwargs=ctx_kwargs)
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
+        if temporal_usage_notice:
+            ctx.extras["temporal_usage_notice"] = temporal_usage_notice
+
+        async with self.middleware.run_async(ctx):
+            if agent_id is not None and memory_type == MemoryType.PROCEDURAL.value:
+                results, history_record = await self._create_procedural_memory(
+                    messages, metadata=processed_metadata, prompt=prompt, llm=llm
+                )
+                if history_record:
+                    ctx.extras["history_record"] = history_record
+                scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, results)
+                if scale_threshold_notice:
+                    ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+                elif not temporal_usage_notice:
+                    ctx.extras["first_run_notice"] = True
+
+                ctx.result = results
+                return ctx.result
+
+            if self.config.llm.config.get("enable_vision"):
+                messages = parse_vision_messages(messages, self.llm, self.config.llm.config.get("vision_details"))
+            else:
+                messages = parse_vision_messages(messages)
+
+            vector_store_result, history_records = await self._add_to_vector_store(
+                messages, processed_metadata, effective_filters, infer, prompt=prompt
+            )
+            if history_records:
+                ctx.extras["history_records"] = history_records
+
+            scale_threshold_notice = await asyncio.to_thread(detect_scale_threshold_from_add_result, self, vector_store_result)
+            if scale_threshold_notice:
+                ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+            elif not temporal_usage_notice:
+                ctx.extras["first_run_notice"] = True
+
+            ctx.result = {"results": vector_store_result}
+            return ctx.result
 
     async def _add_to_vector_store(
         self,
@@ -2233,6 +2405,7 @@ class AsyncMemory(MemoryBase):
     ):
         if not infer:
             returned_memories = []
+            history_records = []
             for message_dict in messages:
                 if (
                     not isinstance(message_dict, dict)
@@ -2254,7 +2427,11 @@ class AsyncMemory(MemoryBase):
 
                 msg_content = message_dict["content"]
                 msg_embeddings = await asyncio.to_thread(self.embedding_model.embed, msg_content, "add")
-                mem_id = await self._create_memory(msg_content, {msg_content: msg_embeddings}, per_msg_meta)
+                mem_id, history_record = await self._create_memory(
+                    msg_content, {msg_content: msg_embeddings}, per_msg_meta
+                )
+                if history_record:
+                    history_records.append(history_record)
 
                 returned_memories.append(
                     {
@@ -2265,7 +2442,7 @@ class AsyncMemory(MemoryBase):
                         "role": message_dict["role"],
                     }
                 )
-            return returned_memories
+            return returned_memories, history_records
 
         # === V3 PHASED BATCH PIPELINE (async) ===
 
@@ -2318,7 +2495,7 @@ class AsyncMemory(MemoryBase):
             )
         except Exception as e:
             logger.error(f"LLM extraction failed (async): {e}")
-            return []
+            return [], []
 
         # Parse response
         try:
@@ -2337,7 +2514,7 @@ class AsyncMemory(MemoryBase):
 
         if not extracted_memories:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
-            return []
+            return [], []
 
         # Phase 3: Batch embed all extracted memory texts
         mem_texts = [m.get("text", "") for m in extracted_memories if m.get("text")]
@@ -2389,7 +2566,7 @@ class AsyncMemory(MemoryBase):
 
         if not records:
             await asyncio.to_thread(self.db.save_messages, messages, session_scope)
-            return []
+            return [], []
 
         # Phase 6: Batch persist
         all_vectors = [r[2] for r in records]
@@ -2410,7 +2587,7 @@ class AsyncMemory(MemoryBase):
                 except Exception as e:
                     logger.error(f"Failed to insert memory {mid} (async): {e}")
 
-        # Batch history
+        # Batch history records (actual DB write handled by HistoryMiddleware)
         history_records = [
             {
                 "memory_id": r[0],
@@ -2422,17 +2599,6 @@ class AsyncMemory(MemoryBase):
             }
             for r in records
         ]
-        try:
-            await asyncio.to_thread(self.db.batch_add_history, history_records)
-        except Exception:
-            for hr in history_records:
-                try:
-                    await asyncio.to_thread(
-                        self.db.add_history, hr["memory_id"], None, hr["new_memory"], "ADD",
-                        created_at=hr.get("created_at")
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to add history for {hr['memory_id']} (async): {e}")
 
         # Phase 7: Batch entity linking
         try:
@@ -2533,13 +2699,7 @@ class AsyncMemory(MemoryBase):
             for r in records
         ]
 
-        keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.add",
-            self,
-            {"version": self.api_version, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"},
-        )
-        return returned_memories
+        return returned_memories, history_records
 
     async def get(self, memory_id):
         """
@@ -2551,16 +2711,43 @@ class AsyncMemory(MemoryBase):
         Returns:
             dict: Retrieved memory.
         """
-        capture_event("mem0.get", self, {"memory_id": memory_id, "sync_type": "async"})
-        memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
-        if not memory:
-            await display_first_run_notice_async(self, "async", "get")
-            return None
+        ctx = HookContext(operation="get", memory=self, kwargs={"memory_id": memory_id})
+        ctx.extras["first_run_notice"] = True
 
-        result_item = format_memory_item(memory.id, memory.payload)
+        async with self.middleware.run_async(ctx):
+            memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
+            if not memory:
+                ctx.result = None
+                return ctx.result
 
-        await display_first_run_notice_async(self, "async", "get")
-        return result_item
+            promoted_payload_keys = [
+                "user_id",
+                "agent_id",
+                "run_id",
+                "actor_id",
+                "role",
+            ]
+
+            core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+
+            result_item = MemoryItem(
+                id=memory.id,
+                memory=memory.payload.get("data", ""),
+                hash=memory.payload.get("hash"),
+                created_at=memory.payload.get("created_at"),
+                updated_at=memory.payload.get("updated_at"),
+            ).model_dump()
+
+            for key in promoted_payload_keys:
+                if key in memory.payload:
+                    result_item[key] = memory.payload[key]
+
+            additional_metadata = {k: v for k, v in memory.payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                result_item["metadata"] = additional_metadata
+
+            ctx.result = result_item
+            return ctx.result
 
     async def get_all(
         self,
@@ -2616,19 +2803,28 @@ class AsyncMemory(MemoryBase):
 
         limit = top_k
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
-
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.get_all", self, {"limit": limit, "keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"}
+
+        ctx = HookContext(
+            operation="get_all",
+            memory=self,
+            kwargs={
+                "filters": effective_filters,
+                "top_k": top_k,
+                "limit": limit,
+            },
         )
-
-        all_memories_result = await self._get_all_from_vector_store(effective_filters, limit)
-
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
         if scale_threshold_notice:
-            await display_scale_threshold_notice_async(self, "async", "get_all", *scale_threshold_notice)
+            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
         else:
-            await display_first_run_notice_async(self, "async", "get_all")
-        return {"results": all_memories_result}
+            ctx.extras["first_run_notice"] = True
+
+        async with self.middleware.run_async(ctx):
+            all_memories_result = await self._get_all_from_vector_store(effective_filters, limit)
+            ctx.result = {"results": all_memories_result}
+            return ctx.result
 
     async def _get_all_from_vector_store(self, filters, limit):
         memories_result = await asyncio.to_thread(self.vector_store.list, filters=filters, top_k=limit)
@@ -2646,9 +2842,33 @@ class AsyncMemory(MemoryBase):
         else:
             actual_memories = memories_result
 
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+        ]
+        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+
         formatted_memories = []
         for mem in actual_memories:
-            memory_item_dict = format_memory_item(mem.id, mem.payload)
+            memory_item_dict = MemoryItem(
+                id=mem.id,
+                memory=mem.payload.get("data", ""),
+                hash=mem.payload.get("hash"),
+                created_at=mem.payload.get("created_at"),
+                updated_at=mem.payload.get("updated_at"),
+            ).model_dump(exclude={"score"})
+
+            for key in promoted_payload_keys:
+                if key in mem.payload:
+                    memory_item_dict[key] = mem.payload[key]
+
+            additional_metadata = {k: v for k, v in mem.payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                memory_item_dict["metadata"] = additional_metadata
+
             formatted_memories.append(memory_item_dict)
 
         return formatted_memories
@@ -2743,7 +2963,8 @@ class AsyncMemory(MemoryBase):
         scale_threshold_notice = detect_scale_threshold_from_top_k(top_k)
 
         # Apply enhanced metadata filtering if advanced operators are detected
-        if self._has_advanced_operators(effective_filters):
+        advanced_operators_present = bool(filters and self._has_advanced_operators(filters))
+        if advanced_operators_present:
             processed_filters = self._process_metadata_filters(effective_filters)
             # Remove logical/operator keys that have been reprocessed
             for logical_key in ("AND", "OR", "NOT"):
@@ -2754,52 +2975,51 @@ class AsyncMemory(MemoryBase):
             effective_filters.update(processed_filters)
 
         keys, encoded_ids = process_telemetry_filters(effective_filters)
-        capture_event(
-            "mem0.search",
-            self,
-            {
+
+        ctx = HookContext(
+            operation="search",
+            memory=self,
+            kwargs={
+                "query": query,
+                "filters": effective_filters,
+                "top_k": top_k,
                 "limit": limit,
-                "version": self.api_version,
-                "keys": keys,
-                "encoded_ids": encoded_ids,
-                "sync_type": "async",
                 "threshold": threshold,
                 "explain": explain,
-                "advanced_filters": bool(filters and self._has_advanced_operators(filters)),
+                "advanced_filters": advanced_operators_present,
             },
         )
-
-        search_start = time.perf_counter()
-        original_memories = await self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
-        search_elapsed_seconds = time.perf_counter() - search_start
-
-        # Apply reranking if enabled and reranker is available
-        if rerank and self.reranker and original_memories:
-            try:
-                # Run reranking in thread pool to avoid blocking async loop
-                reranked_memories = await asyncio.to_thread(
-                    self.reranker.rerank, query, original_memories, limit
-                )
-                original_memories = reranked_memories
-            except Exception as e:
-                logger.warning(f"Reranking failed, using original results: {e}")
-
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
         if temporal_usage_notice:
-            await display_temporal_usage_notice_async(self, "async", "search", *temporal_usage_notice)
+            ctx.extras["temporal_usage_notice"] = temporal_usage_notice
         elif scale_threshold_notice:
-            await display_scale_threshold_notice_async(self, "async", "search", *scale_threshold_notice)
-        elif search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
-            await display_performance_slow_query_notice_async(
-                self,
-                "async",
-                "search",
-                search_elapsed_seconds,
-                top_k,
-                len(original_memories),
-            )
-        else:
-            await display_first_run_notice_async(self, "async", "search")
-        return {"results": original_memories}
+            ctx.extras["scale_threshold_notice"] = scale_threshold_notice
+
+        async with self.middleware.run_async(ctx):
+            search_start = time.perf_counter()
+            original_memories = await self._search_vector_store(query, effective_filters, limit, threshold, explain=explain)
+            search_elapsed_seconds = time.perf_counter() - search_start
+            ctx.extras["search_elapsed_seconds"] = search_elapsed_seconds
+
+            # Apply reranking if enabled and reranker is available
+            if rerank and self.reranker and original_memories:
+                try:
+                    # Run reranking in thread pool to avoid blocking async loop
+                    reranked_memories = await asyncio.to_thread(
+                        self.reranker.rerank, query, original_memories, limit
+                    )
+                    original_memories = reranked_memories
+                except Exception as e:
+                    logger.warning(f"Reranking failed, using original results: {e}")
+
+            if not temporal_usage_notice and not scale_threshold_notice and search_elapsed_seconds > PERFORMANCE_SLOW_QUERY_THRESHOLD_SECONDS:
+                ctx.extras["slow_query_notice"] = (search_elapsed_seconds, top_k, len(original_memories))
+            elif not temporal_usage_notice and not scale_threshold_notice:
+                ctx.extras["first_run_notice"] = True
+
+            ctx.result = {"results": original_memories}
+            return ctx.result
 
     def _process_metadata_filters(self, metadata_filters: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2963,19 +3183,42 @@ class AsyncMemory(MemoryBase):
         )
 
         # Step 9: Format results
+        promoted_payload_keys = [
+            "user_id",
+            "agent_id",
+            "run_id",
+            "actor_id",
+            "role",
+        ]
+        core_and_promoted_keys = {"data", "hash", "created_at", "updated_at", "id", "text_lemmatized", "attributed_to", *promoted_payload_keys}
+
         original_memories = []
         for scored in scored_results:
             payload = scored.get("payload") or {}
             if not payload.get("data"):
                 continue
 
-            memory_item_dict = format_memory_item(
-                scored["id"],
-                payload,
-                score=scored.get("score"),
-                score_details=scored.get("score_details") if explain else None,
-                include_score=True,
-            )
+            memory_item_dict = MemoryItem(
+                id=scored["id"],
+                memory=payload.get("data", ""),
+                hash=payload.get("hash"),
+                created_at=payload.get("created_at"),
+                updated_at=payload.get("updated_at"),
+                score=scored["score"],
+            ).model_dump()
+
+            for key in promoted_payload_keys:
+                if key in payload:
+                    memory_item_dict[key] = payload[key]
+
+            additional_metadata = {k: v for k, v in payload.items() if k not in core_and_promoted_keys}
+            if additional_metadata:
+                if not memory_item_dict.get("metadata"):
+                    memory_item_dict["metadata"] = {}
+                memory_item_dict["metadata"].update(additional_metadata)
+            if explain and "score_details" in scored:
+                memory_item_dict["score_details"] = scored["score_details"]
+
             original_memories.append(memory_item_dict)
 
         return original_memories
@@ -3070,14 +3313,23 @@ class AsyncMemory(MemoryBase):
             >>> await m.update(memory_id="mem_123", data="Likes to play tennis on weekends")
             {'message': 'Memory updated successfully!'}
         """
-        capture_event("mem0.update", self, {"memory_id": memory_id, "sync_type": "async"})
+        ctx = HookContext(
+            operation="update",
+            memory=self,
+            kwargs={"memory_id": memory_id, "data": data, "metadata": metadata},
+        )
+        ctx.extras["first_run_notice"] = True
 
-        embeddings = await asyncio.to_thread(self.embedding_model.embed, data, "update")
-        existing_embeddings = {data: embeddings}
+        async with self.middleware.run_async(ctx):
+            embeddings = await asyncio.to_thread(self.embedding_model.embed, data, "update")
+            existing_embeddings = {data: embeddings}
 
-        await self._update_memory(memory_id, data, existing_embeddings, metadata)
-        await display_first_run_notice_async(self, "async", "update")
-        return {"message": "Memory updated successfully!"}
+            _, history_record = await self._update_memory(memory_id, data, existing_embeddings, metadata)
+            if history_record:
+                ctx.extras["history_record"] = history_record
+
+            ctx.result = {"message": "Memory updated successfully!"}
+            return ctx.result
 
     async def delete(self, memory_id):
         """
@@ -3086,19 +3338,28 @@ class AsyncMemory(MemoryBase):
         Args:
             memory_id (str): ID of the memory to delete.
         """
-        capture_event("mem0.delete", self, {"memory_id": memory_id, "sync_type": "async"})
-
-        existing_memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
-        if existing_memory is None:
-            raise ValueError(f"Memory with id {memory_id} not found")
-
-        await self._delete_memory(memory_id, existing_memory)
+        ctx = HookContext(
+            operation="delete",
+            memory=self,
+            kwargs={"memory_id": memory_id},
+        )
         decay_usage_notice = detect_decay_usage_from_delete()
         if decay_usage_notice:
-            await display_decay_usage_notice_async(self, "async", "delete", *decay_usage_notice)
+            ctx.extras["decay_usage_notice"] = decay_usage_notice
         else:
-            await display_first_run_notice_async(self, "async", "delete")
-        return {"message": "Memory deleted successfully!"}
+            ctx.extras["first_run_notice"] = True
+
+        async with self.middleware.run_async(ctx):
+            existing_memory = await asyncio.to_thread(self.vector_store.get, vector_id=memory_id)
+            if existing_memory is None:
+                raise ValueError(f"Memory with id {memory_id} not found")
+
+            _, history_record = await self._delete_memory(memory_id, existing_memory)
+            if history_record:
+                ctx.extras["history_record"] = history_record
+
+            ctx.result = {"message": "Memory deleted successfully!"}
+            return ctx.result
 
     async def delete_all(self, user_id=None, agent_id=None, run_id=None):
         """
@@ -3123,29 +3384,48 @@ class AsyncMemory(MemoryBase):
             )
 
         keys, encoded_ids = process_telemetry_filters(filters)
-        capture_event("mem0.delete_all", self, {"keys": keys, "encoded_ids": encoded_ids, "sync_type": "async"})
-        memories = await asyncio.to_thread(self.vector_store.list, filters=filters)
+        ctx = HookContext(
+            operation="delete_all",
+            memory=self,
+            kwargs={"user_id": user_id, "agent_id": agent_id, "run_id": run_id, "filters": filters},
+        )
+        ctx.extras["keys"] = keys
+        ctx.extras["encoded_ids"] = encoded_ids
 
-        delete_tasks = []
-        for memory in memories[0]:
-            delete_tasks.append(self._delete_memory(memory.id))
+        async with self.middleware.run_async(ctx):
+            memories = await asyncio.to_thread(self.vector_store.list, filters=filters)
 
-        results = await asyncio.gather(*delete_tasks, return_exceptions=True)
+            delete_tasks = []
+            for memory in memories[0]:
+                delete_tasks.append(self._delete_memory(memory.id))
 
-        errors = [r for r in results if isinstance(r, BaseException)]
-        if errors:
-            logger.warning("Failed to delete %d out of %d memories", len(errors), len(results))
-            for err in errors:
-                logger.warning("Delete error: %s", err)
+            results = await asyncio.gather(*delete_tasks, return_exceptions=True)
 
-        logger.info(f"Deleted {len(results) - len(errors)} memories")
+            history_records = []
+            errors = []
+            for r in results:
+                if isinstance(r, BaseException):
+                    errors.append(r)
+                elif isinstance(r, tuple) and len(r) >= 2 and r[1]:
+                    history_records.append(r[1])
+            if history_records:
+                ctx.extras["history_records"] = history_records
 
-        decay_usage_notice = detect_decay_usage_from_delete_all(len(memories[0]))
-        if decay_usage_notice:
-            await display_decay_usage_notice_async(self, "async", "delete_all", *decay_usage_notice)
-        else:
-            await display_first_run_notice_async(self, "async", "delete_all")
-        return {"message": "Memories deleted successfully!"}
+            if errors:
+                logger.warning("Failed to delete %d out of %d memories", len(errors), len(results))
+                for err in errors:
+                    logger.warning("Delete error: %s", err)
+
+            logger.info(f"Deleted {len(results) - len(errors)} memories")
+
+            decay_usage_notice = detect_decay_usage_from_delete_all(len(memories[0]))
+            if decay_usage_notice:
+                ctx.extras["decay_usage_notice"] = decay_usage_notice
+            else:
+                ctx.extras["first_run_notice"] = True
+
+            ctx.result = {"message": "Memories deleted successfully!"}
+            return ctx.result
 
     async def history(self, memory_id):
         """
@@ -3157,10 +3437,17 @@ class AsyncMemory(MemoryBase):
         Returns:
             list: List of changes for the memory.
         """
-        capture_event("mem0.history", self, {"memory_id": memory_id, "sync_type": "async"})
-        history = await asyncio.to_thread(self.db.get_history, memory_id)
-        await display_first_run_notice_async(self, "async", "history")
-        return history
+        ctx = HookContext(
+            operation="history",
+            memory=self,
+            kwargs={"memory_id": memory_id},
+        )
+        ctx.extras["first_run_notice"] = True
+
+        async with self.middleware.run_async(ctx):
+            history = await asyncio.to_thread(self.db.get_history, memory_id)
+            ctx.result = history
+            return ctx.result
 
     async def _create_memory(self, data, existing_embeddings, metadata=None):
         logger.debug(f"Creating memory with {data=}")
@@ -3185,19 +3472,18 @@ class AsyncMemory(MemoryBase):
             payloads=[new_metadata],
         )
 
-        await asyncio.to_thread(
-            self.db.add_history,
-            memory_id,
-            None,
-            data,
-            "ADD",
-            created_at=new_metadata.get("created_at"),
-            updated_at=new_metadata.get("updated_at"),
-            actor_id=new_metadata.get("actor_id"),
-            role=new_metadata.get("role"),
-        )
-
-        return memory_id
+        history_record = {
+            "memory_id": memory_id,
+            "old_memory": None,
+            "new_memory": data,
+            "event": "ADD",
+            "created_at": new_metadata.get("created_at"),
+            "updated_at": new_metadata.get("updated_at"),
+            "actor_id": new_metadata.get("actor_id"),
+            "role": new_metadata.get("role"),
+            "is_deleted": 0,
+        }
+        return memory_id, history_record
 
     async def _create_procedural_memory(self, messages, metadata=None, llm=None, prompt=None):
         """
@@ -3245,12 +3531,13 @@ class AsyncMemory(MemoryBase):
 
         metadata = {**metadata, "memory_type": MemoryType.PROCEDURAL.value}
         embeddings = await asyncio.to_thread(self.embedding_model.embed, procedural_memory, memory_action="add")
-        memory_id = await self._create_memory(procedural_memory, {procedural_memory: embeddings}, metadata=metadata)
-        capture_event("mem0._create_procedural_memory", self, {"memory_id": memory_id, "sync_type": "async"})
+        memory_id, history_record = await self._create_memory(
+            procedural_memory, {procedural_memory: embeddings}, metadata=metadata
+        )
 
         result = {"results": [{"id": memory_id, "memory": procedural_memory, "event": "ADD"}]}
 
-        return result
+        return result, history_record
 
     async def _update_memory(self, memory_id, data, existing_embeddings, metadata=None):
         logger.info(f"Updating memory with {data=}")
@@ -3293,17 +3580,17 @@ class AsyncMemory(MemoryBase):
         )
         logger.info(f"Updating memory with ID {memory_id=} with {data=}")
 
-        await asyncio.to_thread(
-            self.db.add_history,
-            memory_id,
-            prev_value,
-            data,
-            "UPDATE",
-            created_at=new_metadata["created_at"],
-            updated_at=new_metadata["updated_at"],
-            actor_id=new_metadata.get("actor_id"),
-            role=new_metadata.get("role"),
-        )
+        history_record = {
+            "memory_id": memory_id,
+            "old_memory": prev_value,
+            "new_memory": data,
+            "event": "UPDATE",
+            "created_at": new_metadata["created_at"],
+            "updated_at": new_metadata["updated_at"],
+            "actor_id": new_metadata.get("actor_id"),
+            "role": new_metadata.get("role"),
+            "is_deleted": 0,
+        }
 
         # Entity-store cleanup: strip this memory's id from old-text entities,
         # then re-extract entities from the new text and link them back.
@@ -3311,7 +3598,7 @@ class AsyncMemory(MemoryBase):
         await self._remove_memory_from_entity_store(memory_id, session_filters)
         await self._link_entities_for_memory(memory_id, data, session_filters)
 
-        return memory_id
+        return memory_id, history_record
 
     async def _delete_memory(self, memory_id, existing_memory=None):
         logger.info(f"Deleting memory with {memory_id=}")
@@ -3326,24 +3613,23 @@ class AsyncMemory(MemoryBase):
         session_filters = {k: payload[k] for k in ("user_id", "agent_id", "run_id") if payload.get(k)}
 
         await asyncio.to_thread(self.vector_store.delete, vector_id=memory_id)
-        await asyncio.to_thread(
-            self.db.add_history,
-            memory_id,
-            prev_value,
-            None,
-            "DELETE",
-            created_at=created_at,
-            updated_at=updated_at,
-            actor_id=existing_memory.payload.get("actor_id"),
-            role=existing_memory.payload.get("role"),
-            is_deleted=1,
-        )
+        history_record = {
+            "memory_id": memory_id,
+            "old_memory": prev_value,
+            "new_memory": None,
+            "event": "DELETE",
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "actor_id": existing_memory.payload.get("actor_id"),
+            "role": existing_memory.payload.get("role"),
+            "is_deleted": 1,
+        }
 
         # Entity-store cleanup: strip this memory's id from any entity records
         # that linked to it. Non-fatal — the helper swallows errors.
         await self._remove_memory_from_entity_store(memory_id, session_filters)
 
-        return memory_id
+        return memory_id, history_record
 
     async def reset(self):
         """
@@ -3352,33 +3638,41 @@ class AsyncMemory(MemoryBase):
             Resets the database
             Recreates the vector store with a new client
         """
-        logger.warning("Resetting all memories")
-        await asyncio.to_thread(self.vector_store.delete_col)
-
-        gc.collect()
-
-        if hasattr(self.vector_store, "client") and hasattr(self.vector_store.client, "close"):
-            await asyncio.to_thread(self.vector_store.client.close)
-
-        if hasattr(self.db, "connection") and self.db.connection:
-            await asyncio.to_thread(lambda: self.db.connection.execute("DROP TABLE IF EXISTS history"))
-            await asyncio.to_thread(self.db.connection.close)
-
-        self.db = SQLiteManager(self.config.history_db_path)
-
-        self.vector_store = VectorStoreFactory.create(
-            self.config.vector_store.provider, self.config.vector_store.config
+        ctx = HookContext(
+            operation="reset",
+            memory=self,
+            kwargs={},
         )
+        ctx.extras["first_run_notice"] = True
 
-        if self._entity_store is not None:
-            try:
-                await asyncio.to_thread(self._entity_store.reset)
-            except Exception as e:
-                logger.warning(f"Failed to reset entity store: {e}")
-            self._entity_store = None
+        async with self.middleware.run_async(ctx):
+            logger.warning("Resetting all memories")
+            await asyncio.to_thread(self.vector_store.delete_col)
 
-        capture_event("mem0.reset", self, {"sync_type": "async"})
-        await display_first_run_notice_async(self, "async", "reset")
+            gc.collect()
+
+            if hasattr(self.vector_store, "client") and hasattr(self.vector_store.client, "close"):
+                await asyncio.to_thread(self.vector_store.client.close)
+
+            if hasattr(self.db, "connection") and self.db.connection:
+                await asyncio.to_thread(lambda: self.db.connection.execute("DROP TABLE IF EXISTS history"))
+                await asyncio.to_thread(self.db.connection.close)
+
+            self.db = SQLiteManager(self.config.history_db_path)
+
+            self.vector_store = VectorStoreFactory.create(
+                self.config.vector_store.provider, self.config.vector_store.config
+            )
+
+            if self._entity_store is not None:
+                try:
+                    await asyncio.to_thread(self._entity_store.reset)
+                except Exception as e:
+                    logger.warning(f"Failed to reset entity store: {e}")
+                self._entity_store = None
+
+            ctx.result = None
+            return ctx.result
 
     def close(self):
         """Release resources held by this AsyncMemory instance."""

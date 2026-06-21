@@ -50,21 +50,3 @@ test-py-3.11:
 
 test-py-3.12:
 	hatch run dev_py_3_12:test
-
-# ─── Schema contract (SSOT) ────────────────────────────────────────────────
-# Generate / verify the TypeScript + JSON contracts from the Python SSOT.
-# Python schema in mem0/schema/ is the single source of truth — DO NOT edit
-# generated files under cli/node/src/schema/ by hand.
-
-schema-generate:
-	python -m mem0.schema.generator --output cli/node/src/schema/
-	@echo "✅ Schema generated. Run 'make schema-check' to verify."
-
-schema-check:
-	python -m mem0.schema.generator --check --output cli/node/src/schema/
-
-schema-export-json:
-	python -m mem0.schema.generator --export-json
-
-schema-hash:
-	python -m mem0.schema.generator --hash

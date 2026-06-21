@@ -21,13 +21,6 @@ import {
 	formatSingleMemory,
 	printResultSummary,
 } from "../output.js";
-import {
-	EXPIRES_FORMAT_ERROR,
-	EXPIRES_PATTERN,
-	FIELD_DEFAULTS,
-	VALIDATION_RULES,
-	validateExpires,
-} from "../schema/index.js";
 import { isAgentMode, setCurrentCommand } from "../state.js";
 
 /** True only when stdin is an actual pipe or file redirect — never in agent mode. */
@@ -102,10 +95,14 @@ export async function cmdAdd(
 
 	// Validate --expires
 	if (opts.expires) {
-		try {
-			validateExpires(opts.expires);
-		} catch (e) {
-			printError(e instanceof Error ? e.message : String(e));
+		if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.expires)) {
+			printError(
+				"Invalid date format for --expires. Use YYYY-MM-DD (e.g. 2025-12-31).",
+			);
+			process.exit(1);
+		}
+		if (new Date(opts.expires) <= new Date()) {
+			printError("--expires date must be in the future.");
 			process.exit(1);
 		}
 	}
@@ -250,11 +247,11 @@ export async function cmdSearch(
 		: undefined;
 
 	if (opts.topK < 1) {
-		printError(VALIDATION_RULES.topK.error);
+		printError("--top-k must be >= 1.");
 		process.exit(1);
 	}
 	if (opts.threshold < 0 || opts.threshold > 1) {
-		printError(VALIDATION_RULES.threshold.error);
+		printError("--threshold must be between 0.0 and 1.0.");
 		process.exit(1);
 	}
 
@@ -372,11 +369,11 @@ export async function cmdList(
 ): Promise<void> {
 	setCurrentCommand("list");
 	if (opts.pageSize < 1) {
-		printError(VALIDATION_RULES.pageSize.error);
+		printError("--page-size must be >= 1.");
 		process.exit(1);
 	}
 	if (opts.page < 1) {
-		printError(VALIDATION_RULES.page.error);
+		printError("--page must be >= 1.");
 		process.exit(1);
 	}
 

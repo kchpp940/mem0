@@ -18,17 +18,19 @@ from mem0.client.types import (
 )
 from mem0.client.utils import api_error_handler
 
+# Exception classes are referenced in docstrings only
 from mem0.memory.setup import get_user_id, is_aliased, mark_aliased, read_anon_ids, setup_config
 from mem0.memory.telemetry import capture_client_event, client_telemetry
-from mem0.schema.fields import ENTITY_FIELD_SET, validate_feedback_value
 
 logger = logging.getLogger(__name__)
 
 warnings.filterwarnings("default", category=DeprecationWarning)
 
+# Setup user config
 setup_config()
 
-ENTITY_PARAMS = ENTITY_FIELD_SET
+# Entity parameters that must be passed via filters, not top-level
+ENTITY_PARAMS = frozenset({"user_id", "agent_id", "app_id", "run_id"})
 
 
 def _validate_and_trim_search_query(query: str) -> str:
@@ -906,9 +908,11 @@ class MemoryClient:
         feedback: Optional[str] = None,
         feedback_reason: Optional[str] = None,
     ) -> Dict[str, str]:
+        VALID_FEEDBACK_VALUES = {"POSITIVE", "NEGATIVE", "VERY_NEGATIVE"}
+
         feedback = feedback.upper() if feedback else None
-        if feedback is not None:
-            validate_feedback_value(feedback)
+        if feedback is not None and feedback not in VALID_FEEDBACK_VALUES:
+            raise ValueError(f"feedback must be one of {', '.join(VALID_FEEDBACK_VALUES)} or None")
 
         data = {
             "memory_id": memory_id,
@@ -1790,9 +1794,11 @@ class AsyncMemoryClient:
     async def feedback(
         self, memory_id: str, feedback: Optional[str] = None, feedback_reason: Optional[str] = None
     ) -> Dict[str, str]:
+        VALID_FEEDBACK_VALUES = {"POSITIVE", "NEGATIVE", "VERY_NEGATIVE"}
+
         feedback = feedback.upper() if feedback else None
-        if feedback is not None:
-            validate_feedback_value(feedback)
+        if feedback is not None and feedback not in VALID_FEEDBACK_VALUES:
+            raise ValueError(f"feedback must be one of {', '.join(VALID_FEEDBACK_VALUES)} or None")
 
         data = {"memory_id": memory_id, "feedback": feedback, "feedback_reason": feedback_reason}
 

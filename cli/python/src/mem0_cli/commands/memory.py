@@ -10,13 +10,15 @@ import time as _time
 from pathlib import Path
 
 import typer
+from rich.console import Console
+
 from mem0.schema.fields import (
+    ENTITY_FIELDS,
     FIELD_VALIDATION,
     SCOPE_DISPLAY_NAMES,
     validate_expires,
+    validate_field,
 )
-from rich.console import Console
-
 from mem0_cli.backend.base import Backend
 from mem0_cli.branding import (
     print_error,

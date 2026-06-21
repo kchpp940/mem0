@@ -3,28 +3,59 @@
  */
 
 import type { Mem0Config } from "../config.js";
-import type {
-	AddOptions as BaseAddOptions,
-	DeleteOptions as BaseDeleteOptions,
-	ListOptions as BaseListOptions,
-	SearchOptions as BaseSearchOptions,
-	EntityIds,
-} from "../schema/index.js";
 import { PlatformBackend } from "./platform.js";
 
-export interface ListOptions extends BaseListOptions {
+export interface AddOptions {
+	userId?: string;
+	agentId?: string;
+	appId?: string;
+	runId?: string;
+	metadata?: Record<string, unknown>;
+	immutable?: boolean;
+	infer?: boolean;
+	expires?: string;
+	categories?: string[];
+}
+
+export interface SearchOptions {
+	userId?: string;
+	agentId?: string;
+	appId?: string;
+	runId?: string;
+	topK?: number;
+	threshold?: number;
+	rerank?: boolean;
+	keyword?: boolean;
+	filters?: Record<string, unknown>;
+	fields?: string[];
+}
+
+export interface ListOptions {
+	userId?: string;
+	agentId?: string;
+	appId?: string;
+	runId?: string;
+	page?: number;
+	pageSize?: number;
 	category?: string;
 	after?: string;
 	before?: string;
 }
 
-export interface DeleteOptions extends BaseDeleteOptions {
+export interface DeleteOptions {
 	all?: boolean;
+	userId?: string;
+	agentId?: string;
+	appId?: string;
+	runId?: string;
 }
 
-export type AddOptions = BaseAddOptions;
-export type SearchOptions = BaseSearchOptions;
-export type { EntityIds };
+export interface EntityIds {
+	userId?: string;
+	agentId?: string;
+	appId?: string;
+	runId?: string;
+}
 
 export interface Backend {
 	add(
@@ -32,28 +63,39 @@ export interface Backend {
 		messages?: Record<string, unknown>[],
 		opts?: AddOptions,
 	): Promise<Record<string, unknown>>;
+
 	search(
 		query: string,
 		opts?: SearchOptions,
 	): Promise<Record<string, unknown>[]>;
+
 	get(memoryId: string): Promise<Record<string, unknown>>;
+
 	listMemories(opts?: ListOptions): Promise<Record<string, unknown>[]>;
+
 	update(
 		memoryId: string,
 		content?: string,
 		metadata?: Record<string, unknown>,
 	): Promise<Record<string, unknown>>;
+
 	delete(
 		memoryId?: string,
 		opts?: DeleteOptions,
 	): Promise<Record<string, unknown>>;
+
 	deleteEntities(opts: EntityIds): Promise<Record<string, unknown>>;
+
 	ping(): Promise<Record<string, unknown>>;
+
 	status(opts?: { userId?: string; agentId?: string }): Promise<
 		Record<string, unknown>
 	>;
+
 	entities(entityType: string): Promise<Record<string, unknown>[]>;
+
 	listEvents(): Promise<Record<string, unknown>[]>;
+
 	getEvent(eventId: string): Promise<Record<string, unknown>>;
 }
 

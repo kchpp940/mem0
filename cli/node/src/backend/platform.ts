@@ -7,22 +7,18 @@ import {
 	ENTITY_FIELDS,
 	FIELD_DEFAULTS,
 	SCOPE_DISPLAY_NAMES,
+	type AddOptions,
+	type Backend,
+	type DeleteOptions,
+	type EntityIds,
+	type ListOptions,
+	type SearchOptions,
 	getAddApiKey,
 	getSearchApiKey,
 } from "../schema/index.js";
 import { captureNotice, isAgentMode } from "../state.js";
 import { CLI_VERSION } from "../version.js";
-import {
-	APIError,
-	type AddOptions,
-	AuthError,
-	type Backend,
-	type DeleteOptions,
-	type EntityIds,
-	type ListOptions,
-	NotFoundError,
-	type SearchOptions,
-} from "./base.js";
+import { APIError, AuthError, NotFoundError } from "./base.js";
 
 export class PlatformBackend implements Backend {
 	private baseUrl: string;
@@ -247,7 +243,7 @@ export class PlatformBackend implements Backend {
 	): Promise<Record<string, unknown>[]> {
 		const payload: Record<string, unknown> = {};
 		const params: Record<string, string> = {
-			page: String(opts.page ?? 1),
+			page: String(opts.page ?? FIELD_DEFAULTS.top_k),
 			page_size: String(opts.pageSize ?? 100),
 		};
 
@@ -378,9 +374,12 @@ export class PlatformBackend implements Backend {
 			>[];
 		}
 
-		const typeMap: Record<string, string> = Object.fromEntries(
-			Object.entries(SCOPE_DISPLAY_NAMES).map(([k, v]) => [`${k}s`, v]),
-		);
+		const typeMap: Record<string, string> = {
+			users: "user",
+			agents: "agent",
+			apps: "app",
+			runs: "run",
+		};
 		const targetType = typeMap[entityType];
 		if (targetType) {
 			items = items.filter(

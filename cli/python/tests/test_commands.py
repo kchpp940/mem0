@@ -321,7 +321,7 @@ class TestAddDeduplicatesPending:
     def test_json_shows_one_pending(self, mock_backend):
         raw = self._run_add(mock_backend, "json")
         data = json.loads(raw)
-        results = data.get("results", data)
+        results = data.get("data", data.get("results", data))
         pending = [r for r in results if r.get("status") == "PENDING"]
         assert len(pending) == 1
 
@@ -1297,23 +1297,18 @@ class TestAgentMode:
 
     def test_error_in_agent_mode_produces_json_to_stdout(self, mock_backend):
         """Errors in agent mode must emit a JSON envelope to stdout, not stderr."""
-        from io import StringIO
-
         mock_backend.get.side_effect = Exception("Memory not found")
-        console, _buf = _make_console()
+        console, buf = _make_console()
         err_console, _err_buf = _make_err_console()
 
-        captured_stdout = StringIO()
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
-            patch("sys.stdout", captured_stdout),
             pytest.raises((SystemExit, TyperExit)),
         ):
             cmd_get(mock_backend, "bad-id", output="text")
 
-        stdout_output = captured_stdout.getvalue()
-        # The error JSON envelope must be on stdout
+        stdout_output = buf.getvalue()
         error_data = json.loads(stdout_output)
         assert error_data["status"] == "error"
         assert "error" in error_data

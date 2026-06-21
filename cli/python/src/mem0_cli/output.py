@@ -441,11 +441,13 @@ class OutputRenderer:
         output_format: str = "text",
         command: str = "",
         scope: dict[str, str] | None = None,
+        err_console: Console | None = None,
     ) -> None:
         self.console = console
         self.output_format = output_format
         self.command = command
         self.scope = scope
+        self.err_console = err_console
         self._duration_ms: int | None = None
 
     # ------------------------------------------------------------------
@@ -715,4 +717,4 @@ class OutputRenderer:
 
         from mem0_cli.branding import print_error
 
-        print_error(self.console, message)
+        print_error(self.err_console or self.console, message)

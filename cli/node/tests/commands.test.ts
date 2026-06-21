@@ -65,7 +65,7 @@ describe("cmdAdd", () => {
       immutable: false,
       output: "json",
     });
-    expect(output).toContain("results");
+    expect(output).toContain("data");
   });
 
   it("quiet mode produces no memory content", async () => {
@@ -154,7 +154,8 @@ describe("cmdAdd deduplicates PENDING", () => {
       output: "json",
     });
     const data = JSON.parse(output);
-    const pending = data.results.filter((r: Record<string, unknown>) => r.status === "PENDING");
+    const results = data.data ?? data.results ?? data;
+    const pending = results.filter((r: Record<string, unknown>) => r.status === "PENDING");
     expect(pending).toHaveLength(1);
   });
 

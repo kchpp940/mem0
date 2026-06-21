@@ -93,30 +93,77 @@
 		"dedupKey": "event_id"
 	},
 
-	"agentPickFields": {
+	"searchListKeys": ["results", "memories"],
+	"addResultKey": "results",
+
+	"jsonEnvelope": {
+		"success": {
+			"status": "success",
+			"command": "<command_name>",
+			"duration_ms": "<number|null>",
+			"scope": "<object|null>",
+			"count": "<number|null>",
+			"data": "<any>"
+		},
+		"error": {
+			"status": "error",
+			"command": "<command_name>",
+			"error": "<string>",
+			"error_code": "<string|null>",
+			"data": null
+		},
+		"optionalFields": ["duration_ms", "scope", "count", "error_code", "mem0_notice"],
+		"scopeFields": ["user_id", "agent_id", "app_id", "run_id"]
+	},
+
+	"agentSanitization": {
 		"add": {
 			"pending": ["status", "event_id"],
 			"normal": ["id", "memory", "event"]
 		},
 		"search": ["id", "memory", "score", "created_at", "categories"],
 		"list": ["id", "memory", "created_at", "categories"],
-		"get": [
-			"id",
-			"memory",
-			"created_at",
-			"updated_at",
-			"categories",
-			"metadata"
-		],
+		"get": ["id", "memory", "created_at", "updated_at", "categories", "metadata"],
 		"update": ["id", "memory"],
-		"event_list": ["id", "event_type", "status", "latency", "created_at"],
-		"event_status": [
-			"id",
-			"event_type",
-			"status",
-			"latency",
-			"created_at",
-			"updated_at"
-		]
+		"delete": "passthrough",
+		"delete-all": "passthrough",
+		"entity list": ["name", "type", "count"],
+		"entity delete": "passthrough",
+		"event list": ["id", "event_type", "status", "latency", "created_at"],
+		"event status": ["id", "event_type", "status", "latency", "created_at", "updated_at", "results"],
+		"event status results": ["id", "event", "user_id", "memory"],
+		"status": "passthrough",
+		"import": "passthrough",
+		"config show": "passthrough"
+	},
+
+	"batchStatus": {
+		"add": {
+			"allPendingMessage": "Memory queued — {count} event{s} pending",
+			"allProcessedMessage": "Memory processed — {count} memor{y/ies} extracted",
+			"statuses": {
+				"PENDING": { "icon": "⧗", "label": "Queued", "color": "accent" },
+				"ADD": { "icon": "+", "label": "Added", "color": "success" },
+				"UPDATE": { "icon": "~", "label": "Updated", "color": "accent" },
+				"DELETE": { "icon": "-", "label": "Deleted", "color": "error" },
+				"NOOP": { "icon": "·", "label": "No change", "color": "dim" }
+			},
+			"dedupBy": "event_id",
+			"dedupStatuses": ["PENDING"]
+		},
+		"events": {
+			"statuses": {
+				"PENDING": { "color": "accent" },
+				"PROCESSING": { "color": "warning" },
+				"SUCCEEDED": { "color": "success" },
+				"FAILED": { "color": "error" }
+			}
+		}
+	},
+
+	"notice": {
+		"key": "mem0_notice",
+		"stderrBannerColor": "yellow",
+		"agentModeInline": true
 	}
 }

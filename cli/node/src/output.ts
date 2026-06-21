@@ -1,13 +1,31 @@
 /**
- * Output formatting for mem0 CLI — text, JSON, table, quiet modes.
+ * Output rendering for mem0 CLI — text, JSON, table, quiet, agent modes.
+ *
+ * This module centralizes all output formatting and rendering logic.
+ * Formatting rules follow the shared CLI contract in `cli/cli-spec.json`
+ * and `src/contract/payload_contract.json`.
  */
 
 import boxen from "boxen";
 import Table from "cli-table3";
 import { colors, sym } from "./branding.js";
 import { takeNotice } from "./state.js";
+import contract from "./contract/payload_contract.json" with { type: "json" };
 
 const { brand, accent, success, error: errorColor, dim } = colors;
+
+const sanitization = (contract as Record<string, unknown>).agentSanitization as Record<string, unknown> || {};
+const batchStatus = (contract as Record<string, unknown>).batchStatus as Record<string, unknown> || {};
+
+function pluralize(template: string, count: number): string {
+	let result = template.replace("{count}", String(count));
+	result = result.replaceAll("{s}", count === 1 ? "" : "s");
+
+	result = result.replace(/\{([^}]+)\/([^}]+)\}/g, (_match, singular: string, plural: string) =>
+		count === 1 ? singular : plural,
+	);
+	return result;
+}
 
 function formatDate(dtStr?: string): string | undefined {
 	if (!dtStr) return undefined;
@@ -394,4 +412,267 @@ export function printResultSummary(opts: {
 
 	console.log(`  ${dim(parts.join(" · "))}`);
 	console.log();
+}
+
+export interface OutputRendererOptions {
+	outputFormat?: string;
+	command?: string;
+	scope?: Record<string, string> | null;
+}
+
+export class OutputRenderer {
+	private outputFormat: string;
+	private command: string;
+	private scope: Record<string, string> | null;
+	private durationMs: number | null = null;
+
+	constructor(opts: OutputRendererOptions = {}) {
+		this.outputFormat = opts.outputFormat ?? "text";
+		this.command = opts.command ?? "";
+		this.scope = opts.scope ?? null;
+	}
+
+	setDuration(ms: number): void;
+	setDuration(opts: { ms?: number; seconds?: number }): void;
+	setDuration(value: number | { ms?: number; seconds?: number }): void {
+		if (typeof value === "number") {
+			this.durationMs = value;
+		} else {
+			if (value.ms !== undefined) {
+				this.durationMs = value.ms;
+			} else if (value.seconds !== undefined) {
+				this.durationMs = Math.floor(value.seconds * 1000);
+			}
+		}
+	}
+
+	private buildEnvelope(opts: {
+		data: unknown;
+		status?: string;
+		error?: string;
+		count?: number;
+	}): Record<string, unknown> {
+		const envelope: Record<string, unknown> = {
+			status: opts.status ?? "success",
+			command: this.command,
+		};
+		if (this.durationMs !== null) envelope.duration_ms = this.durationMs;
+		if (this.scope && Object.keys(this.scope).length > 0) {
+			const filtered = Object.fromEntries(
+				Object.entries(this.scope).filter(([, v]) => v),
+			);
+			if (Object.keys(filtered).length > 0) envelope.scope = filtered;
+		}
+		if (opts.count !== undefined) envelope.count = opts.count;
+		if (opts.error) envelope.error = opts.error;
+		envelope.data = opts.data;
+
+		const notice = takeNotice();
+		if (notice) envelope.mem0_notice = notice;
+
+		return envelope;
+	}
+
+	private sanitize(data: unknown): unknown {
+		return sanitizeAgentData(this.command, data);
+	}
+
+	memoryList(
+		memories: Record<string, unknown>[],
+		opts: { title?: string; showScore?: boolean; page?: number } = {},
+	): void {
+		const count = memories.length;
+		const fmt = this.outputFormat;
+
+		if (fmt === "json") {
+			const envelope = this.buildEnvelope({ data: memories, count });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "agent") {
+			const sanitized = this.sanitize(memories);
+			const envelope = this.buildEnvelope({ data: sanitized, count });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "quiet") {
+			for (const m of memories) {
+				console.log((m.id as string) ?? "");
+			}
+			return;
+		}
+
+		if (fmt === "table") {
+			formatMemoriesTable(memories, { showScore: opts.showScore });
+		} else {
+			formatMemoriesText(memories, opts.title);
+		}
+
+		printResultSummary({
+			count,
+			durationSecs: this.durationMs !== null ? this.durationMs / 1000 : undefined,
+			page: opts.page,
+			scopeIds: this.scope ?? undefined,
+		});
+	}
+
+	singleMemory(mem: Record<string, unknown>): void {
+		const fmt = this.outputFormat;
+
+		if (fmt === "json") {
+			const envelope = this.buildEnvelope({ data: mem });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "agent") {
+			const sanitized = this.sanitize(mem);
+			const envelope = this.buildEnvelope({ data: sanitized });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "quiet") {
+			console.log((mem.id as string) ?? "");
+			return;
+		}
+
+		formatSingleMemory(mem, fmt);
+	}
+
+	addResult(results: Record<string, unknown>[] | Record<string, unknown>): void {
+		const fmt = this.outputFormat;
+		const resultList = Array.isArray(results) ? results : [results];
+		const count = resultList.length;
+
+		if (fmt === "json") {
+			const envelope = this.buildEnvelope({ data: results, count });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "agent") {
+			const sanitized = this.sanitize(results);
+			const envelope = this.buildEnvelope({ data: sanitized, count });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "quiet") return;
+
+		this.renderAddText(resultList);
+	}
+
+	private renderAddText(results: Record<string, unknown>[]): void {
+		const addConfig = batchStatus.add as Record<string, unknown> || {};
+		const statuses = addConfig.statuses as Record<string, Record<string, string>> || {};
+
+		console.log();
+
+		const seenIds = new Set<string>();
+
+		for (const r of results) {
+			const status = r.status as string | undefined;
+			const event = (r.event as string) ?? "ADD";
+
+			if (status === "PENDING") {
+				const eventId = (r.event_id as string) ?? "";
+				if (eventId && seenIds.has(eventId)) continue;
+				if (eventId) seenIds.add(eventId);
+
+				const statusInfo = statuses.PENDING || {};
+				const iconChar = statusInfo.icon || "⧗";
+				const label = statusInfo.label || "Queued";
+
+				const icon = accent(sym(iconChar, "..."));
+				const parts = [
+					`  ${icon} ${dim(label.padEnd(10))}`,
+					"Processing in background",
+				];
+				console.log(parts.join("  "));
+				if (eventId) {
+					console.log(`  ${dim(`  event_id: ${eventId}`)}`);
+					console.log(
+						`  ${dim(`  → Check status: mem0 event status ${eventId}`)}`,
+					);
+				}
+				continue;
+			}
+
+			const statusInfo = statuses[event] || {};
+			const iconChar = statusInfo.icon || "?";
+			const label = statusInfo.label || event;
+			const color = statusInfo.color || "dim";
+
+			const colorMap: Record<string, (s: string) => string> = {
+				success,
+				accent,
+				error: errorColor,
+				dim,
+			};
+			const iconStyle = colorMap[color] || dim;
+
+			const memory = (r.memory ?? r.text ?? r.content ?? r.data ?? "") as string;
+			const memId = ((r.id as string) ?? (r.memory_id as string) ?? "").slice(0, 8);
+
+			const parts = [`  ${iconStyle(iconChar)} ${dim(label.padEnd(10))}`];
+			if (memory) parts.push(memory);
+			if (memId) parts.push(dim(`(${memId})`));
+			console.log(parts.join("  "));
+		}
+
+		console.log();
+	}
+
+	data(data: unknown, opts: { count?: number } = {}): void {
+		const fmt = this.outputFormat;
+
+		if (fmt === "json") {
+			const envelope = this.buildEnvelope({ data, count: opts.count });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "agent") {
+			const sanitized = this.sanitize(data);
+			const envelope = this.buildEnvelope({ data: sanitized, count: opts.count });
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		if (fmt === "quiet") {
+			if (data && typeof data === "object") {
+				console.log(JSON.stringify(data));
+			} else {
+				console.log(String(data));
+			}
+			return;
+		}
+
+		if (data && typeof data === "object") {
+			formatJson(data);
+		} else {
+			console.log(String(data));
+		}
+	}
+
+	error(message: string, opts: { errorCode?: string } = {}): void {
+		const fmt = this.outputFormat;
+
+		if (fmt === "json" || fmt === "agent") {
+			const envelope: Record<string, unknown> = {
+				status: "error",
+				command: this.command,
+				error: message,
+				data: null,
+			};
+			if (opts.errorCode) envelope.error_code = opts.errorCode;
+			console.log(JSON.stringify(envelope, null, 2));
+			return;
+		}
+
+		console.error(`${errorColor("✗ Error:")} ${message}`);
+	}
 }

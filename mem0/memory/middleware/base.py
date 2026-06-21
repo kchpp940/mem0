@@ -11,16 +11,29 @@ Hook execution order
 
 For a successful operation:
 
-    1. middleware.before_<op>(ctx)          # all middleware, registration order
+    1. middleware.before_<op>(ctx)          # *all* middleware, registration order
     2. <core operation runs>                # ctx.result / ctx.error populated
-    3. middleware.after_<op>(ctx)           # all middleware, registration order
+    3. [Phase 1] critical after-hooks       # all critical middleware, registration order
+    4. [Phase 2] best-effort after-hooks    # only if Phase 1 succeeded; registration order
 
 If an error is raised during the core operation:
 
     1. middleware.before_<op>(ctx)          # those that already ran stay ran
     2. <core operation raises>              # ctx.error is set
-    3. middleware.after_<op>(ctx)           # *still* runs for every middleware,
-                                             # middleware can inspect ctx.error
+    3. [Phase 1] critical after-hooks       # still run (every critical middleware
+                                             # gets a chance to clean up or observe)
+    4. [Phase 2] skipped if Phase 1 failed
+
+If a *critical* after-hook fails, Phase 2 is **not executed**.  This
+guarantees that "success-reporting" side-effects (telemetry events, user
+notices) never fire when a required side-effect (e.g. history
+persistence) did not land — preventing the contradictory state where
+the caller sees an error but telemetry has already emitted a success
+event.
+
+Each hook receives a mutable :class:`HookContext` and may mutate it in place
+(eg. inject extra metadata in ``before_add`` or annotate results in
+``after_search``).
 
 Error propagation
 -----------------
@@ -33,18 +46,15 @@ best-effort (the default).
   the exception.
 
 * **Critical** middleware hooks that raise are logged at ``ERROR`` level and
-  recorded on ``ctx.hook_errors``.  After *all* after-hooks have run the
-  manager raises a single :class:`MiddlewareError` that aggregates every
-  critical failure.  This ensures:
+  recorded on ``ctx.hook_errors``.  After all *critical* after-hooks have
+  run the manager raises a single :class:`MiddlewareError` that aggregates
+  every critical failure.  This ensures:
 
-  - Every middleware still gets a chance to run (one broken hook does not
-    prevent others from executing).
-  - The caller is guaranteed to know when a required side-effect (e.g.
-  history persistence) failed.
-
-Each hook receives a mutable :class:`HookContext` and may mutate it in place
-(eg. inject extra metadata in ``before_add`` or annotate results in
-``after_search``).
+  - Every critical middleware still gets a chance to run (one broken hook
+    does not prevent others from executing).
+  - The caller is guaranteed to know when a required side-effect failed.
+  - Best-effort side-effects are skipped so success semantics stay
+    consistent.
 """
 
 from __future__ import annotations
@@ -440,7 +450,31 @@ class _SyncCtxManager:
             self._ctx.error = exc_val
         op = self._ctx.operation
         hook_name = f"after_{op}"
-        for mw in self._manager._middleware:
+        all_mw = self._manager._middleware
+
+        # ---- Phase 1: critical middleware ----
+        # Run critical after-hooks first.  If any of them fails we skip the
+        # best-effort phase entirely so that "success" side-effects
+        # (telemetry, user notices) never fire when a required side-effect
+        # (e.g. history persistence) did not land.
+        critical_mw = [mw for mw in all_mw if mw.critical]
+        for mw in critical_mw:
+            fn = getattr(mw, hook_name, None)
+            if callable(fn):
+                MiddlewareManager._call_hook(
+                    fn, self._ctx, f"{mw.name}.{hook_name}", mw.name, mw.critical
+                )
+        critical_errors = [e for e in self._ctx.hook_errors if e.critical]
+        if critical_errors:
+            MiddlewareManager._raise_if_critical_errors(self._ctx)
+            return None
+
+        # ---- Phase 2: best-effort middleware ----
+        # These only run when every critical after-hook succeeded, and their
+        # own failures are swallowed (logged as warnings) so they never
+        # break the caller.
+        best_effort_mw = [mw for mw in all_mw if not mw.critical]
+        for mw in best_effort_mw:
             fn = getattr(mw, hook_name, None)
             if callable(fn):
                 MiddlewareManager._call_hook(
@@ -492,7 +526,38 @@ class _AsyncCtxManager:
         op = self._ctx.operation
         async_hook = f"after_{op}_async"
         sync_hook = f"after_{op}"
-        for mw in self._manager._middleware:
+        all_mw = self._manager._middleware
+
+        # ---- Phase 1: critical middleware ----
+        critical_mw = [mw for mw in all_mw if mw.critical]
+        for mw in critical_mw:
+            if hasattr(mw, async_hook) and callable(getattr(mw, async_hook)):
+                await MiddlewareManager._call_hook_async(
+                    getattr(mw, async_hook),
+                    self._ctx,
+                    f"{mw.name}.{async_hook}",
+                    mw.name,
+                    mw.critical,
+                )
+            else:
+                fn = getattr(mw, sync_hook, None)
+                if callable(fn):
+                    await asyncio.to_thread(
+                        MiddlewareManager._call_hook,
+                        fn,
+                        self._ctx,
+                        f"{mw.name}.{sync_hook}",
+                        mw.name,
+                        mw.critical,
+                    )
+        critical_errors = [e for e in self._ctx.hook_errors if e.critical]
+        if critical_errors:
+            MiddlewareManager._raise_if_critical_errors(self._ctx)
+            return None
+
+        # ---- Phase 2: best-effort middleware ----
+        best_effort_mw = [mw for mw in all_mw if not mw.critical]
+        for mw in best_effort_mw:
             if hasattr(mw, async_hook) and callable(getattr(mw, async_hook)):
                 await MiddlewareManager._call_hook_async(
                     getattr(mw, async_hook),

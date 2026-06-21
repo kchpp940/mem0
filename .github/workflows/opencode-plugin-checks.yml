@@ -14,9 +14,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: integrations/mem0-plugin/.opencode-plugin
     steps:
       - uses: actions/checkout@v4
 
@@ -26,14 +23,15 @@ jobs:
           bun-version: latest
 
       - name: Install dependencies
+        working-directory: integrations/mem0-plugin/.opencode-plugin
         run: bun install --frozen-lockfile
 
       - name: Type check
-        run: bun run type-check
+        run: make typecheck-opencode-plugin
 
       - name: Build
-        run: bun run build
+        run: make build-opencode-plugin
 
       - name: Verify dist output exists
         run: |
-          test -f dist/index.js || (echo "Build output missing: dist/index.js" && exit 1)
+          test -f integrations/mem0-plugin/.opencode-plugin/dist/index.js || (echo "Build output missing: dist/index.js" && exit 1)

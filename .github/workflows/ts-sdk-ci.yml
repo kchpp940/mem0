@@ -86,16 +86,13 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Lint
-        working-directory: mem0-ts
-        run: npx prettier --check .
+        run: make lint-ts-sdk
 
       - name: Build
-        working-directory: mem0-ts
-        run: pnpm run build
+        run: make build-ts-sdk
 
       - name: Run unit tests
-        working-directory: mem0-ts
-        run: pnpm run test:unit
+        run: make test-ts-sdk
 
       - name: Verify package exports
         working-directory: mem0-ts
@@ -136,8 +133,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        working-directory: mem0-ts
-        run: pnpm run build
+        run: make build-ts-sdk
 
       - name: Run integration tests (with cleanup)
         working-directory: mem0-ts

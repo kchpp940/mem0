@@ -34,12 +34,10 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Lint
-        working-directory: cli/node
-        run: pnpm run lint
+        run: make lint-node-cli
 
       - name: Type check
-        working-directory: cli/node
-        run: pnpm run typecheck
+        run: make typecheck-node-cli
 
   test:
     runs-on: ubuntu-latest
@@ -66,8 +64,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Run tests
-        working-directory: cli/node
-        run: pnpm run test
+        run: make test-node-cli
 
   build:
     runs-on: ubuntu-latest
@@ -91,8 +88,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build
-        working-directory: cli/node
-        run: pnpm run build
+        run: make build-node-cli
 
       - name: Verify dist output
         run: |

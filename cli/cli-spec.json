@@ -351,6 +351,31 @@
     "stderrBannerColor": "yellow",
     "agentModeInline": true
   },
+
+  "traceEpilogue": {
+    "enabled": true,
+    "stream": "stderr",
+    "format": "table",
+    "key": "mem0_trace",
+    "fields": ["label", "duration_ms", "status"],
+    "labelColumnWidth": 20,
+    "labelWidth": 18,
+    "statusWidth": 10,
+    "durationWidth": 10,
+    "headerLabel": "STEP",
+    "headerDuration": "DURATION",
+    "headerStatus": "STATUS",
+    "statusColors": {
+      "success": "green",
+      "failed": "red",
+      "skipped": "yellow",
+      "pending": "dim"
+    },
+    "defaultStatus": "success",
+    "minDurationMs": 5,
+    "totalLabel": "Total",
+    "traceCommand": "mem0 trace {event_id}"
+  },
   "globalOptions": [
     {
       "name": "api_key",

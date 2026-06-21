@@ -13,7 +13,16 @@ import { Command, Option } from 'commander';
 import { VALIDATION_RULES, validateField } from './schema/fields.js';
 import contract from './contract/payload_contract.json' with { type: 'json' };
 
-const defaults = contract.defaults || {};
+interface ContractDefaults {
+  top_k?: number;
+  threshold?: number;
+  rerank?: boolean;
+  keyword?: boolean;
+  immutable?: boolean;
+  [key: string]: unknown;
+}
+
+const defaults = (contract.defaults || {}) as ContractDefaults;
 
 export interface OptionSpec {
   flags: string;

@@ -33,6 +33,13 @@ def _run(args: list[str], home_dir: str | None = None) -> subprocess.CompletedPr
             del env[key]
     env.pop("FORCE_COLOR", None)
     env["PYTHONIOENCODING"] = "utf-8"
+    # Ensure PYTHONPATH includes the src directory for editable installs
+    src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    if existing_pythonpath:
+        env["PYTHONPATH"] = f"{src_path}{os.pathsep}{existing_pythonpath}"
+    else:
+        env["PYTHONPATH"] = src_path
     if home_dir:
         env["HOME"] = home_dir
     result = subprocess.run(
@@ -97,17 +104,25 @@ class TestArgvPreprocessing:
         # a guaranteed-dead URL and assert the failure is the bootstrap
         # request failing — proving the --agent flag was honored and the
         # bootstrap branch ran, not the interactive wizard.
+        env = {
+            **{k: v for k, v in os.environ.items() if not k.startswith("MEM0_")},
+            "HOME": clean_home,
+            "MEM0_BASE_URL": "http://127.0.0.1:1",  # blackhole
+            "FORCE_COLOR": "0",
+            "PYTHONIOENCODING": "utf-8",
+        }
+        # Ensure PYTHONPATH includes the src directory for editable installs
+        src_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src"))
+        existing_pythonpath = env.get("PYTHONPATH", "")
+        if existing_pythonpath:
+            env["PYTHONPATH"] = f"{src_path}{os.pathsep}{existing_pythonpath}"
+        else:
+            env["PYTHONPATH"] = src_path
         result = subprocess.run(
             [sys.executable, "-m", "mem0_cli", "init", "--agent"],
             capture_output=True,
             encoding="utf-8",
-            env={
-                **{k: v for k, v in os.environ.items() if not k.startswith("MEM0_")},
-                "HOME": clean_home,
-                "MEM0_BASE_URL": "http://127.0.0.1:1",  # blackhole
-                "FORCE_COLOR": "0",
-                "PYTHONIOENCODING": "utf-8",
-            },
+            env=env,
             timeout=15,
         )
         combined = _strip_ansi(result.stdout + result.stderr).lower()

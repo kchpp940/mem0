@@ -13,7 +13,10 @@
     "test:watch": "vitest",
     "lint": "biome check src/",
     "lint:fix": "biome check --write src/",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "validate:contract": "node scripts/validate-contract.js",
+    "pretest": "node scripts/validate-contract.js",
+    "pretypecheck": "node scripts/validate-contract.js"
   },
   "engines": {
     "node": ">=18.0.0"

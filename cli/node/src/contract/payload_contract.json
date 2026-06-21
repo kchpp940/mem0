@@ -404,5 +404,13 @@
     "results",
     "memories"
   ],
-  "addResultKey": "results"
+  "addResultKey": "results",
+  "_meta": {
+    "generated": true,
+    "source": "cli/cli-spec.json",
+    "generator": "cli/generate_contracts.py",
+    "generated_at": "2026-06-21T04:19:20.143206+00:00",
+    "source_hash": "07adefcea7e450d9dbd4c0011d61723589cc65c51b902d8494d5784d979817f3",
+    "do_not_edit": "DO NOT EDIT — generated from cli/cli-spec.json. Run `python cli/generate_contracts.py` to regenerate."
+  }
 }

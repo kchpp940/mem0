@@ -2,18 +2,17 @@
 
 from __future__ import annotations
 
-import contextlib
 import json as _json
-import os
-import stat as _stat_mod
-import sys
 from pathlib import Path
 
 import typer
 from rich.console import Console
 
 from mem0_cli import __version__
-from mem0_cli.branding import BRAND_COLOR, print_error, print_warning
+from mem0_cli.branding import BRAND_COLOR, print_error
+from mem0_cli.core.errors import CLIError, InputError
+from mem0_cli.core.options import read_stdin
+from mem0_cli.core.wrapper import load_backend_and_config
 
 console = Console()
 err_console = Console(stderr=True)
@@ -103,52 +102,22 @@ def _get_backend_and_config(
 ):
     """Build and return the Platform backend plus the loaded config.
 
-    Validates the API key upfront via ``/v1/ping/`` and caches the
-    resolved user email for telemetry.
+    Delegates to :func:`mem0_cli.core.wrapper.load_backend_and_config`
+    and preserves the cached ``_validated_user_email`` side effect so
+    telemetry continues to work.
     """
+
     global _validated_user_email
-
-    from mem0_cli.backend import get_backend
-    from mem0_cli.backend.platform import AuthError
-    from mem0_cli.config import load_config, save_config
-
-    config = load_config()
-
-    if api_key:
-        config.platform.api_key = api_key
-    if base_url:
-        config.platform.base_url = base_url
-
-    if not config.platform.api_key:
-        print_error(
-            err_console,
-            "No API key configured.",
-            hint="Run 'mem0 init' or set MEM0_API_KEY environment variable.",
-        )
-        raise typer.Exit(1)
-
-    backend = get_backend(config)
-
-    # Validate the API key upfront with a fast timeout
     try:
-        ping_data = backend.ping(timeout=5.0)
-        email = ping_data.get("user_email") if isinstance(ping_data, dict) else None
-        if email:
-            _validated_user_email = email
-            if config.platform.user_email != email:
-                config.platform.user_email = email
-                with contextlib.suppress(Exception):
-                    save_config(config)
-    except AuthError:
-        print_error(
-            err_console,
-            "Invalid or expired API key.",
-            hint="Run 'mem0 init' or set MEM0_API_KEY environment variable.",
-        )
-        raise typer.Exit(1) from None
-    except Exception:
-        print_warning(err_console, "Could not validate API key (network issue). Proceeding anyway.")
+        backend, config = load_backend_and_config(api_key=api_key, base_url=base_url)
+    except CLIError as exc:
+        # Convert typed CLIError back into typer.Exit with printed error for
+        # backward-compatibility with callers outside execute().
+        print_error(err_console, exc.message, hint=exc.hint)
+        raise typer.Exit(exc.exit_code) from None
 
+    if getattr(config.platform, "user_email", None):
+        _validated_user_email = config.platform.user_email
     return backend, config
 
 
@@ -168,47 +137,37 @@ def _resolve_ids(
     agent_id: str | None = None,
     app_id: str | None = None,
     run_id: str | None = None,
-):
-    """Resolve entity IDs: CLI flag > config default > None.
+) -> dict[str, str | None]:
+    """Backwards-compatible shim — :func:`mem0_cli.core.options.resolve_scope` is canonical.
 
-    If any explicit ID is provided, only use explicit IDs (don't mix
-    in defaults for other entity types which would over-filter).
-    If no explicit IDs, fall back to all configured defaults.
+    Old tests (:mod:`tests.test_config`) import this helper directly.
     """
-    has_explicit = any([user_id, agent_id, app_id, run_id])
-    if has_explicit:
-        return {
-            "user_id": user_id or None,
-            "agent_id": agent_id or None,
-            "app_id": app_id or None,
-            "run_id": run_id or None,
-        }
-    return {
-        "user_id": config.defaults.user_id or None,
-        "agent_id": config.defaults.agent_id or None,
-        "app_id": config.defaults.app_id or None,
-        "run_id": config.defaults.run_id or None,
-    }
+
+    from mem0_cli.core.options import resolve_scope
+
+    return resolve_scope(
+        config,
+        user_id=user_id,
+        agent_id=agent_id,
+        app_id=app_id,
+        run_id=run_id,
+    ).as_dict()
 
 
 def _stdin_is_piped() -> bool:
-    """Return True only when stdin is an actual pipe or file redirect — not a bare open fd."""
-    from mem0_cli.state import is_agent_mode
+    """Backwards-compatible shim — use :func:`mem0_cli.core.options.stdin_is_piped`."""
 
-    if is_agent_mode():
-        return False
-    try:
-        mode = os.fstat(sys.stdin.fileno()).st_mode
-        return _stat_mod.S_ISFIFO(mode) or _stat_mod.S_ISREG(mode)
-    except Exception:
-        return False
+    from mem0_cli.core.options import stdin_is_piped
+
+    return stdin_is_piped()
 
 
 def _read_stdin() -> str | None:
-    """Read from stdin if it is an actual pipe or file redirect (not a TTY, not agent mode)."""
-    if _stdin_is_piped():
-        return sys.stdin.read().strip() or None
-    return None
+    """Backwards-compatible shim — use :func:`mem0_cli.core.options.read_stdin`."""
+
+    from mem0_cli.core.options import read_stdin
+
+    return read_stdin()
 
 
 # ── Global options (shared via callback) ──────────────────────────────────
@@ -299,12 +258,15 @@ def add(
     from mem0_cli.commands.memory import cmd_add
 
     backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
 
     cmd_add(
         backend,
         text,
-        **ids,
+        config=config,
+        user_id=user_id,
+        agent_id=agent_id,
+        app_id=app_id,
+        run_id=run_id,
         messages=messages,
         file=file,
         metadata=metadata,
@@ -378,20 +340,21 @@ def search(
     """
     from mem0_cli.commands.memory import cmd_search
 
-    # STEP 7: stdin fallback for query
     if query is None:
-        query = _read_stdin()
+        query = read_stdin()
     if not query or not query.strip():
-        print_error(err_console, "Search query cannot be empty.")
-        raise typer.Exit(1)
+        raise InputError("Search query cannot be empty.")
 
     backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
 
     cmd_search(
         backend,
         query,
-        **ids,
+        config=config,
+        user_id=user_id,
+        agent_id=agent_id,
+        app_id=app_id,
+        run_id=run_id,
         top_k=top_k,
         threshold=threshold,
         rerank=rerank,
@@ -430,8 +393,8 @@ def get(
     """
     from mem0_cli.commands.memory import cmd_get
 
-    backend = _get_backend(api_key, base_url)
-    cmd_get(backend, memory_id, output=output)
+    backend, config = _get_backend_and_config(api_key, base_url)
+    cmd_get(backend, memory_id, config=config, output=output)
 
 
 # ── Memory: list ──────────────────────────────────────────────────────────
@@ -487,11 +450,14 @@ def list_cmd(
     from mem0_cli.commands.memory import cmd_list
 
     backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
 
     cmd_list(
         backend,
-        **ids,
+        config=config,
+        user_id=user_id,
+        agent_id=agent_id,
+        app_id=app_id,
+        run_id=run_id,
         page=page,
         page_size=page_size,
         category=category,
@@ -532,12 +498,13 @@ def update(
     """
     from mem0_cli.commands.memory import cmd_update
 
-    # STEP 7: stdin fallback for text
     if text is None:
-        text = _read_stdin()
+        text = read_stdin()
 
-    backend = _get_backend(api_key, base_url)
-    cmd_update(backend, memory_id, text, metadata=metadata, output=output)
+    backend, config = _get_backend_and_config(api_key, base_url)
+    cmd_update(
+        backend, memory_id, config=config, text=text, metadata=metadata, output=output
+    )
 
 
 # ── Memory: delete ────────────────────────────────────────────────────────
@@ -597,42 +564,49 @@ def delete(
     # ── Validate mutual exclusion ────────────────────────────────────
     modes = sum([memory_id is not None, all_, entity])
     if modes > 1:
-        print_error(
-            err_console,
-            "Only one of memory ID, --all, or --entity may be used at a time.",
-        )
-        raise typer.Exit(1)
+        raise InputError("Only one of memory ID, --all, or --entity may be used at a time.")
     if modes == 0:
-        print_error(
-            err_console,
+        raise InputError(
             "Provide a memory ID, --all, or --entity.",
             hint="Run 'mem0 delete --help' for usage.",
         )
-        raise typer.Exit(1)
 
     # ── Dispatch ─────────────────────────────────────────────────────
     if memory_id is not None:
         _fire_telemetry("delete", {"delete_mode": "single"})
         from mem0_cli.commands.memory import cmd_delete
 
-        backend = _get_backend(api_key, base_url)
-        cmd_delete(backend, memory_id, dry_run=dry_run, force=force, output=output)
+        backend, config = _get_backend_and_config(api_key, base_url)
+        cmd_delete(
+            backend, memory_id, config=config, dry_run=dry_run, force=force, output=output
+        )
 
     elif all_:
         _fire_telemetry("delete", {"delete_mode": "all"})
         from mem0_cli.commands.memory import cmd_delete_all
 
         backend, config = _get_backend_and_config(api_key, base_url)
-        ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id, app_id=app_id, run_id=run_id)
-        cmd_delete_all(backend, force=force, dry_run=dry_run, all_=project, **ids, output=output)
+        cmd_delete_all(
+            backend,
+            config=config,
+            force=force,
+            dry_run=dry_run,
+            all_project=project,
+            user_id=user_id,
+            agent_id=agent_id,
+            app_id=app_id,
+            run_id=run_id,
+            output=output,
+        )
 
     else:  # --entity
         _fire_telemetry("delete", {"delete_mode": "entity"})
         from mem0_cli.commands.entities import cmd_entities_delete
 
-        backend = _get_backend(api_key, base_url)
+        backend, config = _get_backend_and_config(api_key, base_url)
         cmd_entities_delete(
             backend,
+            config=config,
             user_id=user_id,
             agent_id=agent_id,
             app_id=app_id,
@@ -722,8 +696,8 @@ def entity_list(
     """
     from mem0_cli.commands.entities import cmd_entities_list
 
-    backend = _get_backend(api_key, base_url)
-    cmd_entities_list(backend, entity_type, output=output)
+    backend, config = _get_backend_and_config(api_key, base_url)
+    cmd_entities_list(backend, entity_type, config=config, output=output)
 
 
 @entity_app.command("delete")
@@ -762,9 +736,10 @@ def entity_delete(
     """
     from mem0_cli.commands.entities import cmd_entities_delete
 
-    backend = _get_backend(api_key, base_url)
+    backend, config = _get_backend_and_config(api_key, base_url)
     cmd_entities_delete(
         backend,
+        config=config,
         user_id=user_id,
         agent_id=agent_id,
         app_id=app_id,
@@ -806,8 +781,8 @@ def event_list(
     """
     from mem0_cli.commands.events_cmd import cmd_event_list
 
-    backend = _get_backend(api_key, base_url)
-    cmd_event_list(backend, output=output)
+    backend, config = _get_backend_and_config(api_key, base_url)
+    cmd_event_list(backend, config=config, output=output)
 
 
 @event_app.command("status")
@@ -835,8 +810,8 @@ def event_status(
     """
     from mem0_cli.commands.events_cmd import cmd_event_status
 
-    backend = _get_backend(api_key, base_url)
-    cmd_event_status(backend, event_id, output=output)
+    backend, config = _get_backend_and_config(api_key, base_url)
+    cmd_event_status(backend, event_id, config=config, output=output)
 
 
 # ── Event subgroup ──
@@ -1003,6 +978,7 @@ def status(
     backend, config = _get_backend_and_config(api_key, base_url)
     cmd_status(
         backend,
+        config=config,
         user_id=config.defaults.user_id or None,
         agent_id=config.defaults.agent_id or None,
         output=output,
@@ -1041,8 +1017,9 @@ def import_cmd(
     from mem0_cli.commands.utils import cmd_import
 
     backend, config = _get_backend_and_config(api_key, base_url)
-    ids = _resolve_ids(config, user_id=user_id, agent_id=agent_id)
-    cmd_import(backend, file_path, user_id=ids["user_id"], agent_id=ids["agent_id"], output=output)
+    cmd_import(
+        backend, file_path, config=config, user_id=user_id, agent_id=agent_id, output=output
+    )
 
 
 # ── Help (machine-readable) ──────────────────────────────────────────────
@@ -1318,7 +1295,13 @@ def main() -> None:
         sys.argv = [sys.argv[0]] + [a for a in argv_rest if a not in _global_flags]
 
     try:
-        app()
+        try:
+            app()
+        except CLIError as exc:
+            from mem0_cli.core.wrapper import _render_cli_error_shim
+
+            _render_cli_error_shim(exc)
+            raise typer.Exit(exc.exit_code) from None
     finally:
         # Surface any unclaimed Agent Mode notice once per command, after the
         # primary output. In JSON/agent mode the notice is folded into the

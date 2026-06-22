@@ -2,13 +2,12 @@ from typing import Dict, List, Optional
 
 from mem0.configs.llms.base import BaseLlmConfig
 from mem0.llms.base import LLMBase
-from mem0.utils.optional_deps import optional_import
 
-optional_import("langchain")
-
-from langchain.chat_models.base import BaseChatModel  # noqa: E402
-from langchain_core.messages import AIMessage  # noqa: E402
-
+try:
+    from langchain.chat_models.base import BaseChatModel
+    from langchain_core.messages import AIMessage
+except ImportError:
+    raise ImportError("langchain is not installed. Please install it using `pip install langchain`")
 
 
 class LangchainLLM(LLMBase):

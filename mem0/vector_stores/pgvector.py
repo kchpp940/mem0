@@ -7,11 +7,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import optional_import
-from mem0.vector_stores.base import VectorStoreBase
-
-optional_import("pgvector")
-
+# Try to import psycopg (psycopg3) first, then fall back to psycopg2
 try:
     from psycopg import sql
     from psycopg.types.json import Json
@@ -20,12 +16,20 @@ try:
     logger = logging.getLogger(__name__)
     logger.info("Using psycopg (psycopg3) with ConnectionPool for PostgreSQL connections")
 except ImportError:
-    from psycopg2 import sql  # noqa: E402
-    from psycopg2.extras import Json, execute_values  # noqa: E402
-    from psycopg2.pool import ThreadedConnectionPool as ConnectionPool  # noqa: E402
-    PSYCOPG_VERSION = 2
-    logger = logging.getLogger(__name__)
-    logger.info("Using psycopg2 with ThreadedConnectionPool for PostgreSQL connections")
+    try:
+        from psycopg2 import sql
+        from psycopg2.extras import Json, execute_values
+        from psycopg2.pool import ThreadedConnectionPool as ConnectionPool
+        PSYCOPG_VERSION = 2
+        logger = logging.getLogger(__name__)
+        logger.info("Using psycopg2 with ThreadedConnectionPool for PostgreSQL connections")
+    except ImportError:
+        raise ImportError(
+            "Neither 'psycopg' nor 'psycopg2' library is available. "
+            "Please install one of them using 'pip install psycopg[pool]' or 'pip install psycopg2'"
+        )
+
+from mem0.vector_stores.base import VectorStoreBase
 
 logger = logging.getLogger(__name__)
 

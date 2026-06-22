@@ -3,12 +3,14 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import optional_import
+try:
+    from langchain_community.vectorstores import VectorStore
+except ImportError:
+    raise ImportError(
+        "The 'langchain_community' library is required. Please install it using 'pip install langchain_community'."
+    )
+
 from mem0.vector_stores.base import VectorStoreBase
-
-optional_import("langchain_vs")
-
-from langchain_community.vectorstores import VectorStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

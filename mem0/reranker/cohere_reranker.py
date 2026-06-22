@@ -1,13 +1,13 @@
 import os
-from typing import Any, Dict, List
+from typing import List, Dict, Any
 
 from mem0.reranker.base import BaseReranker
-from mem0.utils.optional_deps import optional_import
 
-optional_import("cohere_reranker")
-
-import cohere  # noqa: E402
-
+try:
+    import cohere
+    COHERE_AVAILABLE = True
+except ImportError:
+    COHERE_AVAILABLE = False
 
 
 class CohereReranker(BaseReranker):
@@ -20,6 +20,9 @@ class CohereReranker(BaseReranker):
         Args:
             config: CohereRerankerConfig object with configuration parameters
         """
+        if not COHERE_AVAILABLE:
+            raise ImportError("cohere package is required for CohereReranker. Install with: pip install cohere")
+        
         self.config = config
         self.api_key = config.api_key or os.getenv("COHERE_API_KEY")
         if not self.api_key:

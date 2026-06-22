@@ -2,15 +2,12 @@ from typing import Any, ClassVar, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from chromadb.api.client import Client
-except ImportError:
-    raise make_import_error("chroma") from None
-
 
 class ChromaDbConfig(BaseModel):
+    try:
+        from chromadb.api.client import Client
+    except ImportError:
+        raise ImportError("The 'chromadb' library is required. Please install it using 'pip install chromadb'.")
     Client: ClassVar[type] = Client
 
     collection_name: str = Field("mem0", description="Default name for the collection/database")

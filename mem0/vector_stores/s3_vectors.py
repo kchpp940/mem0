@@ -4,14 +4,13 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
 
-optional_import("s3_vectors")
-
-import boto3  # noqa: E402
-from botocore.exceptions import ClientError  # noqa: E402
-
+try:
+    import boto3
+    from botocore.exceptions import ClientError
+except ImportError:
+    raise ImportError("The 'boto3' library is required. Please install it using 'pip install boto3'.")
 
 logger = logging.getLogger(__name__)
 

@@ -2,14 +2,15 @@ import json
 import os
 from typing import Literal, Optional
 
+try:
+    import boto3
+except ImportError:
+    raise ImportError("The 'boto3' library is required. Please install it using 'pip install boto3'.")
+
+import numpy as np
+
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
-from mem0.utils.optional_deps import optional_import
-
-optional_import("aws_bedrock_emb")
-
-import boto3  # noqa: E402
-import numpy as np  # noqa: E402
 
 
 class AWSBedrockEmbedding(EmbeddingBase):

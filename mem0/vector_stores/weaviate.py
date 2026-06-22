@@ -5,16 +5,19 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import optional_import
+try:
+    import weaviate
+except ImportError:
+    raise ImportError(
+        "The 'weaviate' library is required. Please install it using 'pip install weaviate-client weaviate'."
+    )
+
+import weaviate.classes.config as wvcc
+from weaviate.classes.init import AdditionalConfig, Auth, Timeout
+from weaviate.classes.query import Filter, MetadataQuery
+from weaviate.util import get_valid_uuid
+
 from mem0.vector_stores.base import VectorStoreBase
-
-optional_import("weaviate")
-
-import weaviate  # noqa: E402
-import weaviate.classes.config as wvcc  # noqa: E402
-from weaviate.classes.init import AdditionalConfig, Auth, Timeout  # noqa: E402
-from weaviate.classes.query import Filter, MetadataQuery  # noqa: E402
-from weaviate.util import get_valid_uuid  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

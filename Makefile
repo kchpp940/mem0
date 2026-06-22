@@ -1,11 +1,11 @@
-.PHONY: format sort lint check-deps
+.PHONY: format sort lint
 
 # Variables
 ISORT_OPTIONS = --profile black
 PROJECT_NAME := mem0ai
 
 # Default target
-all: format sort lint check-deps
+all: format sort lint
 
 install:
 	hatch env create
@@ -26,10 +26,6 @@ sort:
 # Lint code with ruff
 lint:
 	hatch run lint
-
-# Validate optional dependency registry against pyproject.toml and factory mappings
-check-deps:
-	python mem0/utils/optional_deps.py
 
 docs:
 	cd docs && mintlify dev

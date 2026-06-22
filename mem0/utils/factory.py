@@ -18,33 +18,15 @@ from mem0.configs.rerankers.base import BaseRerankerConfig
 from mem0.configs.rerankers.cohere import CohereRerankerConfig
 from mem0.configs.rerankers.huggingface import HuggingFaceRerankerConfig
 from mem0.configs.rerankers.llm import LLMRerankerConfig
-from mem0.configs.rerankers.sentence_transformer import (
-    SentenceTransformerRerankerConfig,
-)
+from mem0.configs.rerankers.sentence_transformer import SentenceTransformerRerankerConfig
 from mem0.configs.rerankers.zero_entropy import ZeroEntropyRerankerConfig
 from mem0.embeddings.mock import MockEmbeddings
-from mem0.utils.optional_deps import build_factory_dep_keys, make_import_error
-
-_FACTORY_DEP_KEYS: Dict[str, Dict[str, str]] = build_factory_dep_keys()
 
 
-def load_class(class_type, category: str, provider_name: Optional[str] = None):
+def load_class(class_type):
     module_path, class_name = class_type.rsplit(".", 1)
-    try:
-        module = importlib.import_module(module_path)
-    except ImportError:
-        dep_key = None
-        if provider_name:
-            cat_map = _FACTORY_DEP_KEYS.get(category, {})
-            dep_key = cat_map.get(provider_name)
-        if dep_key:
-            raise make_import_error(dep_key) from None
-        raise
+    module = importlib.import_module(module_path)
     return getattr(module, class_name)
-
-
-def get_factory_dep_keys() -> Dict[str, Dict[str, str]]:
-    return {cat: dict(m) for cat, m in _FACTORY_DEP_KEYS.items()}
 
 
 class LlmFactory:
@@ -95,7 +77,7 @@ class LlmFactory:
             raise ValueError(f"Unsupported Llm provider: {provider_name}")
 
         class_type, config_class = cls.provider_to_class[provider_name]
-        llm_class = load_class(class_type, "llm", provider_name)
+        llm_class = load_class(class_type)
 
         # Handle configuration
         if config is None:
@@ -177,7 +159,7 @@ class EmbedderFactory:
             return MockEmbeddings()
         class_type = cls.provider_to_class.get(provider_name)
         if class_type:
-            embedder_instance = load_class(class_type, "embedding", provider_name)
+            embedder_instance = load_class(class_type)
             base_config = BaseEmbedderConfig(**config)
             return embedder_instance(base_config)
         else:
@@ -218,7 +200,7 @@ class VectorStoreFactory:
         if class_type:
             if not isinstance(config, dict):
                 config = config.model_dump()
-            vector_store_instance = load_class(class_type, "vector_store", provider_name)
+            vector_store_instance = load_class(class_type)
             return vector_store_instance(**config)
         else:
             raise ValueError(f"Unsupported VectorStore provider: {provider_name}")
@@ -277,6 +259,10 @@ class RerankerFactory:
         elif not isinstance(config, BaseRerankerConfig):
             raise ValueError(f"Config must be a {config_class.__name__} instance or dict")
 
-        reranker_class = load_class(class_path, "reranker", provider_name)
+        # Import and create the reranker class
+        try:
+            reranker_class = load_class(class_path)
+        except (ImportError, AttributeError) as e:
+            raise ImportError(f"Could not import reranker for provider '{provider_name}': {e}")
 
         return reranker_class(config)

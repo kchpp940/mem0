@@ -1,15 +1,13 @@
-import json
 import os
-from typing import Any, Dict, Optional
-
-from mem0.utils.optional_deps import make_import_error
+import json
+from typing import Optional, Dict, Any
 
 try:
-    import google.auth.credentials
-    from google.auth import default
     from google.oauth2 import service_account
+    from google.auth import default
+    import google.auth.credentials
 except ImportError:
-    raise make_import_error("gemini") from None
+    raise ImportError("google-auth is required for GCP authentication. Install with: pip install google-auth")
 
 
 class GCPAuthenticator:

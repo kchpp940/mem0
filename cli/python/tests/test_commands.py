@@ -50,6 +50,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -76,6 +82,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -101,6 +113,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -127,6 +145,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -153,6 +177,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -180,6 +210,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
             patch("mem0_cli.commands.memory._stdin_is_piped", return_value=False),
             pytest.raises((SystemExit, TyperExit)),
         ):
@@ -206,6 +242,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
             pytest.raises((SystemExit, TyperExit)),
         ):
             cmd_add(
@@ -233,6 +275,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -258,6 +306,12 @@ class TestAddCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -295,6 +349,12 @@ class TestAddDeduplicatesPending:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -345,6 +405,12 @@ class TestSearchCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_search(
                 mock_backend,
@@ -370,6 +436,12 @@ class TestSearchCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_search(
                 mock_backend,
@@ -395,6 +467,12 @@ class TestSearchCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_search(
                 mock_backend,
@@ -421,6 +499,12 @@ class TestSearchCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_search(
                 mock_backend,
@@ -446,6 +530,12 @@ class TestSearchCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_search(
                 mock_backend,
@@ -472,6 +562,12 @@ class TestGetCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_get(mock_backend, "abc-123-def-456", output="text")
         output = buf.getvalue()
@@ -484,6 +580,12 @@ class TestGetCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_get(mock_backend, "abc-123-def-456", output="json")
         output = buf.getvalue()
@@ -497,6 +599,12 @@ class TestListCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_list(
                 mock_backend,
@@ -520,6 +628,12 @@ class TestListCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_list(
                 mock_backend,
@@ -544,6 +658,12 @@ class TestListCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_list(
                 mock_backend,
@@ -569,6 +689,12 @@ class TestUpdateCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_update(mock_backend, "abc-123", "New text", metadata=None, output="text")
         output = buf.getvalue()
@@ -580,6 +706,12 @@ class TestUpdateCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_update(mock_backend, "abc-123", "New text", metadata=None, output="json")
         output = buf.getvalue()
@@ -593,6 +725,12 @@ class TestDeleteCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete(mock_backend, "abc-123", output="text")
         output = buf.getvalue()
@@ -604,6 +742,12 @@ class TestDeleteCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete(mock_backend, "abc-123-def-456", dry_run=True, output="text")
         output = buf.getvalue()
@@ -618,6 +762,12 @@ class TestDeleteAllCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete_all(
                 mock_backend,
@@ -637,6 +787,12 @@ class TestDeleteAllCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete_all(
                 mock_backend,
@@ -658,6 +814,12 @@ class TestDeleteAllCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete_all(
                 mock_backend,
@@ -684,6 +846,12 @@ class TestDeleteAllCommand:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete_all(
                 mock_backend,
@@ -706,6 +874,12 @@ class TestStatusCommand:
         with (
             patch("mem0_cli.commands.utils.console", console),
             patch("mem0_cli.commands.utils.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_status(mock_backend)
         output = buf.getvalue()
@@ -722,6 +896,12 @@ class TestStatusCommand:
         with (
             patch("mem0_cli.commands.utils.console", console),
             patch("mem0_cli.commands.utils.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_status(mock_backend)
         output = buf.getvalue()
@@ -734,6 +914,12 @@ class TestStatusCommand:
         with (
             patch("mem0_cli.commands.utils.console", console),
             patch("mem0_cli.commands.utils.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_status(mock_backend, output="json")
         output = buf.getvalue()
@@ -754,6 +940,12 @@ class TestImportCommand:
         with (
             patch("mem0_cli.commands.utils.console", console),
             patch("mem0_cli.commands.utils.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_import(mock_backend, str(file_path), user_id="alice", agent_id=None)
         assert mock_backend.add.call_count == 2
@@ -764,6 +956,12 @@ class TestImportCommand:
         with (
             patch("mem0_cli.commands.utils.console", console),
             patch("mem0_cli.commands.utils.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
             pytest.raises((SystemExit, TyperExit)),
         ):
             cmd_import(mock_backend, "/nonexistent/file.json", user_id=None, agent_id=None)
@@ -777,6 +975,12 @@ class TestImportCommand:
         with (
             patch("mem0_cli.commands.utils.console", console),
             patch("mem0_cli.commands.utils.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_import(mock_backend, str(file_path), user_id="alice", agent_id=None, output="json")
         output = buf.getvalue()
@@ -790,6 +994,12 @@ class TestEntitiesListCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_entities_list(mock_backend, "users", output="table")
         output = buf.getvalue()
@@ -801,6 +1011,12 @@ class TestEntitiesListCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
             pytest.raises((SystemExit, TyperExit)),
         ):
             cmd_entities_list(mock_backend, "invalid", output="table")
@@ -811,6 +1027,12 @@ class TestEntitiesListCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_entities_list(mock_backend, "users", output="json")
         output = buf.getvalue()
@@ -830,6 +1052,12 @@ class TestConfigCommands:
         with (
             patch("mem0_cli.commands.config_cmd.console", console),
             patch("mem0_cli.commands.config_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_config_show()
         output = buf.getvalue()
@@ -849,6 +1077,12 @@ class TestConfigCommands:
         with (
             patch("mem0_cli.commands.config_cmd.console", console),
             patch("mem0_cli.commands.config_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_config_show(output="json")
         output = buf.getvalue()
@@ -861,6 +1095,12 @@ class TestConfigCommands:
         with (
             patch("mem0_cli.commands.config_cmd.console", console1),
             patch("mem0_cli.commands.config_cmd.err_console", err_console1),
+            patch("mem0_cli.core.console.stdout_console", console1),
+            patch("mem0_cli.core.console.err_console", err_console1),
+            patch("mem0_cli.core.renderers.console", console1),
+            patch("mem0_cli.core.renderers._core_err_console", err_console1),
+            patch("mem0_cli.core.wrapper.stdout_console", console1),
+            patch("mem0_cli.core.wrapper.err_console", err_console1),
         ):
             cmd_config_set("platform.base_url", "https://custom.api.mem0.ai")
 
@@ -869,6 +1109,12 @@ class TestConfigCommands:
         with (
             patch("mem0_cli.commands.config_cmd.console", console2),
             patch("mem0_cli.commands.config_cmd.err_console", err_console2),
+            patch("mem0_cli.core.console.stdout_console", console2),
+            patch("mem0_cli.core.console.err_console", err_console2),
+            patch("mem0_cli.core.renderers.console", console2),
+            patch("mem0_cli.core.renderers._core_err_console", err_console2),
+            patch("mem0_cli.core.wrapper.stdout_console", console2),
+            patch("mem0_cli.core.wrapper.err_console", err_console2),
         ):
             cmd_config_get("platform.base_url")
         output = buf2.getvalue()
@@ -886,6 +1132,12 @@ class TestConfigCommands:
         with (
             patch("mem0_cli.commands.config_cmd.console", console),
             patch("mem0_cli.commands.config_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_config_show()
         output = buf.getvalue()
@@ -900,6 +1152,12 @@ class TestEntitiesDeleteCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_entities_delete(
                 mock_backend,
@@ -922,6 +1180,12 @@ class TestEntitiesDeleteCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_entities_delete(
                 mock_backend,
@@ -944,6 +1208,12 @@ class TestEntitiesDeleteCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
             pytest.raises((SystemExit, TyperExit)),
         ):
             cmd_entities_delete(
@@ -962,6 +1232,12 @@ class TestEntitiesDeleteCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_entities_delete(
                 mock_backend,
@@ -981,6 +1257,12 @@ class TestEntitiesDeleteCommand:
         with (
             patch("mem0_cli.commands.entities.console", console),
             patch("mem0_cli.commands.entities.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_entities_delete(
                 mock_backend,
@@ -1004,6 +1286,12 @@ class TestEventCommands:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_list(mock_backend, output="table")
         out = buf.getvalue()
@@ -1017,6 +1305,12 @@ class TestEventCommands:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_list(mock_backend, output="json")
         out = buf.getvalue()
@@ -1030,6 +1324,12 @@ class TestEventCommands:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_list(mock_backend, output="table")
         out = buf.getvalue()
@@ -1041,6 +1341,12 @@ class TestEventCommands:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_status(mock_backend, "evt-abc-123-def-456", output="text")
         out = buf.getvalue()
@@ -1053,6 +1359,12 @@ class TestEventCommands:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_status(mock_backend, "evt-abc-123-def-456", output="json")
         out = buf.getvalue()
@@ -1083,6 +1395,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -1115,6 +1433,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -1144,6 +1468,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_search(
                 mock_backend,
@@ -1176,6 +1506,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_list(
                 mock_backend,
@@ -1206,6 +1542,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_get(mock_backend, "abc-123-def-456", output="text")
         data = json.loads(buf.getvalue())
@@ -1224,6 +1566,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_update(mock_backend, "abc-123", "Updated content", metadata=None, output="text")
         data = json.loads(buf.getvalue())
@@ -1241,6 +1589,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_delete(mock_backend, "abc-123-def-456", output="text")
         data = json.loads(buf.getvalue())
@@ -1258,6 +1612,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_list(mock_backend, output="table")
         data = json.loads(buf.getvalue())
@@ -1282,6 +1642,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.events_cmd.console", console),
             patch("mem0_cli.commands.events_cmd.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_event_status(mock_backend, "evt-abc-123-def-456", output="text")
         data = json.loads(buf.getvalue())
@@ -1307,6 +1673,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
             patch("sys.stdout", captured_stdout),
             pytest.raises((SystemExit, TyperExit)),
         ):
@@ -1326,6 +1698,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console),
         ):
             cmd_add(
                 mock_backend,
@@ -1360,6 +1738,12 @@ class TestAgentMode:
         with (
             patch("mem0_cli.commands.memory.console", console),
             patch("mem0_cli.commands.memory.err_console", err_console_buf),
+            patch("mem0_cli.core.console.stdout_console", console),
+            patch("mem0_cli.core.console.err_console", err_console_buf),
+            patch("mem0_cli.core.renderers.console", console),
+            patch("mem0_cli.core.renderers._core_err_console", err_console_buf),
+            patch("mem0_cli.core.wrapper.stdout_console", console),
+            patch("mem0_cli.core.wrapper.err_console", err_console_buf),
         ):
             cmd_search(
                 mock_backend,

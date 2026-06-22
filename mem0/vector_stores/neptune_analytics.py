@@ -5,12 +5,12 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import optional_import
+try:
+    from langchain_aws import NeptuneAnalyticsGraph
+except ImportError:
+    raise ImportError("langchain_aws is not installed. Please install it using pip install langchain_aws")
+
 from mem0.vector_stores.base import VectorStoreBase
-
-optional_import("neptune")
-
-from langchain_aws import NeptuneAnalyticsGraph  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

@@ -6,29 +6,30 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from mem0.memory.utils import extract_json
-from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
 
-optional_import("azure_ai_search")
-
-from azure.core.credentials import AzureKeyCredential  # noqa: E402
-from azure.core.exceptions import ResourceNotFoundError  # noqa: E402
-from azure.identity import DefaultAzureCredential  # noqa: E402
-from azure.search.documents import SearchClient  # noqa: E402
-from azure.search.documents.indexes import SearchIndexClient  # noqa: E402
-from azure.search.documents.indexes.models import (  # noqa: E402
-    BinaryQuantizationCompression,
-    HnswAlgorithmConfiguration,
-    ScalarQuantizationCompression,
-    SearchField,
-    SearchFieldDataType,
-    SearchIndex,
-    SimpleField,
-    VectorSearch,
-    VectorSearchProfile,
-)  # noqa: E402
-from azure.search.documents.models import VectorizedQuery  # noqa: E402
-
+try:
+    from azure.core.credentials import AzureKeyCredential
+    from azure.core.exceptions import ResourceNotFoundError
+    from azure.identity import DefaultAzureCredential
+    from azure.search.documents import SearchClient
+    from azure.search.documents.indexes import SearchIndexClient
+    from azure.search.documents.indexes.models import (
+        BinaryQuantizationCompression,
+        HnswAlgorithmConfiguration,
+        ScalarQuantizationCompression,
+        SearchField,
+        SearchFieldDataType,
+        SearchIndex,
+        SimpleField,
+        VectorSearch,
+        VectorSearchProfile,
+    )
+    from azure.search.documents.models import VectorizedQuery
+except ImportError:
+    raise ImportError(
+        "The 'azure-search-documents' library is required. Please install it using 'pip install azure-search-documents==11.5.2'."
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +89,7 @@ class AzureAISearch(VectorStoreBase):
             endpoint=f"https://{service_name}.search.windows.net",
             index_name=self.index_name,
             credential=credential,
-        )  # noqa: E402
+        )
         self.index_client = SearchIndexClient(
             endpoint=f"https://{service_name}.search.windows.net",
             credential=credential,

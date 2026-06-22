@@ -2,15 +2,14 @@ from typing import Any, ClassVar, Dict
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from langchain_community.vectorstores import VectorStore
-except ImportError:
-    raise make_import_error("langchain_vs") from None
-
 
 class LangchainConfig(BaseModel):
+    try:
+        from langchain_community.vectorstores import VectorStore
+    except ImportError:
+        raise ImportError(
+            "The 'langchain_community' library is required. Please install it using 'pip install langchain_community'."
+        )
     VectorStore: ClassVar[type] = VectorStore
 
     client: VectorStore = Field(description="Existing VectorStore instance")

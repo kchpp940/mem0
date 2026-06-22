@@ -1,15 +1,15 @@
 import os
 from typing import Dict, List, Optional, Union
 
+try:
+    from google import genai
+    from google.genai import types
+except ImportError:
+    raise ImportError("The 'google-genai' library is required. Please install it using 'pip install google-genai'.")
+
 from mem0.configs.llms.base import BaseLlmConfig
 from mem0.configs.llms.gemini import GeminiConfig
 from mem0.llms.base import LLMBase
-from mem0.utils.optional_deps import optional_import
-
-optional_import("gemini")
-
-from google import genai  # noqa: E402
-from google.genai import types  # noqa: E402
 
 
 class GeminiLLM(LLMBase):

@@ -1,168 +1,91 @@
-"""Entity management commands."""
+"""Entity management commands (layered architecture)."""
 
 from __future__ import annotations
 
-import time as _time
-
-import typer
 from rich.console import Console
-from rich.table import Table
 
-from mem0_cli.backend.base import Backend
-from mem0_cli.branding import (
-    ACCENT_COLOR,
-    BRAND_COLOR,
-    DIM_COLOR,
-    print_error,
-    print_info,
-    print_success,
-    timed_status,
+from mem0_cli.core import renderers
+from mem0_cli.core.errors import InputError
+from mem0_cli.core.requests import build_entity_delete_payload
+from mem0_cli.core.wrapper import (
+    CommandContext,
+    build_command_context,
+    confirm_destructive,
+    execute,
 )
-from mem0_cli.output import format_agent_envelope, format_json
 
+# ── Backwards-compatible module-level consoles.  Legacy code and tests patch
+# these names; rendering actually flows through wrapper/renderers consoles now.
 console = Console()
 err_console = Console(stderr=True)
 
+_VALID_ENTITY_TYPES = {"users", "agents", "apps", "runs"}
 
-def cmd_entities_list(backend: Backend, entity_type: str, *, output: str) -> None:
-    """List entities of a given type."""
-    from mem0_cli.state import is_agent_mode, set_current_command
 
-    set_current_command("entity list")
-    if is_agent_mode():
-        output = "agent"
-    valid_types = {"users", "agents", "apps", "runs"}
-    if entity_type not in valid_types:
-        print_error(
-            err_console, f"Invalid entity type: {entity_type}. Use: {', '.join(valid_types)}"
-        )
-        raise typer.Exit(1)
+def cmd_entities_list(
+    backend,
+    entity_type: str,
+    *,
+    config=None,
+    output: str = "table",
+) -> None:
+    ctx = build_command_context(
+        command_name="entity list",
+        backend=backend,
+        config=config,
+        output=output,
+    )
 
-    _start = _time.perf_counter()
-    with timed_status(err_console, f"Fetching {entity_type}...") as _ts:
-        try:
-            results = backend.entities(entity_type)
-        except Exception as e:
-            print_error(err_console, str(e), hint="This feature may require the mem0 Platform.")
-            raise typer.Exit(1) from None
-    _elapsed = _time.perf_counter() - _start
+    def action(_ctx: CommandContext):
+        if entity_type not in _VALID_ENTITY_TYPES:
+            raise InputError(
+                f"Invalid entity type: {entity_type}. Use: {', '.join(sorted(_VALID_ENTITY_TYPES))}"
+            )
+        results = _ctx.backend.entities(entity_type)
+        renderers.render_entity_list(_ctx.render_ctx, entity_type, results)
 
-    if output == "agent":
-        format_agent_envelope(
-            console,
-            command="entity list",
-            data=results,
-            count=len(results),
-            duration_ms=int(_elapsed * 1000),
-        )
-        return
-
-    if output == "json":
-        format_json(console, results)
-        return
-
-    if not results:
-        print_info(console, f"No {entity_type} found.")
-        return
-
-    table = Table(border_style=BRAND_COLOR, header_style=f"bold {ACCENT_COLOR}", padding=(0, 1))
-    table.add_column("Name / ID", style="bold")
-    table.add_column("Created", max_width=12)
-
-    for entity in results:
-        name = entity.get("name", entity.get("id", "—"))
-        created = str(entity.get("created_at", "—"))[:10]
-        table.add_row(str(name), created)
-
-    console.print()
-    console.print(table)
-    console.print(f"  [{DIM_COLOR}]{len(results)} {entity_type} ({_elapsed:.2f}s)[/]")
-    console.print()
+    execute(ctx, action, spinner=f"Fetching {entity_type}...")
 
 
 def cmd_entities_delete(
-    backend: Backend,
+    backend,
     *,
-    user_id: str | None,
-    agent_id: str | None,
-    app_id: str | None,
-    run_id: str | None,
-    force: bool,
+    config=None,
+    user_id: str | None = None,
+    agent_id: str | None = None,
+    app_id: str | None = None,
+    run_id: str | None = None,
+    force: bool = False,
     dry_run: bool = False,
-    output: str,
+    output: str = "text",
 ) -> None:
-    """Delete an entity and all its memories (cascade delete)."""
-    from mem0_cli.state import is_agent_mode, set_current_command
+    ctx = build_command_context(
+        command_name="entity delete",
+        backend=backend,
+        config=config,
+        output=output,
+        user_id=user_id,
+        agent_id=agent_id,
+        app_id=app_id,
+        run_id=run_id,
+    )
 
-    set_current_command("entity delete")
-    if is_agent_mode():
-        output = "agent"
-        if not force:
-            print_error(err_console, "Destructive operation requires --force in agent mode.")
-            raise typer.Exit(1)
-    if not any([user_id, agent_id, app_id, run_id]):
-        print_error(
-            err_console, "Provide at least one of --user-id, --agent-id, --app-id, --run-id."
+    def action(_ctx: CommandContext):
+        # Validate scope & build payload (raises InputError if no IDs)
+        payload = build_entity_delete_payload(scope=_ctx.ids)
+
+        if dry_run:
+            # Bypass backend call; renderer handles text/json/quiet output
+            renderers.render_entity_delete(_ctx.render_ctx, {}, dry_run=True)
+            return
+
+        label = _ctx.scope.scope_label()
+        confirm_destructive(
+            _ctx,
+            f"Delete entity {label} AND all its memories?",
+            force=force,
         )
-        raise typer.Exit(1)
+        result = _ctx.backend.delete_entities(**payload)
+        renderers.render_entity_delete(_ctx.render_ctx, result)
 
-    scope_parts = []
-    if user_id:
-        scope_parts.append(f"user={user_id}")
-    if agent_id:
-        scope_parts.append(f"agent={agent_id}")
-    if app_id:
-        scope_parts.append(f"app={app_id}")
-    if run_id:
-        scope_parts.append(f"run={run_id}")
-    scope_str = ", ".join(scope_parts)
-
-    if dry_run:
-        print_info(console, f"Would delete entity {scope_str} and all its memories.")
-        print_info(console, "No changes made (dry run).")
-        return
-
-    if not force:
-        confirm = typer.confirm(
-            f"\n  \u26a0  Delete entity {scope_str} AND all its memories? This cannot be undone."
-        )
-        if not confirm:
-            print_info(console, "Cancelled.")
-            raise typer.Exit(0)
-
-    _start = _time.perf_counter()
-    with timed_status(err_console, "Deleting entity...") as _ts:
-        try:
-            result = backend.delete_entities(
-                user_id=user_id,
-                agent_id=agent_id,
-                app_id=app_id,
-                run_id=run_id,
-            )
-        except Exception as e:
-            print_error(err_console, str(e))
-            raise typer.Exit(1) from None
-    _elapsed = _time.perf_counter() - _start
-
-    scope = {
-        k: v
-        for k, v in {
-            "user_id": user_id,
-            "agent_id": agent_id,
-            "app_id": app_id,
-            "run_id": run_id,
-        }.items()
-        if v
-    }
-    if output == "agent":
-        format_agent_envelope(
-            console,
-            command="entity delete",
-            data={"deleted": True},
-            scope=scope or None,
-            duration_ms=int(_elapsed * 1000),
-        )
-    elif output == "json":
-        format_json(console, result)
-    elif output != "quiet":
-        print_success(console, f"Entity deleted with all memories ({_elapsed:.2f}s)")
+    execute(ctx, action, spinner="Deleting entity...")

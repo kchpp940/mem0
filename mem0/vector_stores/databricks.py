@@ -5,31 +5,27 @@ import uuid
 from datetime import date, datetime
 from typing import List, Optional
 
-from pydantic import BaseModel
-
-from mem0.memory.utils import extract_json
-from mem0.utils.optional_deps import optional_import
-from mem0.vector_stores.base import VectorStoreBase
-
-optional_import("databricks")
-
-from databricks.sdk import WorkspaceClient  # noqa: E402
-from databricks.sdk.service.catalog import (  # noqa: E402
+from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.catalog import (
     ColumnInfo,
     ColumnTypeName,
     DataSourceFormat,
     PrimaryKeyConstraint,
     TableConstraint,
     TableType,
-)  # noqa: E402
-from databricks.sdk.service.sql import StatementParameterListItem  # noqa: E402
-from databricks.sdk.service.vectorsearch import (  # noqa: E402
+)
+from databricks.sdk.service.sql import StatementParameterListItem
+from databricks.sdk.service.vectorsearch import (
     DeltaSyncVectorIndexSpecRequest,
     DirectAccessVectorIndexSpec,
     EmbeddingSourceColumn,
     EmbeddingVectorColumn,
     VectorIndexType,
-)  # noqa: E402
+)
+from pydantic import BaseModel
+
+from mem0.memory.utils import extract_json
+from mem0.vector_stores.base import VectorStoreBase
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +191,7 @@ class Databricks(VectorStoreBase):
                     nullable=True,
                     comment="Embedding vector",
                     position=9,
-                )  # noqa: E402
+                )
             )
         self.column_names = [col.name for col in self.columns]
 

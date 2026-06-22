@@ -20,12 +20,12 @@ _lock = threading.Lock()
 
 def _ensure_model_available():
     """Download en_core_web_sm if spaCy is installed but model is missing."""
-    from mem0.utils.optional_deps import make_import_error
-
     try:
         import spacy
     except ImportError:
-        raise make_import_error("spacy") from None
+        raise ImportError(
+            "spaCy is not installed. Install it with: pip install mem0ai[nlp]"
+        )
 
     if not spacy.util.is_package("en_core_web_sm"):
         logger.info("Downloading spaCy model en_core_web_sm...")

@@ -10,19 +10,23 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import optional_import
+try:
+    # Suppress SWIG deprecation warnings from FAISS
+    warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*SwigPy.*")
+    warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigvarlink.*")
+
+    logging.getLogger("faiss").setLevel(logging.WARNING)
+    logging.getLogger("faiss.loader").setLevel(logging.WARNING)
+
+    import faiss
+except ImportError:
+    raise ImportError(
+        "Could not import faiss python package. "
+        "Please install it with `pip install faiss-gpu` (for CUDA supported GPU) "
+        "or `pip install faiss-cpu` (depending on Python version)."
+    )
+
 from mem0.vector_stores.base import VectorStoreBase
-
-optional_import("faiss")
-
-import faiss  # noqa: E402
-
-warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*SwigPy.*")
-warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigvarlink.*")
-
-logging.getLogger("faiss").setLevel(logging.WARNING)
-logging.getLogger("faiss.loader").setLevel(logging.WARNING)
-
 
 logger = logging.getLogger(__name__)
 

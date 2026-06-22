@@ -25,32 +25,79 @@ from mem0.configs.rerankers.zero_entropy import ZeroEntropyRerankerConfig
 from mem0.embeddings.mock import MockEmbeddings
 from mem0.utils.optional_deps import make_import_error
 
-_FACTORY_PROVIDER_TO_DEP_KEY = {
-    "ollama": "ollama",
-    "groq": "groq",
-    "together": "together",
-    "litellm": "litellm",
-    "anthropic": "anthropic",
-    "gemini": "gemini",
-    "aws_bedrock": "aws_bedrock",
-    "langchain": "langchain",
-    "cohere": "cohere_reranker",
-    "sentence_transformer": "sentence_transformer",
-    "zero_entropy": "zero_entropy",
-    "huggingface": "huggingface_reranker",
+_FACTORY_DEP_KEYS: Dict[str, Dict[str, str]] = {
+    "llm": {
+        "ollama": "ollama",
+        "groq": "groq",
+        "together": "together",
+        "litellm": "litellm",
+        "anthropic": "anthropic",
+        "gemini": "gemini",
+        "aws_bedrock": "aws_bedrock",
+        "langchain": "langchain",
+    },
+    "embedding": {
+        "ollama": "ollama_emb",
+        "huggingface": "huggingface",
+        "azure_openai": "azure_openai_emb",
+        "gemini": "gemini_emb",
+        "vertexai": "vertexai_emb",
+        "together": "together_emb",
+        "aws_bedrock": "aws_bedrock_emb",
+        "fastembed": "fastembed",
+        "langchain": "langchain_emb",
+    },
+    "vector_store": {
+        "chroma": "chroma",
+        "pgvector": "pgvector",
+        "milvus": "milvus",
+        "upstash_vector": "upstash_vector",
+        "pinecone": "pinecone",
+        "weaviate": "weaviate",
+        "supabase": "supabase",
+        "azure_ai_search": "azure_ai_search",
+        "azure_mysql": "azure_mysql",
+        "mongodb": "mongodb",
+        "redis": "redis_vs",
+        "valkey": "valkey_vs",
+        "elasticsearch": "elasticsearch_vs",
+        "opensearch": "opensearch",
+        "faiss": "faiss",
+        "cassandra": "cassandra",
+        "databricks": "databricks",
+        "baidu": "baidu",
+        "neptune": "neptune",
+        "turbopuffer": "turbopuffer",
+        "s3_vectors": "s3_vectors",
+        "langchain": "langchain_vs",
+        "vertex_ai_vector_search": "vertex_ai_vector_search",
+    },
+    "reranker": {
+        "cohere": "cohere_reranker",
+        "sentence_transformer": "sentence_transformer",
+        "zero_entropy": "zero_entropy",
+        "huggingface": "huggingface_reranker",
+    },
 }
 
 
-def load_class(class_type, provider_name: Optional[str] = None):
+def load_class(class_type, category: str, provider_name: Optional[str] = None):
     module_path, class_name = class_type.rsplit(".", 1)
     try:
         module = importlib.import_module(module_path)
     except ImportError:
-        dep_key = _FACTORY_PROVIDER_TO_DEP_KEY.get(provider_name) if provider_name else None
+        dep_key = None
+        if provider_name:
+            cat_map = _FACTORY_DEP_KEYS.get(category, {})
+            dep_key = cat_map.get(provider_name)
         if dep_key:
             raise make_import_error(dep_key) from None
         raise
     return getattr(module, class_name)
+
+
+def get_factory_dep_keys() -> Dict[str, Dict[str, str]]:
+    return {cat: dict(m) for cat, m in _FACTORY_DEP_KEYS.items()}
 
 
 class LlmFactory:
@@ -101,7 +148,7 @@ class LlmFactory:
             raise ValueError(f"Unsupported Llm provider: {provider_name}")
 
         class_type, config_class = cls.provider_to_class[provider_name]
-        llm_class = load_class(class_type, provider_name)
+        llm_class = load_class(class_type, "llm", provider_name)
 
         # Handle configuration
         if config is None:
@@ -183,7 +230,7 @@ class EmbedderFactory:
             return MockEmbeddings()
         class_type = cls.provider_to_class.get(provider_name)
         if class_type:
-            embedder_instance = load_class(class_type, provider_name)
+            embedder_instance = load_class(class_type, "embedding", provider_name)
             base_config = BaseEmbedderConfig(**config)
             return embedder_instance(base_config)
         else:
@@ -224,7 +271,7 @@ class VectorStoreFactory:
         if class_type:
             if not isinstance(config, dict):
                 config = config.model_dump()
-            vector_store_instance = load_class(class_type, provider_name)
+            vector_store_instance = load_class(class_type, "vector_store", provider_name)
             return vector_store_instance(**config)
         else:
             raise ValueError(f"Unsupported VectorStore provider: {provider_name}")
@@ -283,6 +330,6 @@ class RerankerFactory:
         elif not isinstance(config, BaseRerankerConfig):
             raise ValueError(f"Config must be a {config_class.__name__} instance or dict")
 
-        reranker_class = load_class(class_path, provider_name)
+        reranker_class = load_class(class_path, "reranker", provider_name)
 
         return reranker_class(config)

@@ -1,4 +1,6 @@
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional
 
 
@@ -30,6 +32,14 @@ def register(
     )
 
 
+def get_all_providers() -> Dict[str, DepInfo]:
+    return dict(_REGISTRY)
+
+
+def get_dep_info(provider: str) -> Optional[DepInfo]:
+    return _REGISTRY.get(provider)
+
+
 def _build_message(info: DepInfo) -> str:
     pip_cmd = " ".join(info.pip_packages)
     parts = [
@@ -41,15 +51,105 @@ def _build_message(info: DepInfo) -> str:
     return " ".join(parts)
 
 
-def get_dep_info(provider: str) -> Optional[DepInfo]:
-    return _REGISTRY.get(provider)
-
-
 def make_import_error(provider: str) -> ImportError:
     info = _REGISTRY.get(provider)
     if info is None:
         return ImportError(f"Unknown provider: {provider}")
     return ImportError(_build_message(info))
+
+
+# ── pyproject.toml extras parsing & validation ────────────────────────
+
+_PIN_RE = re.compile(r"^([A-Za-z0-9_.-]+)")
+
+
+def _normalize_pkg(name: str) -> str:
+    return name.strip().lower().replace("_", "-").replace(".", "-")
+
+
+def _parse_pin(spec: str) -> str:
+    m = _PIN_RE.match(spec.strip())
+    if not m:
+        raise ValueError(f"Cannot parse package spec: {spec!r}")
+    return _normalize_pkg(m.group(1))
+
+
+def load_pyproject_extras(pyproject_path: Optional[str] = None) -> Dict[str, List[str]]:
+    if pyproject_path is None:
+        pyproject_path = str(Path(__file__).resolve().parents[2] / "pyproject.toml")
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        import tomli as tomllib  # type: ignore[no-redef]
+    with open(pyproject_path, "rb") as f:
+        data = tomllib.load(f)
+    raw = data.get("project", {}).get("optional-dependencies", {})
+    result: Dict[str, List[str]] = {}
+    for group, specs in raw.items():
+        result[group] = sorted({_parse_pin(s) for s in specs})
+    return result
+
+
+@dataclass(frozen=True)
+class ValidationIssue:
+    severity: str
+    provider: str
+    message: str
+
+    def __str__(self) -> str:
+        return f"[{self.severity}] {self.provider}: {self.message}"
+
+
+def validate_registry(pyproject_path: Optional[str] = None) -> List[ValidationIssue]:
+    extras_map = load_pyproject_extras(pyproject_path)
+    issues: List[ValidationIssue] = []
+    for provider, info in _REGISTRY.items():
+        if info.extras is None:
+            continue
+        if info.extras not in extras_map:
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    provider,
+                    f"references extras group [{info.extras}] which does not exist in pyproject.toml",
+                )
+            )
+            continue
+        group_pkgs = set(extras_map[info.extras])
+        missing = [pkg for pkg in info.pip_packages if _normalize_pkg(pkg) not in group_pkgs]
+        if missing:
+            issues.append(
+                ValidationIssue(
+                    "warning",
+                    provider,
+                    f"pip_packages {missing} not found in extras group [{info.extras}]",
+                )
+            )
+    return issues
+
+
+def validate_factory_dep_keys(mapping: Dict[str, str], category: str) -> List[ValidationIssue]:
+    issues: List[ValidationIssue] = []
+    for factory_name, dep_key in mapping.items():
+        info = _REGISTRY.get(dep_key)
+        if info is None:
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    factory_name,
+                    f"factory '{category}' maps to unknown dep key '{dep_key}'",
+                )
+            )
+            continue
+        if info.category != category:
+            issues.append(
+                ValidationIssue(
+                    "warning",
+                    factory_name,
+                    f"dep key '{dep_key}' has category '{info.category}' but factory category is '{category}'",
+                )
+            )
+    return issues
 
 
 # ── LLMs ──────────────────────────────────────────────────────────────
@@ -102,8 +202,8 @@ register("vertex_ai_vector_search", "vector_store", ["vertexai"],      "llms",  
 # ── Rerankers ─────────────────────────────────────────────────────────
 register("cohere_reranker",       "reranker", ["cohere"],               "extras",  ["cohere"])
 register("sentence_transformer",  "reranker", ["sentence_transformers"], "extras",  ["sentence-transformers"])
-register("huggingface_reranker",  "reranker", ["transformers", "torch"], "extras", ["transformers", "torch"])
-register("zero_entropy",          "reranker", ["zeroentropy"],          "extras",  ["zeroentropy"])
+register("huggingface_reranker",  "reranker", ["transformers", "torch"], None,      ["transformers", "torch"])
+register("zero_entropy",          "reranker", ["zeroentropy"],          None,      ["zeroentropy"])
 
 # ── Extras / cross-cutting ────────────────────────────────────────────
 register("spacy",              "nlp",  ["spacy"],                       "nlp",    ["spacy"])

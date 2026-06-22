@@ -21,7 +21,7 @@ def _build_database_url() -> str:
     if errors:
         fatal_config_error(errors)
 
-    db = get_env("MEM0_APP_DB_NAME", "mem0_app") or get_env("APP_DB_NAME", "mem0_app")
+    db = get_env("MEM0_APP_DB_NAME") or get_env("APP_DB_NAME", "mem0_app")
     try:
         return build_postgres_url(dbname=db)
     except ConfigValidationError as exc:

@@ -19,7 +19,10 @@ COPY mem0 ./mem0
 RUN pip install -e .[graph]
 
 # Return to app directory and copy server code
-WORKDIR /app
+WORKDIR /app/server
 COPY server .
 
+ENV PYTHONUNBUFFERED=1
+
+ENTRYPOINT ["python", "./entrypoint.py", "--service", "server", "--run-migrations", "--"]
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]

@@ -34,6 +34,7 @@ services:
       - ./.env
     networks:
       - mem0_network
+    working_dir: /app/server
     volumes:
       - ./history:/app/history
       - ..:/app

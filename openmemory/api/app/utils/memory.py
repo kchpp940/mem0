@@ -34,13 +34,7 @@ import os
 import socket
 import sys
 
-from app.database import SessionLocal
-from app.models import Config as ConfigModel
-
-import os
-import sys
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from _env_loader import (
     ConfigError,
@@ -50,6 +44,9 @@ from _env_loader import (
     get_env_int,
     load_env,
 )
+
+from app.database import SessionLocal
+from app.models import Config as ConfigModel
 
 from mem0 import Memory
 

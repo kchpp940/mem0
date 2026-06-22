@@ -8,23 +8,33 @@ Verifies:
   3. Entrypoint pre-flight checks work correctly
   4. /health endpoints return proper responses
   5. Missing secrets / database URLs produce actionable messages, not raw connection errors
+  6. (Optional, --docker) Real containers: compose build/up, wait for healthchecks,
+     verify API/UI/server reachability, diagnose failures with service logs
 
 Usage:
-    # Run all smoke tests (does NOT require docker)
+    # Run all non-Docker smoke tests (fast, no containers needed)
     python scripts/compose_smoke_test.py --all
 
-    # Run specific tests only
+    # Run specific non-Docker tests only
     python scripts/compose_smoke_test.py --env-check
     python scripts/compose_smoke_test.py --config-errors
     python scripts/compose_smoke_test.py --health-endpoints
 
+    # Run REAL container smoke tests (requires Docker)
+    python scripts/compose_smoke_test.py --docker                    # both server + openmemory
+    python scripts/compose_smoke_test.py --docker --stack server     # server stack only
+    python scripts/compose_smoke_test.py --docker --stack openmemory # openmemory stack only
+    python scripts/compose_smoke_test.py --docker --no-teardown      # leave containers running after test
+
     # Point to a specific .env file
     python scripts/compose_smoke_test.py --env-file /path/to/.env --all
+    python scripts/compose_smoke_test.py --env-file /path/to/.env --docker
 
 Exit codes:
     0: all tests passed
     1: one or more tests failed
     2: usage error
+    3: docker not available or compose failed to start
 """
 
 import argparse
@@ -387,6 +397,333 @@ print('OK')
     )
 
 
+# ── Docker compose helpers ────────────────────────────────────────────────────
+
+
+@dataclass
+class StackConfig:
+    """Configuration for a docker-compose stack under test."""
+
+    name: str
+    cwd: Path
+    services: List[str]
+    health_endpoints: Dict[str, str]  # service name -> http://host:port/path
+
+
+@dataclass
+class ServiceDiagnostic:
+    service: str
+    log_tail: str
+    status: str
+    suggestion: str
+
+
+OPENMEMORY_DIR = REPO_ROOT / "openmemory"
+
+
+def docker_available() -> bool:
+    """Return True if `docker compose` is usable."""
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return result.returncode == 0
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+
+
+def compose_cmd(cwd: Path, *args: str) -> subprocess.CompletedProcess:
+    """Run `docker compose` with the given arguments in cwd, returning the result."""
+    return subprocess.run(
+        ["docker", "compose", *args],
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        timeout=600,
+        env={**os.environ, "PYTHONUNBUFFERED": "1"},
+    )
+
+
+def wait_for_service_health(
+    cwd: Path, service: str, timeout_sec: int = 180, interval_sec: int = 5
+) -> bool:
+    """Wait for a docker compose service to report 'healthy'.
+
+    Polls `docker compose ps --format json` until the service's State is 'healthy',
+    or until timeout_sec have elapsed.
+    """
+    import time
+
+    deadline = time.time() + timeout_sec
+    while time.time() < deadline:
+        try:
+            result = subprocess.run(
+                [
+                    "docker",
+                    "compose",
+                    "ps",
+                    "--format",
+                    "json",
+                    "--status",
+                    "running",
+                    service,
+                ],
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                # docker compose ps --format json returns either a single JSON object
+                # or a JSON array depending on the version
+                raw = result.stdout.strip()
+                if raw.startswith("["):
+                    containers = json.loads(raw)
+                else:
+                    containers = [json.loads(raw)] if raw else []
+                for c in containers:
+                    if c.get("Service") == service or c.get("Name", "").endswith(service):
+                        state = c.get("State", "")
+                        health = c.get("Health", state)
+                        if health == "healthy" or state == "running" and "healthy" in str(c):
+                            # Some compose versions put the detailed status in State
+                            if "healthy" in state.lower() or "healthy" in str(c).lower():
+                                return True
+        except (subprocess.TimeoutExpired, json.JSONDecodeError):
+            pass
+        time.sleep(interval_sec)
+    return False
+
+
+def wait_for_http(
+    url: str, timeout_sec: int = 60, interval_sec: int = 2, expected_status: int = 200
+) -> tuple[bool, Optional[int], Optional[str]]:
+    """Poll an HTTP endpoint until it returns expected_status or timeout.
+
+    Returns (ok, status_code, error_message).
+    """
+    import time
+
+    deadline = time.time() + timeout_sec
+    last_error: Optional[str] = None
+    last_status: Optional[int] = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(url, timeout=3) as resp:
+                last_status = resp.status
+                if resp.status == expected_status:
+                    return True, last_status, None
+                last_error = f"HTTP {resp.status}"
+        except Exception as exc:  # noqa: BLE001
+            last_error = str(exc)
+        time.sleep(interval_sec)
+    return False, last_status, last_error
+
+
+def get_service_logs(cwd: Path, service: str, tail: int = 50) -> str:
+    """Fetch the last N lines of logs for a compose service."""
+    result = compose_cmd(cwd, "logs", "--tail", str(tail), service)
+    return result.stderr + result.stdout
+
+
+def diagnose_failed_service(
+    cwd: Path, service: str, env: Dict[str, str]
+) -> ServiceDiagnostic:
+    """Collect logs and produce a human-readable suggestion for a failed service."""
+    logs = get_service_logs(cwd, service, tail=80)
+    status = "unknown"
+
+    try:
+        ps = subprocess.run(
+            ["docker", "compose", "ps", service],
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        status = (ps.stdout + ps.stderr).strip()
+    except Exception:  # noqa: BLE001
+        pass
+
+    suggestion = _suggest_fix(service, logs, env)
+    return ServiceDiagnostic(service=service, log_tail=logs, status=status, suggestion=suggestion)
+
+
+def _suggest_fix(service: str, logs: str, env: Dict[str, str]) -> str:
+    """Heuristically match error patterns to actionable suggestions."""
+    llogs = logs.lower()
+    suggestions: List[str] = []
+
+    if "postgres" in service.lower() or "connection refused" in llogs or "password authentication" in llogs:
+        if not env.get("POSTGRES_PASSWORD"):
+            suggestions.append("💡 POSTGRES_PASSWORD is not set in your .env. Both the postgres container and the API need it.")
+        if "password authentication failed" in llogs:
+            suggestions.append("💡 POSTGRES_PASSWORD in .env does not match what the postgres container was initialized with. Try removing the postgres volume: docker compose down -v")
+        suggestions.append("💡 Check POSTGRES_HOST (should be the compose service name 'postgres' inside the docker network).")
+
+    if "qdrant" in service.lower() or "mem0_store" in service:
+        suggestions.append("💡 Check that QDRANT_HOST is set to 'mem0_store' (the compose service name) inside containers.")
+        suggestions.append("💡 Verify qdrant is listening on port 6333: docker compose exec mem0_store wget -qO- http://localhost:6333/readyz")
+
+    if "jwt" in llogs or "jwt_secret" in llogs:
+        suggestions.append("💡 JWT_SECRET missing or empty. Generate one with: openssl rand -base64 48 and set it in .env, or set AUTH_DISABLED=true for local development.")
+
+    if "openai_api_key" in llogs or "api key" in llogs:
+        suggestions.append("💡 OPENAI_API_KEY not set. Get one from https://platform.openai.com/api-keys or change MEM0_LLM_PROVIDER to ollama/anthropic/gemini.")
+
+    if "alembic" in llogs or "migration" in llogs:
+        suggestions.append("💡 Alembic migration failed. Verify POSTGRES_HOST/PORT/USER/PASSWORD and that the mem0_app database exists (see server/init-db.sh).")
+
+    if "configuration error" in llogs or "exit code 2" in llogs:
+        suggestions.append("💡 The entrypoint detected a missing configuration variable. Look above in the logs for the detailed CONFIGURATION ERROR block.")
+
+    if not suggestions:
+        suggestions.append("💡 Review the full log output above. Search for 'CONFIGURATION ERROR' or 'Traceback' to pinpoint the issue.")
+
+    return "\n".join(suggestions)
+
+
+def run_docker_stack(stack: StackConfig, env: Dict[str, str], teardown: bool = True) -> List[TestResult]:
+    """Bring up a compose stack, verify health endpoints, optionally tear it down.
+
+    Returns a list of TestResult objects — one per service + an overall result.
+    """
+    results: List[TestResult] = []
+
+    # ── 1. build ──────────────────────────────────────────────────────────
+    print(f"\n  🐳 [{stack.name}] Building images...")
+    build = compose_cmd(stack.cwd, "build", "--quiet")
+    if build.returncode != 0:
+        return [
+            TestResult(
+                f"docker_{stack.name}_build",
+                False,
+                f"`docker compose build` failed for stack '{stack.name}'.",
+                details=f"    stdout:\n{build.stdout[-1000:]}\n    stderr:\n{build.stderr[-1000:]}",
+            )
+        ]
+    results.append(TestResult(f"docker_{stack.name}_build", True, f"[{stack.name}] Images built successfully."))
+
+    # ── 2. up (detached) ──────────────────────────────────────────────────
+    print(f"  🐳 [{stack.name}] Starting services: {', '.join(stack.services)}...")
+    up = compose_cmd(stack.cwd, "up", "-d", "--remove-orphans")
+    if up.returncode != 0:
+        return results + [
+            TestResult(
+                f"docker_{stack.name}_up",
+                False,
+                f"`docker compose up -d` failed for stack '{stack.name}'.",
+                details=f"    stdout:\n{up.stdout[-1000:]}\n    stderr:\n{up.stderr[-1000:]}",
+            )
+        ]
+    results.append(TestResult(f"docker_{stack.name}_up", True, f"[{stack.name}] Containers started."))
+
+    try:
+        # ── 3. wait for health ───────────────────────────────────────────
+        for service in stack.services:
+            print(f"  ⏳ [{stack.name}] Waiting for '{service}' to become healthy...")
+            healthy = wait_for_service_health(stack.cwd, service, timeout_sec=240)
+            if healthy:
+                results.append(
+                    TestResult(
+                        f"docker_{stack.name}_{service}_health",
+                        True,
+                        f"[{stack.name}] Service '{service}' is healthy.",
+                    )
+                )
+            else:
+                diag = diagnose_failed_service(stack.cwd, service, env)
+                results.append(
+                    TestResult(
+                        f"docker_{stack.name}_{service}_health",
+                        False,
+                        f"[{stack.name}] Service '{service}' did not become healthy within timeout.",
+                        details=(
+                            f"    Compose ps:\n{diag.status}\n\n"
+                            f"    Logs (last 80 lines):\n{diag.log_tail[-3000:]}\n\n"
+                            f"    Suggestions:\n{diag.suggestion}"
+                        ),
+                    )
+                )
+
+        # ── 4. verify HTTP endpoints are reachable from host ──────────────
+        for service, url in stack.health_endpoints.items():
+            print(f"  🌐 [{stack.name}] Checking endpoint {url}...")
+            ok, status, err = wait_for_http(url, timeout_sec=60)
+            if ok:
+                results.append(
+                    TestResult(
+                        f"docker_{stack.name}_{service}_http",
+                        True,
+                        f"[{stack.name}] Endpoint {url} reachable from host (HTTP {status}).",
+                    )
+                )
+            else:
+                diag = diagnose_failed_service(stack.cwd, service, env)
+                results.append(
+                    TestResult(
+                        f"docker_{stack.name}_{service}_http",
+                        False,
+                        f"[{stack.name}] Endpoint {url} not reachable from host (last error: {err}).",
+                        details=(
+                            f"    Suggestions:\n{diag.suggestion}\n\n"
+                            f"    Logs:\n{diag.log_tail[-2000:]}"
+                        ),
+                    )
+                )
+    finally:
+        # ── 5. teardown ───────────────────────────────────────────────────
+        if teardown:
+            print(f"  🧹 [{stack.name}] Tearing down...")
+            compose_cmd(stack.cwd, "down", "--remove-orphans")
+            results.append(
+                TestResult(f"docker_{stack.name}_teardown", True, f"[{stack.name}] Stack torn down.")
+            )
+        else:
+            results.append(
+                TestResult(
+                    f"docker_{stack.name}_teardown",
+                    True,
+                    f"[{stack.name}] Containers left running (--no-teardown). Access them via docker compose in {stack.cwd}.",
+                )
+            )
+
+    return results
+
+
+def get_server_stack(env_file_path: Path, env: Dict[str, str]) -> StackConfig:
+    """Build the StackConfig for server/docker-compose.yaml."""
+    server_port = env.get("MEM0_SERVER_PORT", "8888")
+    dashboard_port = env.get("MEM0_DASHBOARD_PORT", "3000")
+    return StackConfig(
+        name="server",
+        cwd=SERVER_DIR,
+        services=["postgres", "mem0", "mem0-dashboard"],
+        health_endpoints={
+            "mem0": f"http://localhost:{server_port}/health",
+            "mem0-dashboard": f"http://localhost:{dashboard_port}",
+        },
+    )
+
+
+def get_openmemory_stack(env_file_path: Path, env: Dict[str, str]) -> StackConfig:
+    """Build the StackConfig for openmemory/docker-compose.yml."""
+    api_port = env.get("OPENMEMORY_API_PORT", "8765")
+    ui_port = env.get("OPENMEMORY_UI_PORT", "3001")
+    return StackConfig(
+        name="openmemory",
+        cwd=OPENMEMORY_DIR,
+        services=["mem0_store", "openmemory-mcp", "openmemory-ui"],
+        health_endpoints={
+            "openmemory-mcp": f"http://localhost:{api_port}/health",
+            "openmemory-ui": f"http://localhost:{ui_port}",
+        },
+    )
+
+
 # ── Test runner ───────────────────────────────────────────────────────────────
 
 
@@ -433,14 +770,31 @@ def print_results(results: List[TestResult]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Mem0 compose smoke tests")
     parser.add_argument("--env-file", default=str(REPO_ROOT / ".env"), help="Path to .env file")
-    parser.add_argument("--all", action="store_true", help="Run all tests")
+    parser.add_argument("--all", action="store_true", help="Run all non-Docker tests")
     parser.add_argument("--env-check", action="store_true", help="Check .env file only")
     parser.add_argument("--config-errors", action="store_true", help="Check config error messages only")
     parser.add_argument("--health-endpoints", action="store_true", help="Check /health endpoint structure only")
     parser.add_argument("--list", action="store_true", help="List available tests and exit")
+    parser.add_argument(
+        "--docker",
+        action="store_true",
+        help="Run REAL container smoke tests (requires Docker). Use with --stack to pick a stack.",
+    )
+    parser.add_argument(
+        "--stack",
+        choices=["server", "openmemory", "both"],
+        default="both",
+        help="Which docker-compose stack to test (default: both). Only used with --docker.",
+    )
+    parser.add_argument(
+        "--no-teardown",
+        action="store_true",
+        help="Leave containers running after the docker smoke test (for manual debugging).",
+    )
     args = parser.parse_args()
 
     env_file = Path(args.env_file).resolve()
+    env = load_env_file(env_file)
 
     all_env_tests = [
         lambda: test_env_file_exists(env_file),
@@ -462,17 +816,82 @@ def main() -> int:
     ]
 
     if args.list:
-        print("Available tests:")
-        for group, tests in [
-            ("--env-check", all_env_tests),
-            ("--config-errors", all_config_error_tests),
-            ("--health-endpoints", all_health_tests),
+        print("Available test groups:")
+        env_test_names = [
+            "test_env_file_exists",
+            "test_env_required_variables",
+            "test_env_naming_consistency",
+        ]
+        for group, test_names in [
+            ("--env-check", env_test_names),
+            ("--config-errors", [t.__name__ for t in all_config_error_tests]),
+            ("--health-endpoints", [t.__name__ for t in all_health_tests]),
         ]:
             print(f"\n  {group}:")
-            for t in tests:
-                print(f"    - {t.__name__}")
+            for name in test_names:
+                print(f"    - {name}")
+        print(
+            "\n  --docker (requires Docker):\n"
+            "    --stack server     : postgres + mem0 API + dashboard\n"
+            "    --stack openmemory : qdrant + openmemory API + UI\n"
+            "    --stack both       : both stacks (default)\n"
+            "    --no-teardown      : leave containers running after test\n"
+        )
         return 0
 
+    # ── Docker mode ────────────────────────────────────────────────────────
+    if args.docker:
+        if not docker_available():
+            print(
+                "\n" + "=" * 72
+                + "\n  ❌ Docker is not available. `docker compose version` did not succeed.\n"
+                + "  💡 Install Docker Desktop / Docker Engine, or use the non-Docker test groups:\n"
+                + "     python scripts/compose_smoke_test.py --all\n"
+                + "=" * 72
+                + "\n",
+                file=sys.stderr,
+            )
+            return 3
+
+        # Always run env check first — without .env, docker tests can't start
+        env_results = run_tests(all_env_tests)
+        env_pass = all(r.passed for r in env_results)
+        if not env_pass:
+            print_results(env_results)
+            print(
+                "  ⚠️  .env file issues detected — docker smoke tests may fail.\n"
+                "     Fix the issues above, or pass --env-file <path> to point to a valid .env.\n",
+                file=sys.stderr,
+            )
+
+        stacks: List[StackConfig] = []
+        if args.stack in ("server", "both"):
+            stacks.append(get_server_stack(env_file, env))
+        if args.stack in ("openmemory", "both"):
+            stacks.append(get_openmemory_stack(env_file, env))
+
+        all_results: List[TestResult] = env_results
+        for stack in stacks:
+            print(f"\n{'=' * 72}")
+            print(f"  🐳 DOCKER SMOKE TEST — stack: {stack.name}")
+            print(f"{'=' * 72}")
+            all_results.extend(
+                run_docker_stack(stack, env, teardown=not args.no_teardown)
+            )
+
+        print_results(all_results)
+
+        if not args.no_teardown:
+            print(
+                "  💡 To leave containers running after the test, re-run with --no-teardown\n"
+            )
+        else:
+            for stack in stacks:
+                print(f"  💡 Debug {stack.name}: cd {stack.cwd} && docker compose logs -f")
+
+        return 0 if all(r.passed for r in all_results) else 1
+
+    # ── Non-Docker mode ───────────────────────────────────────────────────
     tests: List[Callable[[], TestResult]] = []
     if args.all:
         tests = all_env_tests + all_config_error_tests + all_health_tests
@@ -485,7 +904,9 @@ def main() -> int:
             tests.extend(all_health_tests)
 
     if not tests:
-        parser.error("Specify at least one test group: --all, --env-check, --config-errors, or --health-endpoints")
+        parser.error(
+            "Specify at least one test group: --all, --env-check, --config-errors, --health-endpoints, or --docker"
+        )
         return 2
 
     results = run_tests(tests)

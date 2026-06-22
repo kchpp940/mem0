@@ -2,11 +2,14 @@ import pytest
 
 from mem0.utils.optional_deps import (
     DepInfo,
+    ValidationIssue,
     build_factory_dep_keys,
     get_all_providers,
     get_dep_info,
     make_import_error,
+    optional_import,
     run_validation,
+    validate_adapters,
     validate_factory_dep_keys,
     validate_registry,
 )
@@ -21,6 +24,9 @@ class TestDepInfo:
             extras="test-extras",
             pip_packages=["test-pkg"],
             factory_name="test",
+            adapter_module="mem0.llms.test",
+            adapter_class="TestLLM",
+            adapter_class_path="mem0.llms.test.LLM",
         )
         with pytest.raises(AttributeError):
             info.provider = "changed"
@@ -33,8 +39,30 @@ class TestDepInfo:
             extras=None,
             pip_packages=["test-pkg"],
             factory_name=None,
+            adapter_module=None,
+            adapter_class=None,
+            adapter_class_path=None,
         )
         assert info.factory_name is None
+        assert info.adapter_module is None
+        assert info.adapter_class is None
+        assert info.adapter_class_path is None
+
+    def test_dep_info_adapter_contract_fields(self):
+        info = DepInfo(
+            provider="test",
+            category="embedding",
+            import_packages=["test_pkg"],
+            extras="llms",
+            pip_packages=["test-pkg"],
+            factory_name="test",
+            adapter_module="mem0.embeddings.test",
+            adapter_class="TestEmbedding",
+            adapter_class_path="mem0.embeddings.test.TestEmbedding",
+        )
+        module_path, class_name = info.adapter_class_path.rsplit(".", 1)
+        assert module_path == info.adapter_module
+        assert class_name == info.adapter_class
 
 
 class TestRegistryBasics:
@@ -76,6 +104,111 @@ class TestRegistryBasics:
         msg = str(err)
         assert "pip install transformers torch" in msg
         assert "mem0ai[" not in msg
+
+    def test_provider_has_adapter_contract(self):
+        info = get_dep_info("groq")
+        assert info.adapter_module == "mem0.llms.groq"
+        assert info.adapter_class == "GroqLLM"
+        assert info.adapter_class_path == "mem0.llms.groq.GroqLLM"
+
+    def test_adapter_class_path_matches_module_and_class(self):
+        for name, info in get_all_providers().items():
+            if info.adapter_class_path is None:
+                continue
+            assert info.adapter_module is not None
+            assert info.adapter_class is not None
+            expected = f"{info.adapter_module}.{info.adapter_class}"
+            assert info.adapter_class_path == expected, (
+                f"Provider {name}: adapter_class_path {info.adapter_class_path!r} does not match "
+                f"adapter_module + adapter_class {expected!r}"
+            )
+
+    def test_factory_providers_have_adapter_contract(self):
+        for name, info in get_all_providers().items():
+            if info.factory_name is not None:
+                assert info.adapter_module is not None, (
+                    f"Provider {name} has factory_name but no adapter_module"
+                )
+                assert info.adapter_class is not None, (
+                    f"Provider {name} has factory_name but no adapter_class"
+                )
+                assert info.adapter_class_path is not None, (
+                    f"Provider {name} has factory_name but no adapter_class_path"
+                )
+
+
+class TestOptionalImportHelper:
+    def test_optional_import_success(self):
+        try:
+            result = optional_import("groq")
+        except ImportError:
+            pytest.skip("groq not installed in test environment")
+        else:
+            assert result is not None
+            assert hasattr(result, "__path__") or hasattr(result, "Client")
+
+    def test_optional_import_missing_package_raises_registry_error(self):
+        from mem0.utils import optional_deps as od
+
+        original = dict(od._REGISTRY)
+        fake_info = DepInfo(
+            provider="__test_nonexistent",
+            category="llm",
+            import_packages=["this_package_definitely_does_not_exist_xyz123"],
+            extras="llms",
+            pip_packages=["nonexistent-pkg"],
+            factory_name=None,
+            adapter_module=None,
+            adapter_class=None,
+            adapter_class_path=None,
+        )
+        od._REGISTRY["__test_nonexistent"] = fake_info
+        try:
+            with pytest.raises(ImportError) as exc_info:
+                optional_import("__test_nonexistent")
+            msg = str(exc_info.value)
+            assert "__test_nonexistent" in msg
+            assert "nonexistent-pkg" in msg
+        finally:
+            od._REGISTRY = original
+
+    def test_optional_import_unknown_key(self):
+        with pytest.raises(ImportError, match="Unknown provider"):
+            optional_import("not_a_real_dep_key_12345")
+
+
+class TestAdapterContractValidation:
+    def test_validate_adapters_no_errors(self):
+        issues = validate_adapters()
+        errors = [i for i in issues if i.severity == "error"]
+        assert not errors, f"Adapter validation errors: {[str(i) for i in errors]}"
+
+    def test_validate_adapters_no_warnings_strict(self):
+        issues = validate_adapters()
+        warnings = [i for i in issues if i.severity == "warning"]
+        assert not warnings, f"Adapter validation warnings: {[str(i) for i in warnings]}"
+
+    def test_adapter_files_exist_for_registry_entries(self):
+        issues = validate_adapters()
+        missing_file_errors = [i for i in issues if "adapter file missing" in i.message]
+        assert not missing_file_errors
+
+    def test_no_unknown_make_import_error_keys(self):
+        issues = validate_adapters()
+        unknown_key_errors = [i for i in issues if "not registered" in i.message]
+        assert not unknown_key_errors
+
+    def test_factory_paths_match_registry(self):
+        issues = validate_adapters()
+        path_mismatches = [i for i in issues if "factory." in i.message and "points to" in i.message]
+        assert not path_mismatches
+
+    def test_validation_issue_str_format(self):
+        issue = ValidationIssue("error", "provider_x", "something is wrong")
+        s = str(issue)
+        assert "[error]" in s
+        assert "provider_x" in s
+        assert "something is wrong" in s
 
 
 class TestFactoryNameAutoDerive:
@@ -164,6 +297,9 @@ class TestRunValidation:
             extras="nonexistent-extras-group",
             pip_packages=["nonexistent-pkg"],
             factory_name=None,
+            adapter_module=None,
+            adapter_class=None,
+            adapter_class_path=None,
         )
         try:
             issues = run_validation()

@@ -2,7 +2,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
@@ -13,6 +13,9 @@ class DepInfo:
     extras: Optional[str]
     pip_packages: List[str]
     factory_name: Optional[str]
+    adapter_module: Optional[str]
+    adapter_class: Optional[str]
+    adapter_class_path: Optional[str]
 
 
 _REGISTRY: Dict[str, DepInfo] = {}
@@ -25,7 +28,12 @@ def register(
     extras: Optional[str] = None,
     pip_packages: Optional[List[str]] = None,
     factory_name: Optional[str] = None,
+    adapter_module: Optional[str] = None,
+    adapter_class: Optional[str] = None,
 ) -> None:
+    adapter_class_path = None
+    if adapter_module and adapter_class:
+        adapter_class_path = f"{adapter_module}.{adapter_class}"
     _REGISTRY[provider] = DepInfo(
         provider=provider,
         category=category,
@@ -33,6 +41,9 @@ def register(
         extras=extras,
         pip_packages=pip_packages or import_packages,
         factory_name=factory_name,
+        adapter_module=adapter_module,
+        adapter_class=adapter_class,
+        adapter_class_path=adapter_class_path,
     )
 
 
@@ -69,6 +80,23 @@ def make_import_error(provider: str) -> ImportError:
     if info is None:
         return ImportError(f"Unknown provider: {provider}")
     return ImportError(_build_message(info))
+
+
+def optional_import(provider: str) -> Any:
+    info = _REGISTRY.get(provider)
+    if info is None:
+        raise ImportError(f"Unknown provider: {provider}")
+    try:
+        import importlib
+        if len(info.import_packages) == 1:
+            module = importlib.import_module(info.import_packages[0])
+            return module
+        modules = []
+        for pkg in info.import_packages:
+            modules.append(importlib.import_module(pkg))
+        return modules
+    except ImportError:
+        raise ImportError(_build_message(info)) from None
 
 
 # ── pyproject.toml extras parsing & validation ────────────────────────
@@ -165,13 +193,141 @@ def validate_factory_dep_keys(factory_dep_keys: Dict[str, Dict[str, str]]) -> Li
     return issues
 
 
-def run_validation(pyproject_path: Optional[str] = None) -> List[ValidationIssue]:
-    issues = validate_registry(pyproject_path)
-    issues.extend(validate_factory_dep_keys(build_factory_dep_keys()))
+# ── Adapter contract scanning ────────────────────────────────────
+
+def _module_to_path(module: str) -> Path:
+    parts = module.split(".")
+    return Path(__file__).resolve().parents[1].joinpath(*parts[:-1], f"{parts[-1]}.py")
+
+
+def _scan_adapter_keys(repo_root: Path) -> Dict[str, List[str]]:
+    mem0_root = repo_root / "mem0"
+    pattern = re.compile(r'make_import_error\(\s*["\']([^"\']+)["\']')
+    result: Dict[str, List[str]] = {}
+    for py_file in sorted(mem0_root.rglob("*.py")):
+        try:
+            content = py_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        keys = pattern.findall(content)
+        if not keys:
+            continue
+        rel = str(py_file.relative_to(repo_root)).replace("/", ".")[:-3]
+        result[rel] = keys
+    return result
+
+
+def _collect_factory_paths() -> Dict[str, Dict[str, str]]:
+    from mem0.utils.factory import (
+        EmbedderFactory,
+        LlmFactory,
+        RerankerFactory,
+        VectorStoreFactory,
+    )
+    result: Dict[str, Dict[str, str]] = {}
+    factories = {
+        "llm": LlmFactory.provider_to_class,
+        "embedding": EmbedderFactory.provider_to_class,
+        "vector_store": VectorStoreFactory.provider_to_class,
+        "reranker": RerankerFactory.provider_to_class,
+    }
+    for cat, mapping in factories.items():
+        cat_paths: Dict[str, str] = {}
+        for name, value in mapping.items():
+            if isinstance(value, tuple):
+                cat_paths[name] = value[0]
+            else:
+                cat_paths[name] = value
+        result[cat] = cat_paths
+    return result
+
+
+def validate_adapters() -> List[ValidationIssue]:
+    repo_root = Path(__file__).resolve().parents[2]
+    issues: List[ValidationIssue] = []
+    adapter_keys = _scan_adapter_keys(repo_root)
+    factory_paths = _collect_factory_paths()
+
+    registry_by_path: Dict[str, DepInfo] = {}
+    for dep_key, info in _REGISTRY.items():
+        if info.adapter_class_path:
+            registry_by_path[info.adapter_class_path] = info
+
+    for dep_key, info in _REGISTRY.items():
+        if info.adapter_class_path is None:
+            continue
+        module_path, class_name = info.adapter_class_path.rsplit(".", 1)
+        module_rel = module_path
+        py_path = repo_root / (module_rel.replace(".", "/") + ".py")
+        if not py_path.exists():
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    dep_key,
+                    f"adapter file missing: {py_path.relative_to(repo_root)}",
+                )
+            )
+            continue
+        try:
+            content = py_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        has_try_except_import = False
+        try:
+            lines = content.splitlines()
+            for i, line in enumerate(lines):
+                if "except ImportError" in line:
+                    for j in range(i + 1, min(i + 10, len(lines))):
+                        if "raise" in lines[j] or lines[j].strip().startswith("raise"):
+                            has_try_except_import = True
+                            break
+                    if has_try_except_import:
+                        break
+        except (OSError, UnicodeDecodeError):
+            pass
+        if has_try_except_import:
+            keys_in_file = adapter_keys.get(module_rel, [])
+            if dep_key not in keys_in_file:
+                issues.append(
+                    ValidationIssue(
+                        "warning",
+                        dep_key,
+                        f"adapter {py_path.relative_to(repo_root)} has try/except ImportError but does not call make_import_error({dep_key!r})",
+                    )
+                )
+        category = info.category
+        factory_paths_cat = factory_paths.get(category, {})
+        if info.factory_name and info.factory_name in factory_paths_cat:
+            expected = factory_paths_cat[info.factory_name]
+            if expected != info.adapter_class_path:
+                issues.append(
+                    ValidationIssue(
+                        "warning",
+                        dep_key,
+                        f"factory.{category}[{info.factory_name!r}] points to {expected!r} but registry declares {info.adapter_class_path!r}",
+                    )
+                )
+
+    for module_rel, keys in adapter_keys.items():
+        for used_key in keys:
+            if used_key not in _REGISTRY:
+                issues.append(
+                    ValidationIssue(
+                        "error",
+                        used_key,
+                        f"{module_rel}.py uses make_import_error({used_key!r}) which is not registered in optional_deps registry",
+                    )
+                )
+
     return issues
 
 
-# ── CLI entry point ────────────────────────────────────────────────────
+def run_validation(pyproject_path: Optional[str] = None) -> List[ValidationIssue]:
+    issues = validate_registry(pyproject_path)
+    issues.extend(validate_factory_dep_keys(build_factory_dep_keys()))
+    issues.extend(validate_adapters())
+    return issues
+
 
 def _cli_check() -> None:
     issues = run_validation()
@@ -184,62 +340,63 @@ def _cli_check() -> None:
         print("All dependency registry checks passed.")
 
 
+# ── LLMs ──────────────────────────────────────────────────────
+register("ollama",        "llm", ["ollama"],                "llms",   ["ollama"],              factory_name="ollama",    adapter_module="mem0.llms.ollama",              adapter_class="OllamaLLM")
+register("groq",          "llm", ["groq"],                  "llms",   ["groq"],                factory_name="groq",      adapter_module="mem0.llms.groq",                adapter_class="GroqLLM")
+register("together",      "llm", ["together"],              "llms",   ["together"],            factory_name="together",  adapter_module="mem0.llms.together",            adapter_class="TogetherLLM")
+register("litellm",       "llm", ["litellm"],               "llms",   ["litellm"],             factory_name="litellm",   adapter_module="mem0.llms.litellm",             adapter_class="LiteLLM")
+register("anthropic",     "llm", ["anthropic"],             "llms",   ["anthropic"],           factory_name="anthropic", adapter_module="mem0.llms.anthropic",         adapter_class="AnthropicLLM")
+register("gemini",        "llm", ["google.genai"],        "llms",   ["google-genai"],        factory_name="gemini",    adapter_module="mem0.llms.gemini",            adapter_class="GeminiLLM")
+register("aws_bedrock",   "llm", ["boto3"],                 "extras", ["boto3"],               factory_name="aws_bedrock", adapter_module="mem0.llms.aws_bedrock",       adapter_class="AWSBedrockLLM")
+register("langchain",     "llm", ["langchain.chat_models.base", "langchain_core.messages"], "extras", ["langchain", "langchain-core"], factory_name="langchain", adapter_module="mem0.llms.langchain",       adapter_class="LangchainLLM")
+
+# ── Embeddings ────────────────────────────────────────────
+register("ollama_emb",     "embedding", ["ollama"],                 "llms",   ["ollama"],              factory_name="ollama",    adapter_module="mem0.embeddings.ollama",          adapter_class="OllamaEmbedding")
+register("huggingface",    "embedding", ["sentence_transformers"],  "extras", ["sentence-transformers"], factory_name="huggingface", adapter_module="mem0.embeddings.huggingface",     adapter_class="HuggingFaceEmbedding")
+register("azure_openai_emb",   "embedding", ["azure.identity", "openai"], "extras", ["azure-identity"],   factory_name="azure_openai", adapter_module="mem0.embeddings.azure_openai",    adapter_class="AzureOpenAIEmbedding")
+register("gemini_emb",       "embedding", ["google.genai"],           "llms",   ["google-genai"],        factory_name="gemini",    adapter_module="mem0.embeddings.gemini",          adapter_class="GoogleGenAIEmbedding")
+register("vertexai_emb",     "embedding", ["vertexai"],               "llms",   ["vertexai"],            factory_name="vertexai",  adapter_module="mem0.embeddings.vertexai",        adapter_class="VertexAIEmbedding")
+register("together_emb",     "embedding", ["together"],               "llms",   ["together"],            factory_name="together",  adapter_module="mem0.embeddings.together",        adapter_class="TogetherEmbedding")
+register("aws_bedrock_emb",  "embedding", ["boto3"],                  "extras", ["boto3"],               factory_name="aws_bedrock", adapter_module="mem0.embeddings.aws_bedrock",     adapter_class="AWSBedrockEmbedding")
+register("fastembed",          "embedding", ["fastembed"],              "extras", ["fastembed"],            factory_name="fastembed", adapter_module="mem0.embeddings.fastembed",       adapter_class="FastEmbedEmbedding")
+register("langchain_emb",      "embedding", ["langchain.embeddings.base"], "extras", ["langchain"],        factory_name="langchain", adapter_module="mem0.embeddings.langchain",     adapter_class="LangchainEmbedding")
+
+# ── Vector stores ───────────────────────────────────────
+register("chroma",             "vector_store", ["chromadb"],            "vector-stores", ["chromadb"],     factory_name="chroma",             adapter_module="mem0.vector_stores.chroma",             adapter_class="ChromaDB")
+register("pgvector",           "vector_store", ["psycopg"],             "vector-stores", ["psycopg", "psycopg-pool"], factory_name="pgvector",           adapter_module="mem0.vector_stores.pgvector",           adapter_class="PGVector")
+register("milvus",             "vector_store", ["pymilvus"],            "vector-stores", ["pymilvus"],     factory_name="milvus",             adapter_module="mem0.vector_stores.milvus",             adapter_class="MilvusDB")
+register("upstash_vector",     "vector_store", ["upstash_vector"],      "vector-stores", ["upstash-vector"], factory_name="upstash_vector",     adapter_module="mem0.vector_stores.upstash_vector",     adapter_class="UpstashVector")
+register("pinecone",           "vector_store", ["pinecone"],            "vector-stores", ["pinecone", "pinecone-text"], factory_name="pinecone",           adapter_module="mem0.vector_stores.pinecone",           adapter_class="PineconeDB")
+register("weaviate",           "vector_store", ["weaviate"],            "vector-stores", ["weaviate-client"], factory_name="weaviate",           adapter_module="mem0.vector_stores.weaviate",           adapter_class="Weaviate")
+register("qdrant_extra",       "vector_store", ["fastembed"],           "extras",  ["fastembed"])
+register("supabase",           "vector_store", ["vecs"],                "vector-stores", ["vecs"],         factory_name="supabase",           adapter_module="mem0.vector_stores.supabase",           adapter_class="Supabase")
+register("azure_ai_search",    "vector_store", ["azure.search.documents"], "vector-stores", ["azure-search-documents", "azure-identity"], factory_name="azure_ai_search",    adapter_module="mem0.vector_stores.azure_ai_search",    adapter_class="AzureAISearch")
+register("azure_mysql",        "vector_store", ["pymysql", "dbutils", "azure.identity"], "vector-stores", ["pymysql", "dbutils", "azure-identity"], factory_name="azure_mysql",        adapter_module="mem0.vector_stores.azure_mysql",        adapter_class="AzureMySQL")
+register("mongodb",            "vector_store", ["pymongo"],             "vector-stores", ["pymongo"],      factory_name="mongodb",            adapter_module="mem0.vector_stores.mongodb",            adapter_class="MongoDB")
+register("redis_vs",           "vector_store", ["redis", "redisvl"],    "vector-stores", ["redis", "redisvl"], factory_name="redis",              adapter_module="mem0.vector_stores.redis",              adapter_class="RedisDB")
+register("valkey_vs",          "vector_store", ["valkey"],              "vector-stores", ["valkey"],       factory_name="valkey",             adapter_module="mem0.vector_stores.valkey",             adapter_class="ValkeyDB")
+register("elasticsearch_vs",   "vector_store", ["elasticsearch"],      "vector-stores", ["elasticsearch"], factory_name="elasticsearch",      adapter_module="mem0.vector_stores.elasticsearch",      adapter_class="ElasticsearchDB")
+register("opensearch",         "vector_store", ["opensearchpy"],        "extras",  ["opensearch-py"],      factory_name="opensearch",         adapter_module="mem0.vector_stores.opensearch",         adapter_class="OpenSearchDB")
+register("faiss",              "vector_store", ["faiss"],               "vector-stores", ["faiss-cpu"],    factory_name="faiss",              adapter_module="mem0.vector_stores.faiss",              adapter_class="FAISS")
+register("cassandra",          "vector_store", ["cassandra.cluster"],   "vector-stores", ["cassandra-driver"], factory_name="cassandra",          adapter_module="mem0.vector_stores.cassandra",          adapter_class="CassandraDB")
+register("databricks",         "vector_store", ["databricks.sdk"],      "vector-stores", ["databricks-sdk"], factory_name="databricks",         adapter_module="mem0.vector_stores.databricks",         adapter_class="Databricks")
+register("baidu",              "vector_store", ["pymochow"],            "vector-stores", ["pymochow"],     factory_name="baidu",              adapter_module="mem0.vector_stores.baidu",              adapter_class="BaiduDB")
+register("neptune",            "vector_store", ["langchain_aws"],       "vector-stores", ["langchain-aws"], factory_name="neptune",            adapter_module="mem0.vector_stores.neptune_analytics",  adapter_class="NeptuneAnalyticsVector")
+register("turbopuffer",        "vector_store", ["turbopuffer"],         "vector-stores", ["turbopuffer"],  factory_name="turbopuffer",        adapter_module="mem0.vector_stores.turbopuffer",        adapter_class="TurbopufferDB")
+register("s3_vectors",         "vector_store", ["boto3"],               "extras",  ["boto3"],              factory_name="s3_vectors",         adapter_module="mem0.vector_stores.s3_vectors",         adapter_class="S3Vectors")
+register("langchain_vs",       "vector_store", ["langchain_community.vectorstores"], "extras", ["langchain-community"], factory_name="langchain",       adapter_module="mem0.vector_stores.langchain",       adapter_class="Langchain")
+register("vertex_ai_vector_search", "vector_store", ["vertexai"],      "llms",    ["vertexai"],           factory_name="vertex_ai_vector_search", adapter_module="mem0.vector_stores.vertex_ai_vector_search", adapter_class="GoogleMatchingEngine")
+
+# ── Rerankers ───────────────────────────────────────
+register("cohere_reranker",       "reranker", ["cohere"],               "extras",  ["cohere"],           factory_name="cohere",               adapter_module="mem0.reranker.cohere_reranker",       adapter_class="CohereReranker")
+register("sentence_transformer",  "reranker", ["sentence_transformers"], "extras",  ["sentence-transformers"], factory_name="sentence_transformer",  adapter_module="mem0.reranker.sentence_transformer_reranker", adapter_class="SentenceTransformerReranker")
+register("huggingface_reranker",  "reranker", ["transformers", "torch"], None,      ["transformers", "torch"], factory_name="huggingface",          adapter_module="mem0.reranker.huggingface_reranker",  adapter_class="HuggingFaceReranker")
+register("zero_entropy",          "reranker", ["zeroentropy"],          None,      ["zeroentropy"],        factory_name="zero_entropy",          adapter_module="mem0.reranker.zero_entropy_reranker",          adapter_class="ZeroEntropyReranker")
+
+# ── Extras / cross-cutting ───────────────────────────
+register("spacy",              "nlp",  ["spacy"],                       "nlp",    ["spacy"])
+
+
+# ── CLI entry point (must come after all register() calls) ─────
 if __name__ == "__main__":
     _cli_check()
-
-
-# ── LLMs ──────────────────────────────────────────────────────────────
-register("ollama",             "llm", ["ollama"],                       "llms",   ["ollama"],              factory_name="ollama")
-register("groq",               "llm", ["groq"],                         "llms",   ["groq"],                factory_name="groq")
-register("together",           "llm", ["together"],                     "llms",   ["together"],            factory_name="together")
-register("litellm",            "llm", ["litellm"],                      "llms",   ["litellm"],             factory_name="litellm")
-register("anthropic",          "llm", ["anthropic"],                    "llms",   ["anthropic"],           factory_name="anthropic")
-register("gemini",             "llm", ["google.genai"],                 "llms",   ["google-genai"],        factory_name="gemini")
-register("aws_bedrock",        "llm", ["boto3"],                        "extras", ["boto3"],               factory_name="aws_bedrock")
-register("langchain",          "llm", ["langchain.chat_models.base", "langchain_core.messages"], "extras", ["langchain", "langchain-core"], factory_name="langchain")
-
-# ── Embeddings ────────────────────────────────────────────────────────
-register("ollama_emb",         "embedding", ["ollama"],                 "llms",   ["ollama"],              factory_name="ollama")
-register("huggingface",        "embedding", ["sentence_transformers"],  "extras", ["sentence-transformers"], factory_name="huggingface")
-register("azure_openai_emb",   "embedding", ["azure.identity", "openai"], "extras", ["azure-identity"],   factory_name="azure_openai")
-register("gemini_emb",         "embedding", ["google.genai"],           "llms",   ["google-genai"],        factory_name="gemini")
-register("vertexai_emb",       "embedding", ["vertexai"],               "llms",   ["vertexai"],            factory_name="vertexai")
-register("together_emb",       "embedding", ["together"],               "llms",   ["together"],            factory_name="together")
-register("aws_bedrock_emb",    "embedding", ["boto3"],                  "extras", ["boto3"],               factory_name="aws_bedrock")
-register("fastembed",          "embedding", ["fastembed"],              "extras", ["fastembed"],            factory_name="fastembed")
-register("langchain_emb",      "embedding", ["langchain.embeddings.base"], "extras", ["langchain"],        factory_name="langchain")
-
-# ── Vector stores ─────────────────────────────────────────────────────
-register("chroma",             "vector_store", ["chromadb"],            "vector-stores", ["chromadb"],     factory_name="chroma")
-register("pgvector",           "vector_store", ["psycopg"],             "vector-stores", ["psycopg", "psycopg-pool"], factory_name="pgvector")
-register("milvus",             "vector_store", ["pymilvus"],            "vector-stores", ["pymilvus"],     factory_name="milvus")
-register("upstash_vector",     "vector_store", ["upstash_vector"],      "vector-stores", ["upstash-vector"], factory_name="upstash_vector")
-register("pinecone",           "vector_store", ["pinecone"],            "vector-stores", ["pinecone", "pinecone-text"], factory_name="pinecone")
-register("weaviate",           "vector_store", ["weaviate"],            "vector-stores", ["weaviate-client"], factory_name="weaviate")
-register("qdrant_extra",       "vector_store", ["fastembed"],           "extras",  ["fastembed"])
-register("supabase",           "vector_store", ["vecs"],                "vector-stores", ["vecs"],         factory_name="supabase")
-register("azure_ai_search",    "vector_store", ["azure.search.documents"], "vector-stores", ["azure-search-documents", "azure-identity"], factory_name="azure_ai_search")
-register("azure_mysql",        "vector_store", ["pymysql", "dbutils", "azure.identity"], "vector-stores", ["pymysql", "dbutils", "azure-identity"], factory_name="azure_mysql")
-register("mongodb",            "vector_store", ["pymongo"],             "vector-stores", ["pymongo"],      factory_name="mongodb")
-register("redis_vs",           "vector_store", ["redis", "redisvl"],    "vector-stores", ["redis", "redisvl"], factory_name="redis")
-register("valkey_vs",          "vector_store", ["valkey"],              "vector-stores", ["valkey"],       factory_name="valkey")
-register("elasticsearch_vs",   "vector_store", ["elasticsearch"],      "vector-stores", ["elasticsearch"], factory_name="elasticsearch")
-register("opensearch",         "vector_store", ["opensearchpy"],        "extras",  ["opensearch-py"],      factory_name="opensearch")
-register("faiss",              "vector_store", ["faiss"],               "vector-stores", ["faiss-cpu"],    factory_name="faiss")
-register("cassandra",          "vector_store", ["cassandra.cluster"],   "vector-stores", ["cassandra-driver"], factory_name="cassandra")
-register("databricks",         "vector_store", ["databricks.sdk"],      "vector-stores", ["databricks-sdk"], factory_name="databricks")
-register("baidu",              "vector_store", ["pymochow"],            "vector-stores", ["pymochow"],     factory_name="baidu")
-register("neptune",            "vector_store", ["langchain_aws"],       "vector-stores", ["langchain-aws"], factory_name="neptune")
-register("turbopuffer",        "vector_store", ["turbopuffer"],         "vector-stores", ["turbopuffer"],  factory_name="turbopuffer")
-register("s3_vectors",         "vector_store", ["boto3"],               "extras",  ["boto3"],              factory_name="s3_vectors")
-register("langchain_vs",       "vector_store", ["langchain_community.vectorstores"], "extras", ["langchain-community"], factory_name="langchain")
-register("vertex_ai_vector_search", "vector_store", ["vertexai"],      "llms",    ["vertexai"],           factory_name="vertex_ai_vector_search")
-
-# ── Rerankers ─────────────────────────────────────────────────────────
-register("cohere_reranker",       "reranker", ["cohere"],               "extras",  ["cohere"],           factory_name="cohere")
-register("sentence_transformer",  "reranker", ["sentence_transformers"], "extras",  ["sentence-transformers"], factory_name="sentence_transformer")
-register("huggingface_reranker",  "reranker", ["transformers", "torch"], None,      ["transformers", "torch"], factory_name="huggingface")
-register("zero_entropy",          "reranker", ["zeroentropy"],          None,      ["zeroentropy"],        factory_name="zero_entropy")
-
-# ── Extras / cross-cutting ────────────────────────────────────────────
-register("spacy",              "nlp",  ["spacy"],                       "nlp",    ["spacy"])

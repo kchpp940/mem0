@@ -4,39 +4,39 @@ from typing import Dict, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
 
-try:
-    import pymochow
-    from pymochow.auth.bce_credentials import BceCredentials
-    from pymochow.configuration import Configuration
-    from pymochow.exception import ServerError
-    from pymochow.model.enum import (
-        FieldType,
-        IndexType,
-        MetricType,
-        ServerErrCode,
-        TableState,
-    )
-    from pymochow.model.schema import (
-        AutoBuildRowCountIncrement,
-        Field,
-        FilteringIndex,
-        HNSWParams,
-        Schema,
-        VectorIndex,
-    )
-    from pymochow.model.table import (
-        BM25SearchRequest,
-        FloatVector,
-        Partition,
-        Row,
-        VectorSearchConfig,
-        VectorTopkSearchRequest,
-    )
-except ImportError:
-    raise make_import_error("baidu") from None
+optional_import("baidu")
+
+import pymochow  # noqa: E402
+from pymochow.auth.bce_credentials import BceCredentials  # noqa: E402
+from pymochow.configuration import Configuration  # noqa: E402
+from pymochow.exception import ServerError  # noqa: E402
+from pymochow.model.enum import (  # noqa: E402
+    FieldType,
+    IndexType,
+    MetricType,
+    ServerErrCode,
+    TableState,
+)  # noqa: E402
+from pymochow.model.schema import (  # noqa: E402
+    AutoBuildRowCountIncrement,
+    Field,
+    FilteringIndex,
+    HNSWParams,
+    Schema,
+    VectorIndex,
+)  # noqa: E402
+from pymochow.model.table import (  # noqa: E402
+    BM25SearchRequest,
+    FloatVector,
+    Partition,
+    Row,
+    VectorSearchConfig,
+    VectorTopkSearchRequest,
+)  # noqa: E402
+
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ class BaiduDB(VectorStoreBase):
             name=self.table_name,
             vector_size=self.embedding_model_dims,
             distance=self.metric_type,
-        )
+        )  # noqa: E402
 
     def _create_database_if_not_exists(self):
         """Create database if it doesn't exist."""

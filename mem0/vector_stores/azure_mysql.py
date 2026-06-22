@@ -6,20 +6,16 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
 
-try:
-    import pymysql
-    from dbutils.pooled_db import PooledDB
-    from pymysql.cursors import DictCursor
-except ImportError:
-    raise make_import_error("azure_mysql") from None
+optional_import("azure_mysql")
 
-try:
-    from azure.identity import DefaultAzureCredential
-except ImportError:
-    raise make_import_error("azure_mysql") from None
+from azure.identity import DefaultAzureCredential  # noqa: E402
+import pymysql  # noqa: E402
+from dbutils.pooled_db import PooledDB  # noqa: E402
+from pymysql.cursors import DictCursor  # noqa: E402
+
 
 AZURE_IDENTITY_AVAILABLE = True
 

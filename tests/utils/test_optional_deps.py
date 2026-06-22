@@ -3,11 +3,13 @@ import pytest
 from mem0.utils.optional_deps import (
     DepInfo,
     ValidationIssue,
+    _class_exists_in_source,
     build_factory_dep_keys,
     get_all_providers,
     get_dep_info,
     make_import_error,
     optional_import,
+    require_adapter_class,
     run_validation,
     validate_adapters,
     validate_factory_dep_keys,
@@ -144,8 +146,25 @@ class TestOptionalImportHelper:
         except ImportError:
             pytest.skip("groq not installed in test environment")
         else:
-            assert result is not None
-            assert hasattr(result, "__path__") or hasattr(result, "Client")
+            assert result is None
+
+    def test_optional_import_with_module_symbol(self):
+        try:
+            cohere = optional_import("cohere_reranker", "cohere")
+        except ImportError:
+            pytest.skip("cohere not installed in test environment")
+        else:
+            assert cohere is not None
+            assert hasattr(cohere, "__path__")
+
+    def test_optional_import_with_class_symbol(self):
+        try:
+            Client = optional_import("groq", "groq.Groq")
+        except ImportError:
+            pytest.skip("groq not installed in test environment")
+        else:
+            assert Client is not None
+            assert isinstance(Client, type)
 
     def test_optional_import_missing_package_raises_registry_error(self):
         from mem0.utils import optional_deps as od
@@ -177,6 +196,141 @@ class TestOptionalImportHelper:
             optional_import("not_a_real_dep_key_12345")
 
 
+class TestClassExistsInSource:
+    def test_class_exists_in_source_true(self):
+        source = """
+class MyClass:
+    pass
+
+def some_func():
+    pass
+"""
+        assert _class_exists_in_source(source, "MyClass") is True
+
+    def test_class_exists_in_source_false(self):
+        source = """
+def some_func():
+    pass
+"""
+        assert _class_exists_in_source(source, "NonExistent") is False
+
+    def test_class_exists_in_source_nested(self):
+        source = """
+class Outer:
+    class Inner:
+        pass
+"""
+        assert _class_exists_in_source(source, "Outer") is True
+        assert _class_exists_in_source(source, "Inner") is True
+
+    def test_class_exists_in_source_syntax_error(self):
+        source = "class Broken: def"
+        assert _class_exists_in_source(source, "Broken") is False
+
+    def test_class_exists_in_source_unicode(self):
+        source = 'class MyClass:\n    """测试类"""\n    pass'
+        assert _class_exists_in_source(source, "MyClass") is True
+
+
+class TestRequireAdapterClass:
+    def test_require_adapter_class_success(self):
+        try:
+            cls = require_adapter_class("ollama")
+        except ImportError:
+            pytest.skip("ollama not installed in test environment")
+        else:
+            assert cls is not None
+            assert cls.__name__ == "OllamaLLM"
+            assert cls.__module__ == "mem0.llms.ollama"
+
+    def test_require_adapter_class_unknown_key(self):
+        with pytest.raises(ValueError, match="Unknown provider"):
+            require_adapter_class("not_a_real_key_12345")
+
+    def test_require_adapter_class_no_contract(self):
+        from mem0.utils import optional_deps as od
+
+        original = dict(od._REGISTRY)
+        fake_info = DepInfo(
+            provider="__test_no_contract",
+            category="llm",
+            import_packages=["test_pkg"],
+            extras=None,
+            pip_packages=["test-pkg"],
+            factory_name=None,
+            adapter_module=None,
+            adapter_class=None,
+            adapter_class_path=None,
+        )
+        od._REGISTRY["__test_no_contract"] = fake_info
+        try:
+            with pytest.raises(ValueError, match="no adapter contract"):
+                require_adapter_class("__test_no_contract")
+        finally:
+            od._REGISTRY = original
+
+    def test_require_adapter_class_returns_type(self):
+        try:
+            cls = require_adapter_class("ollama_emb")
+        except ImportError:
+            pytest.skip("ollama not installed in test environment")
+        else:
+            assert isinstance(cls, type)
+            assert hasattr(cls, "__init__")
+
+
+class TestAdaptersUseOptionalImport:
+    def test_adapters_use_optional_import_instead_of_try_except(self):
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter_dirs = [
+            repo_root / "mem0" / "llms",
+            repo_root / "mem0" / "embeddings",
+            repo_root / "mem0" / "vector_stores",
+            repo_root / "mem0" / "reranker",
+        ]
+        files_with_old_pattern = []
+        for d in adapter_dirs:
+            for py_file in sorted(d.rglob("*.py")):
+                try:
+                    content = py_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if "raise make_import_error(" in content and py_file.name != "__init__.py":
+                    rel = py_file.relative_to(repo_root)
+                    files_with_old_pattern.append(str(rel))
+        assert not files_with_old_pattern, (
+            "These adapter files still use old try/except + make_import_error pattern "
+            "(should use optional_import instead):\n  " + "\n  ".join(files_with_old_pattern)
+        )
+
+    def test_adapters_import_optional_import(self):
+        from pathlib import Path
+        repo_root = Path(__file__).resolve().parents[2]
+        adapter_dirs = [
+            repo_root / "mem0" / "llms",
+            repo_root / "mem0" / "embeddings",
+            repo_root / "mem0" / "vector_stores",
+            repo_root / "mem0" / "reranker",
+        ]
+        files_missing_import = []
+        for d in adapter_dirs:
+            for py_file in sorted(d.rglob("*.py")):
+                if py_file.name == "__init__.py":
+                    continue
+                try:
+                    content = py_file.read_text(encoding="utf-8")
+                except (OSError, UnicodeDecodeError):
+                    continue
+                if "optional_import(" in content and "from mem0.utils.optional_deps import optional_import" not in content:
+                    rel = py_file.relative_to(repo_root)
+                    files_missing_import.append(str(rel))
+        assert not files_missing_import, (
+            "These adapter files call optional_import() but don't import it:\n  " +
+            "\n  ".join(files_missing_import)
+        )
+
+
 class TestAdapterContractValidation:
     def test_validate_adapters_no_errors(self):
         issues = validate_adapters()
@@ -193,9 +347,19 @@ class TestAdapterContractValidation:
         missing_file_errors = [i for i in issues if "adapter file missing" in i.message]
         assert not missing_file_errors
 
+    def test_adapter_classes_exist_in_files(self):
+        issues = validate_adapters()
+        missing_class_errors = [i for i in issues if "not found in" in i.message and "class" in i.message]
+        assert not missing_class_errors
+
     def test_no_unknown_make_import_error_keys(self):
         issues = validate_adapters()
-        unknown_key_errors = [i for i in issues if "not registered" in i.message]
+        unknown_key_errors = [i for i in issues if "not registered" in i.message and "make_import_error" in i.message]
+        assert not unknown_key_errors
+
+    def test_no_unknown_optional_import_keys(self):
+        issues = validate_adapters()
+        unknown_key_errors = [i for i in issues if "not registered" in i.message and "optional_import" in i.message]
         assert not unknown_key_errors
 
     def test_factory_paths_match_registry(self):
@@ -209,6 +373,31 @@ class TestAdapterContractValidation:
         assert "[error]" in s
         assert "provider_x" in s
         assert "something is wrong" in s
+
+    def test_validate_adapters_detects_missing_class(self):
+        from mem0.utils import optional_deps as od
+        original = dict(od._REGISTRY)
+        fake_info = DepInfo(
+            provider="__test_missing_class",
+            category="llm",
+            import_packages=["ollama"],
+            extras="llms",
+            pip_packages=["ollama"],
+            factory_name="ollama",
+            adapter_module="mem0.llms.ollama",
+            adapter_class="NonExistentClass",
+            adapter_class_path="mem0.llms.ollama.NonExistentClass",
+        )
+        od._REGISTRY["__test_missing_class"] = fake_info
+        try:
+            issues = validate_adapters()
+            class_errors = [
+                i for i in issues
+                if "NonExistentClass" in str(i) and "not found" in str(i)
+            ]
+            assert class_errors
+        finally:
+            od._REGISTRY = original
 
 
 class TestFactoryNameAutoDerive:

@@ -1,16 +1,14 @@
 import json
 from typing import Dict, List, Optional
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import litellm
-except ImportError:
-    raise make_import_error("litellm") from None
-
 from mem0.configs.llms.base import BaseLlmConfig
 from mem0.llms.base import LLMBase
 from mem0.memory.utils import extract_json
+from mem0.utils.optional_deps import optional_import
+
+optional_import("litellm")
+
+import litellm  # noqa: E402
 
 
 class LiteLLM(LLMBase):

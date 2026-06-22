@@ -3,18 +3,16 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Union
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import boto3
-    from botocore.exceptions import ClientError, NoCredentialsError
-except ImportError:
-    raise make_import_error("aws_bedrock") from None
-
 from mem0.configs.llms.aws_bedrock import AWSBedrockConfig
 from mem0.configs.llms.base import BaseLlmConfig
 from mem0.llms.base import LLMBase
 from mem0.memory.utils import extract_json
+from mem0.utils.optional_deps import optional_import
+
+optional_import("aws_bedrock")
+
+import boto3  # noqa: E402
+from botocore.exceptions import ClientError, NoCredentialsError  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

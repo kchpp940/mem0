@@ -2,12 +2,12 @@ import os
 from typing import Any, Dict, List
 
 from mem0.reranker.base import BaseReranker
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 
-try:
-    import cohere
-except ImportError:
-    raise make_import_error("cohere_reranker") from None
+optional_import("cohere_reranker")
+
+import cohere  # noqa: E402
+
 
 
 class CohereReranker(BaseReranker):

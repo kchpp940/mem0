@@ -4,17 +4,15 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from pymongo import MongoClient
-    from pymongo.driver_info import DriverInfo
-    from pymongo.errors import PyMongoError
-    from pymongo.operations import SearchIndexModel
-except ImportError:
-    raise make_import_error("mongodb") from None
-
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("mongodb")
+
+from pymongo import MongoClient  # noqa: E402
+from pymongo.driver_info import DriverInfo  # noqa: E402
+from pymongo.errors import PyMongoError  # noqa: E402
+from pymongo.operations import SearchIndexModel  # noqa: E402
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)

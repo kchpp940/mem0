@@ -2,17 +2,14 @@ import json
 import os
 from typing import Literal, Optional
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import boto3
-except ImportError:
-    raise make_import_error("aws_bedrock_emb") from None
-
-import numpy as np
-
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
+from mem0.utils.optional_deps import optional_import
+
+optional_import("aws_bedrock_emb")
+
+import boto3  # noqa: E402
+import numpy as np  # noqa: E402
 
 
 class AWSBedrockEmbedding(EmbeddingBase):

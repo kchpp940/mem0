@@ -82,21 +82,71 @@ def make_import_error(provider: str) -> ImportError:
     return ImportError(_build_message(info))
 
 
-def optional_import(provider: str) -> Any:
+def optional_import(provider: str, symbol: Optional[str] = None) -> Any:
+    """统一可选导入 helper。
+
+    使用方式:
+        optional_import("cohere_reranker")                              # 仅检查依赖，不返回值
+        cohere = optional_import("cohere_reranker", "cohere")           # import cohere
+        Client = optional_import("cohere_reranker", "cohere.Client")    # from cohere import Client
+        Tag = optional_import("redis_vs", "redisvl.query.filter.Tag")   # from redisvl.query.filter import Tag
+
+    Args:
+        provider: registry 中的 dep_key
+        symbol: 可选的符号路径（"module" 或 "module.ClassName" 或 "module.submodule.ClassName"）
+
+    Returns:
+        None（仅检查时）或导入的模块/符号
+
+    Raises:
+        ImportError: provider 不存在或任何 import_packages 无法导入时
+    """
     info = _REGISTRY.get(provider)
     if info is None:
         raise ImportError(f"Unknown provider: {provider}")
-    try:
-        import importlib
-        if len(info.import_packages) == 1:
-            module = importlib.import_module(info.import_packages[0])
-            return module
-        modules = []
-        for pkg in info.import_packages:
-            modules.append(importlib.import_module(pkg))
-        return modules
-    except ImportError:
-        raise ImportError(_build_message(info)) from None
+    import importlib
+    last_err = None
+    for pkg in info.import_packages:
+        try:
+            importlib.import_module(pkg)
+        except ImportError as e:
+            last_err = e
+    if last_err is not None:
+        raise make_import_error(provider) from last_err
+    if symbol is None:
+        return None
+    parts = symbol.split(".")
+    mod = importlib.import_module(parts[0])
+    for part in parts[1:]:
+        mod = getattr(mod, part)
+    return mod
+
+
+def require_adapter_class(dep_key: str) -> type:
+    """从 registry 声明的 adapter_module 中解析 adapter_class 并返回。
+
+    用于 validate_adapters() 中做静态解析校验，也可以在运行时动态加载适配器类。
+
+    Args:
+        dep_key: registry 中的 dep_key
+
+    Returns:
+        解析到的 adapter class 对象
+
+    Raises:
+        ValueError: registry 中没有 adapter 契约
+        ImportError: adapter_module 无法导入
+        AttributeError: adapter_module 中找不到 adapter_class
+    """
+    info = _REGISTRY.get(dep_key)
+    if info is None:
+        raise ValueError(f"Unknown provider: {dep_key}")
+    if info.adapter_module is None or info.adapter_class is None:
+        raise ValueError(f"Provider {dep_key} has no adapter contract in registry")
+    import importlib
+    mod = importlib.import_module(info.adapter_module)
+    cls = getattr(mod, info.adapter_class)
+    return cls
 
 
 # ── pyproject.toml extras parsing & validation ────────────────────────
@@ -242,11 +292,38 @@ def _collect_factory_paths() -> Dict[str, Dict[str, str]]:
     return result
 
 
+def _class_exists_in_source(content: str, class_name: str) -> bool:
+    """用 AST 静态检查源码中是否定义了指定的 class（不需要实际 import 模块）。"""
+    try:
+        import ast
+        tree = ast.parse(content)
+    except (SyntaxError, UnicodeDecodeError):
+        return False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return True
+    return False
+
+
 def validate_adapters() -> List[ValidationIssue]:
     repo_root = Path(__file__).resolve().parents[2]
     issues: List[ValidationIssue] = []
     adapter_keys = _scan_adapter_keys(repo_root)
     factory_paths = _collect_factory_paths()
+
+    optional_import_pattern = re.compile(r'optional_import\(\s*["\']([^"\']+)["\']')
+    optional_import_keys: Dict[str, List[str]] = {}
+    mem0_root = repo_root / "mem0"
+    for py_file in sorted(mem0_root.rglob("*.py")):
+        try:
+            content = py_file.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        keys = optional_import_pattern.findall(content)
+        if not keys:
+            continue
+        rel = str(py_file.relative_to(repo_root)).replace("/", ".")[:-3]
+        optional_import_keys[rel] = keys
 
     registry_by_path: Dict[str, DepInfo] = {}
     for dep_key, info in _REGISTRY.items():
@@ -272,6 +349,16 @@ def validate_adapters() -> List[ValidationIssue]:
             content = py_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+
+        if not _class_exists_in_source(content, class_name):
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    dep_key,
+                    f"class {class_name!r} not found in {py_path.relative_to(repo_root)} (registry declares {info.adapter_class_path!r})",
+                )
+            )
+
         has_try_except_import = False
         try:
             lines = content.splitlines()
@@ -316,6 +403,17 @@ def validate_adapters() -> List[ValidationIssue]:
                         "error",
                         used_key,
                         f"{module_rel}.py uses make_import_error({used_key!r}) which is not registered in optional_deps registry",
+                    )
+                )
+
+    for module_rel, keys in optional_import_keys.items():
+        for used_key in keys:
+            if used_key not in _REGISTRY:
+                issues.append(
+                    ValidationIssue(
+                        "error",
+                        used_key,
+                        f"{module_rel}.py uses optional_import({used_key!r}) which is not registered in optional_deps registry",
                     )
                 )
 

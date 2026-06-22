@@ -2,12 +2,12 @@ from typing import Literal, Optional
 
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 
-try:
-    from langchain.embeddings.base import Embeddings
-except ImportError:
-    raise make_import_error("langchain_emb") from None
+optional_import("langchain_emb")
+
+from langchain.embeddings.base import Embeddings  # noqa: E402
+
 
 
 class LangchainEmbedding(EmbeddingBase):

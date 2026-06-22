@@ -5,19 +5,17 @@ from functools import reduce
 
 import numpy as np
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import redis
-    from redis.commands.search.query import Query
-    from redisvl.index import SearchIndex
-    from redisvl.query import TextQuery, VectorQuery
-    from redisvl.query.filter import Tag
-except ImportError:
-    raise make_import_error("redis_vs") from None
-
 from mem0.memory.utils import extract_json
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("redis_vs")
+
+import redis  # noqa: E402
+from redis.commands.search.query import Query  # noqa: E402
+from redisvl.index import SearchIndex  # noqa: E402
+from redisvl.query import TextQuery, VectorQuery  # noqa: E402
+from redisvl.query.filter import Tag  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

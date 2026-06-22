@@ -5,18 +5,16 @@ from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import weaviate
-    import weaviate.classes.config as wvcc
-    from weaviate.classes.init import AdditionalConfig, Auth, Timeout
-    from weaviate.classes.query import Filter, MetadataQuery
-    from weaviate.util import get_valid_uuid
-except ImportError:
-    raise make_import_error("weaviate") from None
-
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("weaviate")
+
+import weaviate  # noqa: E402
+import weaviate.classes.config as wvcc  # noqa: E402
+from weaviate.classes.init import AdditionalConfig, Auth, Timeout  # noqa: E402
+from weaviate.classes.query import Filter, MetadataQuery  # noqa: E402
+from weaviate.util import get_valid_uuid  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

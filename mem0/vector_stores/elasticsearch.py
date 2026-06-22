@@ -1,18 +1,16 @@
 import logging
 from typing import Any, Dict, List, Optional
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from elasticsearch import Elasticsearch
-    from elasticsearch.helpers import bulk
-except ImportError:
-    raise make_import_error("elasticsearch_vs") from None
-
 from pydantic import BaseModel
 
 from mem0.configs.vector_stores.elasticsearch import ElasticsearchConfig
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("elasticsearch_vs")
+
+from elasticsearch import Elasticsearch  # noqa: E402
+from elasticsearch.helpers import bulk  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

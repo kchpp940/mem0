@@ -2,16 +2,14 @@ import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from turbopuffer import Turbopuffer as TurbopufferClient
-except ImportError:
-    raise make_import_error("turbopuffer") from None
-
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("turbopuffer")
+
+from turbopuffer import Turbopuffer as TurbopufferClient  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

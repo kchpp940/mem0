@@ -10,8 +10,12 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("faiss")
+
+import faiss  # noqa: E402
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*SwigPy.*")
 warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigvarlink.*")
@@ -19,10 +23,6 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*swigva
 logging.getLogger("faiss").setLevel(logging.WARNING)
 logging.getLogger("faiss.loader").setLevel(logging.WARNING)
 
-try:
-    import faiss
-except ImportError:
-    raise make_import_error("faiss") from None
 
 logger = logging.getLogger(__name__)
 

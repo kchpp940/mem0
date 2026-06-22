@@ -5,13 +5,13 @@ import numpy as np
 from mem0.configs.rerankers.base import BaseRerankerConfig
 from mem0.configs.rerankers.huggingface import HuggingFaceRerankerConfig
 from mem0.reranker.base import BaseReranker
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 
-try:
-    import torch
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-except ImportError:
-    raise make_import_error("huggingface_reranker") from None
+optional_import("huggingface_reranker")
+
+import torch  # noqa: E402
+from transformers import AutoModelForSequenceClassification, AutoTokenizer  # noqa: E402
+
 
 
 class HuggingFaceReranker(BaseReranker):

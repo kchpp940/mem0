@@ -7,7 +7,10 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
+from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("pgvector")
 
 try:
     from psycopg import sql
@@ -17,17 +20,12 @@ try:
     logger = logging.getLogger(__name__)
     logger.info("Using psycopg (psycopg3) with ConnectionPool for PostgreSQL connections")
 except ImportError:
-    try:
-        from psycopg2 import sql
-        from psycopg2.extras import Json, execute_values
-        from psycopg2.pool import ThreadedConnectionPool as ConnectionPool
-        PSYCOPG_VERSION = 2
-        logger = logging.getLogger(__name__)
-        logger.info("Using psycopg2 with ThreadedConnectionPool for PostgreSQL connections")
-    except ImportError:
-        raise make_import_error("pgvector") from None
-
-from mem0.vector_stores.base import VectorStoreBase
+    from psycopg2 import sql  # noqa: E402
+    from psycopg2.extras import Json, execute_values  # noqa: E402
+    from psycopg2.pool import ThreadedConnectionPool as ConnectionPool  # noqa: E402
+    PSYCOPG_VERSION = 2
+    logger = logging.getLogger(__name__)
+    logger.info("Using psycopg2 with ThreadedConnectionPool for PostgreSQL connections")
 
 logger = logging.getLogger(__name__)
 

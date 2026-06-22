@@ -7,16 +7,14 @@ import numpy as np
 import pytz
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import valkey
-    from valkey.exceptions import ResponseError
-except ImportError:
-    raise make_import_error("valkey_vs") from None
-
 from mem0.memory.utils import extract_json
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("valkey_vs")
+
+import valkey  # noqa: E402
+from valkey.exceptions import ResponseError  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

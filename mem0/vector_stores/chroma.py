@@ -3,15 +3,13 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    import chromadb
-    from chromadb.config import Settings
-except ImportError:
-    raise make_import_error("chroma") from None
-
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("chroma")
+
+import chromadb  # noqa: E402
+from chromadb.config import Settings  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

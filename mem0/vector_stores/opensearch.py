@@ -2,17 +2,15 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from opensearchpy import OpenSearch, RequestsHttpConnection
-except ImportError:
-    raise make_import_error("opensearch") from None
-
 from pydantic import BaseModel
 
 from mem0.configs.vector_stores.opensearch import OpenSearchConfig
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("opensearch")
+
+from opensearchpy import OpenSearch, RequestsHttpConnection  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

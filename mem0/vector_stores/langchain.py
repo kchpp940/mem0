@@ -3,14 +3,12 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from langchain_community.vectorstores import VectorStore
-except ImportError:
-    raise make_import_error("langchain_vs") from None
-
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("langchain_vs")
+
+from langchain_community.vectorstores import VectorStore  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

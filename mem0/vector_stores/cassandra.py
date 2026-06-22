@@ -7,15 +7,13 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from pydantic import BaseModel
 
-from mem0.utils.optional_deps import make_import_error
-
-try:
-    from cassandra.auth import PlainTextAuthProvider
-    from cassandra.cluster import Cluster
-except ImportError:
-    raise make_import_error("cassandra") from None
-
+from mem0.utils.optional_deps import optional_import
 from mem0.vector_stores.base import VectorStoreBase
+
+optional_import("cassandra")
+
+from cassandra.auth import PlainTextAuthProvider  # noqa: E402
+from cassandra.cluster import Cluster  # noqa: E402
 
 logger = logging.getLogger(__name__)
 

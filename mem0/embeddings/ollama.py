@@ -2,12 +2,12 @@ from typing import Literal, Optional
 
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 
-try:
-    from ollama import Client
-except ImportError:
-    raise make_import_error("ollama_emb") from None
+optional_import("ollama_emb")
+
+from ollama import Client  # noqa: E402
+
 
 
 class OllamaEmbedding(EmbeddingBase):

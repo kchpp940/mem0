@@ -7,12 +7,12 @@ from mem0.configs.rerankers.sentence_transformer import (
     SentenceTransformerRerankerConfig,
 )
 from mem0.reranker.base import BaseReranker
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 
-try:
-    from sentence_transformers import CrossEncoder
-except ImportError:
-    raise make_import_error("sentence_transformer") from None
+optional_import("sentence_transformer")
+
+from sentence_transformers import CrossEncoder  # noqa: E402
+
 
 
 class SentenceTransformerReranker(BaseReranker):

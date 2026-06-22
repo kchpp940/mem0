@@ -2,12 +2,12 @@ from typing import Literal, Optional
 
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import optional_import
 
-try:
-    from fastembed import TextEmbedding
-except ImportError:
-    raise make_import_error("fastembed") from None
+optional_import("fastembed")
+
+from fastembed import TextEmbedding  # noqa: E402
+
 
 class FastEmbedEmbedding(EmbeddingBase):
     def __init__(self, config: Optional[BaseEmbedderConfig] = None):

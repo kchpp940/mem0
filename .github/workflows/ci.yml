@@ -110,6 +110,9 @@ jobs:
       - name: Run Linting
         if: needs.check_changes.outputs.mem0_changed == 'true'
         run: make lint
+      - name: Validate optional dependency registry
+        if: needs.check_changes.outputs.mem0_changed == 'true'
+        run: python mem0/utils/optional_deps.py
       - name: Run tests and generate coverage report
         if: needs.check_changes.outputs.mem0_changed == 'true'
         run: make test

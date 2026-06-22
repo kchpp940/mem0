@@ -1,11 +1,12 @@
 import pytest
 
-from mem0.utils.factory import get_factory_dep_keys
 from mem0.utils.optional_deps import (
     DepInfo,
+    build_factory_dep_keys,
     get_all_providers,
     get_dep_info,
     make_import_error,
+    run_validation,
     validate_factory_dep_keys,
     validate_registry,
 )
@@ -19,9 +20,21 @@ class TestDepInfo:
             import_packages=["test_pkg"],
             extras="test-extras",
             pip_packages=["test-pkg"],
+            factory_name="test",
         )
         with pytest.raises(AttributeError):
             info.provider = "changed"
+
+    def test_dep_info_with_none_factory_name(self):
+        info = DepInfo(
+            provider="test",
+            category="nlp",
+            import_packages=["test_pkg"],
+            extras=None,
+            pip_packages=["test-pkg"],
+            factory_name=None,
+        )
+        assert info.factory_name is None
 
 
 class TestRegistryBasics:
@@ -32,6 +45,7 @@ class TestRegistryBasics:
         assert info.category == "llm"
         assert "groq" in info.import_packages
         assert info.extras == "llms"
+        assert info.factory_name == "groq"
 
     def test_get_dep_info_missing(self):
         assert get_dep_info("nonexistent_provider") is None
@@ -64,6 +78,34 @@ class TestRegistryBasics:
         assert "mem0ai[" not in msg
 
 
+class TestFactoryNameAutoDerive:
+    def test_build_factory_dep_keys_returns_mapping(self):
+        keys = build_factory_dep_keys()
+        assert isinstance(keys, dict)
+        assert "llm" in keys
+        assert "embedding" in keys
+        assert "vector_store" in keys
+        assert "reranker" in keys
+
+    def test_same_factory_name_different_categories(self):
+        keys = build_factory_dep_keys()
+        assert keys["llm"]["ollama"] == "ollama"
+        assert keys["embedding"]["ollama"] == "ollama_emb"
+
+    def test_factory_name_to_dep_key_mapping(self):
+        keys = build_factory_dep_keys()
+        assert keys["reranker"]["cohere"] == "cohere_reranker"
+        assert keys["reranker"]["huggingface"] == "huggingface_reranker"
+        assert keys["vector_store"]["redis"] == "redis_vs"
+        assert keys["vector_store"]["elasticsearch"] == "elasticsearch_vs"
+
+    def test_no_factory_name_excluded(self):
+        keys = build_factory_dep_keys()
+        all_dep_keys = {dk for m in keys.values() for dk in m.values()}
+        assert "qdrant_extra" not in all_dep_keys
+        assert "spacy" not in all_dep_keys
+
+
 class TestRegistryPyprojectValidation:
     def test_validate_registry_no_errors(self):
         issues = validate_registry()
@@ -94,44 +136,38 @@ class TestRegistryPyprojectValidation:
 
 
 class TestFactoryDepKeyValidation:
-    def test_all_factory_dep_keys_exist_in_registry(self):
-        factory_dep_keys = get_factory_dep_keys()
-        all_issues = []
-        for category, mapping in factory_dep_keys.items():
-            issues = validate_factory_dep_keys(mapping, category)
-            all_issues.extend(issues)
-        errors = [i for i in all_issues if i.severity == "error"]
+    def test_all_factory_dep_keys_valid(self):
+        keys = build_factory_dep_keys()
+        issues = validate_factory_dep_keys(keys)
+        errors = [i for i in issues if i.severity == "error"]
         assert not errors, f"Factory dep key errors: {[str(i) for i in errors]}"
 
     def test_all_factory_dep_keys_category_match(self):
-        factory_dep_keys = get_factory_dep_keys()
-        all_issues = []
-        for category, mapping in factory_dep_keys.items():
-            issues = validate_factory_dep_keys(mapping, category)
-            all_issues.extend(issues)
-        warnings = [i for i in all_issues if i.severity == "warning"]
+        keys = build_factory_dep_keys()
+        issues = validate_factory_dep_keys(keys)
+        warnings = [i for i in issues if i.severity == "warning"]
         assert not warnings, f"Factory dep key category mismatches: {[str(i) for i in warnings]}"
 
-    def test_factory_has_llm_dep_keys(self):
-        keys = get_factory_dep_keys()
-        assert "llm" in keys
-        assert "groq" in keys["llm"]
-        assert "anthropic" in keys["llm"]
 
-    def test_factory_has_vector_store_dep_keys(self):
-        keys = get_factory_dep_keys()
-        assert "vector_store" in keys
-        assert "chroma" in keys["vector_store"]
-        assert "pgvector" in keys["vector_store"]
+class TestRunValidation:
+    def test_run_validation_passes(self):
+        issues = run_validation()
+        assert not issues, f"Validation issues: {[str(i) for i in issues]}"
 
-    def test_factory_has_embedding_dep_keys(self):
-        keys = get_factory_dep_keys()
-        assert "embedding" in keys
-        assert "ollama" in keys["embedding"]
-        assert "fastembed" in keys["embedding"]
-
-    def test_factory_has_reranker_dep_keys(self):
-        keys = get_factory_dep_keys()
-        assert "reranker" in keys
-        assert "cohere" in keys["reranker"]
-        assert "sentence_transformer" in keys["reranker"]
+    def test_run_validation_catches_errors(self):
+        from mem0.utils import optional_deps
+        original = dict(optional_deps._REGISTRY)
+        optional_deps._REGISTRY["__test_bad"] = DepInfo(
+            provider="__test_bad",
+            category="llm",
+            import_packages=["nonexistent_pkg"],
+            extras="nonexistent-extras-group",
+            pip_packages=["nonexistent-pkg"],
+            factory_name=None,
+        )
+        try:
+            issues = run_validation()
+            errors = [i for i in issues if i.severity == "error"]
+            assert errors
+        finally:
+            optional_deps._REGISTRY = original

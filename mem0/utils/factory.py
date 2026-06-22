@@ -23,62 +23,9 @@ from mem0.configs.rerankers.sentence_transformer import (
 )
 from mem0.configs.rerankers.zero_entropy import ZeroEntropyRerankerConfig
 from mem0.embeddings.mock import MockEmbeddings
-from mem0.utils.optional_deps import make_import_error
+from mem0.utils.optional_deps import build_factory_dep_keys, make_import_error
 
-_FACTORY_DEP_KEYS: Dict[str, Dict[str, str]] = {
-    "llm": {
-        "ollama": "ollama",
-        "groq": "groq",
-        "together": "together",
-        "litellm": "litellm",
-        "anthropic": "anthropic",
-        "gemini": "gemini",
-        "aws_bedrock": "aws_bedrock",
-        "langchain": "langchain",
-    },
-    "embedding": {
-        "ollama": "ollama_emb",
-        "huggingface": "huggingface",
-        "azure_openai": "azure_openai_emb",
-        "gemini": "gemini_emb",
-        "vertexai": "vertexai_emb",
-        "together": "together_emb",
-        "aws_bedrock": "aws_bedrock_emb",
-        "fastembed": "fastembed",
-        "langchain": "langchain_emb",
-    },
-    "vector_store": {
-        "chroma": "chroma",
-        "pgvector": "pgvector",
-        "milvus": "milvus",
-        "upstash_vector": "upstash_vector",
-        "pinecone": "pinecone",
-        "weaviate": "weaviate",
-        "supabase": "supabase",
-        "azure_ai_search": "azure_ai_search",
-        "azure_mysql": "azure_mysql",
-        "mongodb": "mongodb",
-        "redis": "redis_vs",
-        "valkey": "valkey_vs",
-        "elasticsearch": "elasticsearch_vs",
-        "opensearch": "opensearch",
-        "faiss": "faiss",
-        "cassandra": "cassandra",
-        "databricks": "databricks",
-        "baidu": "baidu",
-        "neptune": "neptune",
-        "turbopuffer": "turbopuffer",
-        "s3_vectors": "s3_vectors",
-        "langchain": "langchain_vs",
-        "vertex_ai_vector_search": "vertex_ai_vector_search",
-    },
-    "reranker": {
-        "cohere": "cohere_reranker",
-        "sentence_transformer": "sentence_transformer",
-        "zero_entropy": "zero_entropy",
-        "huggingface": "huggingface_reranker",
-    },
-}
+_FACTORY_DEP_KEYS: Dict[str, Dict[str, str]] = build_factory_dep_keys()
 
 
 def load_class(class_type, category: str, provider_name: Optional[str] = None):

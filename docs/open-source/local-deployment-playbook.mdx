@@ -1,0 +1,455 @@
+---
+title: "Local Deployment Playbook"
+description: "Step-by-step guide to standing up Mem0 server and OpenMemory locally with Docker Compose — including health checks, migrations, configuration validation, and smoke tests."
+icon: "server"
+---
+
+This playbook takes you from a clean checkout to a fully running local Mem0 deployment — both the **server stack** (REST API + dashboard + Postgres) and the **OpenMemory stack** (MCP API + UI + Qdrant).
+
+<Info>
+  **Use this page when…**
+  - You want to self-host both server and OpenMemory on your laptop for development.
+  - You need a reproducible, end-to-end verified local deployment — not just "docker compose up".
+  - Configuration errors have bitten you before and you want friendly, actionable diagnostics instead of raw connection traces.
+</Info>
+
+---
+
+## Prerequisites
+
+| Tool | Minimum version | How to check |
+|---|---|---|
+| Docker Engine | 24.x | `docker --version` |
+| Docker Compose Plugin | v2.20 | `docker compose version` |
+| OpenSSL (for secrets) | any recent | `openssl version` |
+| 8 GB RAM | — | `sysctl -n hw.memsize` (macOS) / `free -h` (Linux) |
+
+<Warning>
+  **Ports in use by default:** 5432 (postgres), 6333 (qdrant), 7474/7687 (neo4j, server stack optional), 8432 (postgres-expose), 8687/8474 (neo4j-expose), 8765 (openmemory-api), 8888 (server-api), 3000 (server-dashboard), 3001 (openmemory-ui). Free any ports you don't need by overriding the corresponding `*_PORT` variable in your `.env`.
+</Warning>
+
+---
+
+## 1. Environment configuration
+
+All services in this repository share a single `.env` file at the repository root. Sub-project `.env` files (`server/.env`, `openmemory/api/.env`, `openmemory/ui/.env`) are thin subsets — the root `.env.example` is the **authoritative reference**.
+
+### 1.1 Copy the template
+
+```bash
+cd mem0
+cp .env.example .env
+```
+
+### 1.2 Generate required secrets
+
+The entrypoint refuses to start without `POSTGRES_PASSWORD` and (for the server stack) `JWT_SECRET`. Generate them now:
+
+```bash
+# Required for both stacks
+echo "POSTGRES_PASSWORD=$(openssl rand -base64 32 | tr -d '\n')" >> .env
+
+# Required for server stack (skip if you only deploy OpenMemory)
+echo "JWT_SECRET=$(openssl rand -base64 48 | tr -d '\n')" >> .env
+```
+
+### 1.3 Choose an LLM provider
+
+Pick **one** of the following provider combinations and paste the variables into `.env`. The configuration validator in the container entrypoint will flag missing keys before any process tries to start.
+
+<Tabs>
+  <Tab title="OpenAI (simplest)">
+
+  ```bash
+  MEM0_LLM_PROVIDER=openai
+  MEM0_EMBEDDER_PROVIDER=openai
+  OPENAI_API_KEY=sk-...
+  ```
+
+  </Tab>
+  <Tab title="Ollama (100% local, no API key)">
+
+  Install [Ollama](https://ollama.com) first, then pull the models you want:
+
+  ```bash
+  ollama pull llama3.1
+  ollama pull nomic-embed-text
+  ```
+
+  Then in `.env`:
+
+  ```bash
+  MEM0_LLM_PROVIDER=ollama
+  MEM0_EMBEDDER_PROVIDER=ollama
+  OLLAMA_BASE_URL=http://host.docker.internal:11434
+  MEM0_DEFAULT_LLM_MODEL=llama3.1
+  MEM0_DEFAULT_EMBEDDER_MODEL=nomic-embed-text
+  ```
+
+  <Note>
+    Inside Docker containers, `OLLAMA_BASE_URL` must reach the **host's** Ollama daemon. `host.docker.internal` works on Docker Desktop (macOS/Windows). On Linux add `--add-host host.docker.internal:host-gateway` to the compose service, or use `172.17.0.1`.
+  </Note>
+
+  </Tab>
+  <Tab title="Anthropic / Gemini / Groq / etc.">
+
+  ```bash
+  # Anthropic
+  MEM0_LLM_PROVIDER=anthropic
+  ANTHROPIC_API_KEY=sk-ant-...
+
+  # Google Gemini
+  MEM0_LLM_PROVIDER=gemini
+  GOOGLE_API_KEY=...
+
+  # Groq
+  MEM0_LLM_PROVIDER=groq
+  GROQ_API_KEY=gsk_...
+  ```
+
+  For embeddings you'll still need an embedder provider — either keep `MEM0_EMBEDDER_PROVIDER=openai` or set it to the same provider if it exposes embeddings.
+
+  </Tab>
+</Tabs>
+
+### 1.4 (Optional) Local-only tweaks
+
+Add any of these to `.env` when running on your laptop:
+
+```bash
+# Disable JWT auth on the server (NOT for production)
+AUTH_DISABLED=true
+
+# Override default ports
+MEM0_SERVER_PORT=8888
+MEM0_DASHBOARD_PORT=3000
+OPENMEMORY_API_PORT=8765
+OPENMEMORY_UI_PORT=3001
+POSTGRES_EXPOSE_PORT=8432
+QDRANT_EXPOSE_PORT=6333
+
+# Override user identity for OpenMemory
+MEM0_USER_ID=your-local-user-id
+```
+
+---
+
+## 2. Pre-flight validation (no containers yet)
+
+Before touching Docker, run the non-container smoke tests. This catches configuration typos in seconds:
+
+```bash
+python scripts/compose_smoke_test.py --all
+```
+
+**Expected result:** `10 passed, 0 failed, 10 total`.
+
+The test groups are:
+
+| Group | What it checks |
+|---|---|
+| `--env-check` | `.env` exists, `POSTGRES_PASSWORD` is set, legacy variables are flagged but still supported |
+| `--config-errors` | Missing `POSTGRES_PASSWORD` / `JWT_SECRET` / `OPENAI_API_KEY` produce structured `❌ key / 💡 suggestion` messages with exit code 2 (not raw `psycopg.OperationalError`) |
+| `--health-endpoints` | Both FastAPI apps define the shared `/health` endpoint with the expected JSON shape |
+
+If anything fails here, **fix it before starting containers**. The validator is the same code that runs inside the container — if it fails here it will fail inside the container too.
+
+---
+
+## 3. Deploy the stacks
+
+Pick one stack or deploy both. Each stack has a lifecycle script in its directory plus a centralized smoke test.
+
+### 3.1 Server stack (API + Dashboard + Postgres + pgvector)
+
+```bash
+cd server
+
+# 1. Build (pulls postgres:16-pgvector + mem0 image)
+docker compose build
+
+# 2. Start in background
+docker compose up -d
+
+# 3. Watch until all three services report (healthy)
+#    postgres  — ready in ~15 s
+#    mem0      — waits for postgres healthy → runs alembic → starts uvicorn
+#    mem0-dashboard — starts after mem0 is healthy
+watch 'docker compose ps'
+```
+
+When all three show `(healthy)`, verify from the host:
+
+```bash
+# API /health
+curl http://localhost:8888/health | jq
+# → {"status":"ok","service":"mem0-server"}
+
+# Dashboard loads
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3000
+# → 200
+```
+
+#### Alternative: one-command bootstrap with admin account
+
+```bash
+cd server
+make bootstrap   # starts compose + creates admin user + prints first API key
+```
+
+### 3.2 OpenMemory stack (MCP API + UI + Qdrant)
+
+```bash
+cd openmemory
+
+# 1. Build (pulls qdrant + openmemory images)
+docker compose build
+
+# 2. Start in background
+docker compose up -d
+
+# 3. Watch until all three services report (healthy)
+#    mem0_store       — Qdrant ready in ~10 s via /readyz
+#    openmemory-mcp   — waits for qdrant healthy → runs alembic → starts uvicorn
+#    openmemory-ui    — starts after the API is up
+watch 'docker compose ps'
+```
+
+When all three show `(healthy)`, verify from the host:
+
+```bash
+# API /health
+curl http://localhost:8765/health | jq
+# → {"status":"ok","service":"openmemory-api","user_id":"..."}
+
+# UI loads
+curl -s -o /dev/null -w "%{http_code}" http://localhost:3001
+# → 200
+```
+
+### 3.3 (Recommended) End-to-end container smoke test
+
+The same smoke-test tool from step 2 can now also drive the real containers. It will build, start, wait for health, verify HTTP endpoints, then (by default) tear down.
+
+```bash
+# Both stacks (takes 5-10 minutes the first time due to image pulls)
+python scripts/compose_smoke_test.py --docker
+
+# Server stack only
+python scripts/compose_smoke_test.py --docker --stack server
+
+# OpenMemory stack only
+python scripts/compose_smoke_test.py --docker --stack openmemory
+
+# Leave containers running after the test (for manual exploration)
+python scripts/compose_smoke_test.py --docker --no-teardown
+```
+
+The docker smoke test produces one result per step:
+
+| Test name | What it means |
+|---|---|
+| `docker_<stack>_build` | `docker compose build` finished with exit code 0 |
+| `docker_<stack>_up` | `docker compose up -d --remove-orphans` finished cleanly |
+| `docker_<stack>_<service>_health` | Compose reported `(healthy)` within the 240 s per-service timeout |
+| `docker_<stack>_<service>_http` | The host can reach the container's `/health` endpoint on the mapped port |
+| `docker_<stack>_teardown` | Compose cleaned up (skipped if `--no-teardown`) |
+
+---
+
+## 4. Troubleshooting
+
+When a service fails to become healthy or an HTTP check times out, the container smoke test automatically fetches the last 80 lines of that service's log and prints a tailored suggestion. If you're debugging manually, use the recipes below.
+
+### 4.1 Diagnose a single service
+
+```bash
+# Replace <service> with the name from `docker compose ps` (e.g. mem0, openmemory-mcp)
+cd server      # or cd openmemory
+docker compose logs --tail=200 <service>
+docker compose exec <service> bash   # inspect inside the running container
+```
+
+### 4.2 Common failure modes
+
+<AccordionGroup>
+  <Accordion title="mem0 / openmemory-mcp exits with exit code 2 immediately">
+
+  Exit code 2 means the **entrypoint configuration validator** caught a missing or invalid env var. Look at the top of the container logs — there will be a `CONFIGURATION ERROR` block in exactly the same format as the non-Docker smoke test:
+
+  ```bash
+  docker compose logs mem0 | head -80
+  ```
+
+  Typical fixes:
+
+  | What the error says | Action |
+  |---|---|
+  | `❌ POSTGRES_PASSWORD` | Add `POSTGRES_PASSWORD=<any-non-empty-value>` to the root `.env` and `docker compose up -d --force-recreate` |
+  | `❌ JWT_SECRET` | Generate one with `openssl rand -base64 48`, add to `.env`, or set `AUTH_DISABLED=true` for local dev |
+  | `❌ OPENAI_API_KEY` | Either add the key, or switch `MEM0_LLM_PROVIDER` / `MEM0_EMBEDDER_PROVIDER` to `ollama` / `anthropic` / `gemini` / `groq` |
+  | `❌ QDRANT_HOST` | Set `QDRANT_HOST=mem0_store` (the compose service name) for containers; localhost only works on the host |
+
+  After editing `.env`, **force-recreate** the service (not just `restart` — Compose caches `env_file`):
+
+  ```bash
+  docker compose up -d --force-recreate <service>
+  ```
+
+  </Accordion>
+
+  <Accordion title="postgres service starts but mem0 logs `password authentication failed`">
+
+  The Postgres container only reads `POSTGRES_PASSWORD` on **first initialization** — when the data volume is empty. If you changed the password after the first run, reset the volume:
+
+  ```bash
+  cd server
+  docker compose down -v      # ⚠️ destroys all data in the bundled postgres
+  docker compose up -d
+  ```
+
+  </Accordion>
+
+  <Accordion title="Alembic migration fails on startup (exit code 3)">
+
+  The entrypoint runs `alembic upgrade head` between config validation and uvicorn. Exit code 3 means migrations failed. Inspect:
+
+  ```bash
+  docker compose logs mem0 | grep -i -A 20 alembic
+  # or
+  docker compose logs openmemory-mcp | grep -i -A 20 alembic
+  ```
+
+  Causes to check:
+
+  - The `mem0_app` database doesn't exist — the init script at `server/init-db.sh` should create it automatically on first run. If you skipped it, create it manually: `CREATE DATABASE mem0_app;`
+  - `POSTGRES_HOST` inside the container is set to `localhost` instead of the compose service name `postgres`
+  - Schema migration conflict from a failed earlier migration run — in dev, `docker compose down -v` is the fastest reset
+
+  </Accordion>
+
+  <Accordion title="Qdrant (mem0_store) healthy but OpenMemory API logs `connection refused` on 6333">
+
+  The `openmemory-mcp` container talks to qdrant on the **internal Docker network**, not on `localhost:6333`. Ensure the `.env` has:
+
+  ```bash
+  VECTOR_STORE_PROVIDER=qdrant
+  QDRANT_HOST=mem0_store    # compose service name, NOT localhost
+  QDRANT_PORT=6333
+  ```
+
+  Then `docker compose up -d --force-recreate openmemory-mcp`.
+
+  </Accordion>
+
+  <Accordion title="Dashboard loads but all API calls return 401 or CORS">
+
+  - **401 with auth enabled:** Log in through the dashboard, or issue a per-user API key from `/dashboard/api-keys`. Local dev shortcut: set `AUTH_DISABLED=true` in `.env` and force-recreate the `mem0` service.
+  - **CORS:** The server whitelists origins via `DASHBOARD_URL` in `.env`. Default is `http://localhost:3000`. If you run the dashboard on a different origin (custom port, domain, HTTPS), set `DASHBOARD_URL=https://your-origin` and also `NEXT_PUBLIC_API_URL=https://your-api-origin` before rebuilding the dashboard image.
+
+  </Accordion>
+
+  <Accordion title="UI or dashboard container is `(unhealthy)` but the API works">
+
+  UI healthchecks hit the frontend root URL, not `/health`. They need a **sub-second** response. First-run Next.js builds inside the container can take longer. Give it another minute, then:
+
+  ```bash
+  # Server dashboard
+  docker compose logs mem0-dashboard --tail=100
+
+  # OpenMemory UI
+  docker compose logs openmemory-ui --tail=100
+  ```
+
+  Look for `npm run build` errors or missing `NEXT_PUBLIC_*` variables.
+
+  </Accordion>
+
+  <Accordion title="Ollama provider: container says `Connection refused` on port 11434">
+
+  Containers can't reach your host's Ollama on `localhost:11434`. Set:
+
+  ```bash
+  OLLAMA_BASE_URL=http://host.docker.internal:11434
+  ```
+
+  On Docker Desktop for Mac/Windows this works out of the box. On plain Docker/Linux, add `extra_hosts` to the compose service:
+
+  ```yaml
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  ```
+
+  Then verify the model names match exactly:
+
+  ```bash
+  ollama list   # on the host — confirm MEM0_DEFAULT_LLM_MODEL matches an entry here
+  ```
+
+  </Accordion>
+</AccordionGroup>
+
+### 4.3 Fast diagnostic script
+
+For an ad-hoc health snapshot (without bringing the full test harness up):
+
+```bash
+# Server stack
+cd server
+echo "=== Compose status ==="
+docker compose ps
+echo ""
+echo "=== Unhealthy service logs ==="
+for svc in $(docker compose ps --format json | jq -r '.[] | select(.State | test("healthy") | not) | .Service'); do
+  echo "─── $svc ───"
+  docker compose logs --tail=40 "$svc"
+done
+```
+
+---
+
+## 5. Teardown
+
+```bash
+# One stack
+cd server && docker compose down      # stops + removes containers, keeps data volumes
+cd server && docker compose down -v   # ⚠️ also destroys postgres/qdrant data volumes
+
+# Both stacks via the smoke test (it already knows the paths)
+python scripts/compose_smoke_test.py --docker   # it tears down at the end by default
+```
+
+---
+
+## 6. Cheat sheet
+
+| Task | Command |
+|---|---|
+| Full non-container validation | `python scripts/compose_smoke_test.py --all` |
+| Full container validation, both stacks | `python scripts/compose_smoke_test.py --docker` |
+| Container validation, leave running | `python scripts/compose_smoke_test.py --docker --no-teardown` |
+| Start server stack | `cd server && docker compose up -d` |
+| Start OpenMemory stack | `cd openmemory && docker compose up -d` |
+| Server API health | `curl http://localhost:8888/health` |
+| OpenMemory API health | `curl http://localhost:8765/health` |
+| Server dashboard | open http://localhost:3000 |
+| OpenMemory UI | open http://localhost:3001 |
+| Pick up `.env` edits | `docker compose up -d --force-recreate <service>` |
+| Reset all local data | `docker compose down -v` in each stack directory |
+
+---
+
+<CardGroup cols={2}>
+  <Card title="Self-Hosted Setup (auth wizard)" icon="rocket" href="/open-source/setup">
+    Create the first admin account, issue API keys, and explore the dashboard features.
+  </Card>
+  <Card title="REST API reference" icon="code" href="/open-source/features/rest-api">
+    Endpoint tables, auth modes, and example requests.
+  </Card>
+  <Card title="Configure components" icon="sliders" href="/open-source/configuration">
+    Swap LLMs, embedders, vector stores, and rerankers beyond the OpenAI defaults.
+  </Card>
+  <Card title="OpenMemory (MCP)" icon="link" href="/platform/mem0-mcp">
+    Use the OpenMemory MCP server with agents that speak the Model Context Protocol.
+  </Card>
+</CardGroup>

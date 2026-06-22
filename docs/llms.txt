@@ -181,6 +181,7 @@ If the user is on a pre-current major (Python < 2, TS < 3, or Platform `output_f
 - [Open Source Python Quickstart](https://docs.mem0.ai/open-source/python-quickstart) [OSS]: Use for the first self-hosted Python integration.
 - [Open Source Node.js Quickstart](https://docs.mem0.ai/open-source/node-quickstart) [OSS]: Use for the first self-hosted Node integration.
 - [Self-Hosted Setup](https://docs.mem0.ai/open-source/setup) [OSS]: Use when standing up the bundled REST server and dashboard via Docker Compose, including auth, API keys, and the setup wizard.
+- [Local Deployment Playbook](https://docs.mem0.ai/open-source/local-deployment-playbook) [OSS]: Use when doing a reproducible end-to-end local deployment of BOTH server and OpenMemory stacks — .env generation, pre-flight validation, compose build/up/health/wait, HTTP smoke tests, and a troubleshooting reference for all common failure modes. Also covers `python scripts/compose_smoke_test.py --docker` and `python scripts/deploy_local.py`.
 
 ## Core Concepts
 

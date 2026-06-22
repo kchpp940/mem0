@@ -159,6 +159,7 @@
                     "pages": [
                       "open-source/overview",
                       "open-source/setup",
+                      "open-source/local-deployment-playbook",
                       "vibecoding",
                       "open-source/python-quickstart",
                       "open-source/node-quickstart"

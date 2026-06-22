@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from rich.console import Console
 from rich.progress import track
 
 from mem0_cli import __version__
@@ -16,13 +15,10 @@ from mem0_cli.core.wrapper import (
     execute,
 )
 
-# ── Backwards-compatible module-level consoles.  Legacy code and tests patch
-# these names; rendering actually flows through wrapper/renderers consoles now.
-console = Console()
-err_console = Console(stderr=True)
-
 
 def cmd_version() -> None:
+    from rich.console import Console
+
     Console().print(f"  [{BRAND_COLOR}]◆ Mem0[/] CLI v{__version__}")
 
 

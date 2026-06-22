@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from rich.console import Console
-
 from mem0_cli.core import renderers
 from mem0_cli.core.errors import InputError
 from mem0_cli.core.requests import build_entity_delete_payload
@@ -13,11 +11,6 @@ from mem0_cli.core.wrapper import (
     confirm_destructive,
     execute,
 )
-
-# ── Backwards-compatible module-level consoles.  Legacy code and tests patch
-# these names; rendering actually flows through wrapper/renderers consoles now.
-console = Console()
-err_console = Console(stderr=True)
 
 _VALID_ENTITY_TYPES = {"users", "agents", "apps", "runs"}
 

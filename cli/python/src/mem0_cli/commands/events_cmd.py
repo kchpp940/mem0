@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from rich.console import Console
-
 from mem0_cli.core import renderers
 from mem0_cli.core.options import require_positive
 from mem0_cli.core.wrapper import (
@@ -11,11 +9,6 @@ from mem0_cli.core.wrapper import (
     build_command_context,
     execute,
 )
-
-# ── Backwards-compatible module-level consoles.  Legacy code and tests patch
-# these names; rendering actually flows through wrapper/renderers consoles now.
-console = Console()
-err_console = Console(stderr=True)
 
 
 def cmd_event_list(

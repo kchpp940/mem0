@@ -18,8 +18,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from rich.console import Console
-
 from mem0_cli.core import renderers
 from mem0_cli.core.options import (
     require_between,
@@ -39,19 +37,6 @@ from mem0_cli.core.wrapper import (
     confirm_destructive,
     execute,
 )
-
-# ── Backwards-compatible module-level consoles.  Legacy code and tests patch
-# these names; rendering actually flows through wrapper/renderers consoles now.
-console = Console()
-err_console = Console(stderr=True)
-
-
-def _stdin_is_piped() -> bool:
-    """Backwards-compatible shim — tests patch this name."""
-
-    from mem0_cli.core.options import stdin_is_piped
-
-    return stdin_is_piped()
 
 # ── add ───────────────────────────────────────────────────────────────────
 

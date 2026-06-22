@@ -3,12 +3,22 @@
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from mem0_cli.backend.base import Backend
-from mem0_cli.config import Mem0Config
+# Ensure subprocess tests can import mem0_cli via python -m mem0_cli
+_SRC_DIR = str(Path(__file__).resolve().parent.parent / "src")
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+os.environ.setdefault("PYTHONPATH", _SRC_DIR)
+if _SRC_DIR not in os.environ.get("PYTHONPATH", ""):
+    os.environ["PYTHONPATH"] = _SRC_DIR + os.pathsep + os.environ.get("PYTHONPATH", "")
+
+from mem0_cli.backend.base import Backend  # noqa: E402
+from mem0_cli.config import Mem0Config  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -144,3 +154,33 @@ def sample_config():
     config.platform.api_key = "m0-test-key-12345678"
     config.platform.base_url = "https://api.mem0.ai"
     return config
+
+
+def make_console():
+    from io import StringIO
+
+    from rich.console import Console
+    buf = StringIO()
+    return Console(file=buf, force_terminal=False, no_color=True, width=120), buf
+
+
+def make_err_console():
+    from io import StringIO
+
+    from rich.console import Console
+    buf = StringIO()
+    return Console(file=buf, force_terminal=False, no_color=True, width=120), buf
+
+
+def patch_consoles(console, err_console):
+    """Return a context manager that patches all Rich console locations at once."""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    stack = ExitStack()
+    stack.enter_context(patch("mem0_cli.core.console.stdout_console", console))
+    stack.enter_context(patch("mem0_cli.core.console.err_console", err_console))
+    stack.enter_context(patch("mem0_cli.core.renderers.console", console))
+    stack.enter_context(patch("mem0_cli.core.renderers._core_err_console", err_console))
+    stack.enter_context(patch("mem0_cli.core.wrapper.stdout_console", console))
+    stack.enter_context(patch("mem0_cli.core.wrapper.err_console", err_console))
+    return stack

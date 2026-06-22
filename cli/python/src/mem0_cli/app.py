@@ -130,46 +130,6 @@ def _get_backend(
     return backend
 
 
-def _resolve_ids(
-    config,
-    *,
-    user_id: str | None = None,
-    agent_id: str | None = None,
-    app_id: str | None = None,
-    run_id: str | None = None,
-) -> dict[str, str | None]:
-    """Backwards-compatible shim — :func:`mem0_cli.core.options.resolve_scope` is canonical.
-
-    Old tests (:mod:`tests.test_config`) import this helper directly.
-    """
-
-    from mem0_cli.core.options import resolve_scope
-
-    return resolve_scope(
-        config,
-        user_id=user_id,
-        agent_id=agent_id,
-        app_id=app_id,
-        run_id=run_id,
-    ).as_dict()
-
-
-def _stdin_is_piped() -> bool:
-    """Backwards-compatible shim — use :func:`mem0_cli.core.options.stdin_is_piped`."""
-
-    from mem0_cli.core.options import stdin_is_piped
-
-    return stdin_is_piped()
-
-
-def _read_stdin() -> str | None:
-    """Backwards-compatible shim — use :func:`mem0_cli.core.options.read_stdin`."""
-
-    from mem0_cli.core.options import read_stdin
-
-    return read_stdin()
-
-
 # ── Global options (shared via callback) ──────────────────────────────────
 
 

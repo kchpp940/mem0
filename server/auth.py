@@ -8,7 +8,7 @@ from db import get_db
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
-from mem0.configs.env_loader import (
+from _env_loader import (
     ConfigError,
     ConfigValidationError,
     fatal_config_error,

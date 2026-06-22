@@ -1,8 +1,10 @@
 import logging
+import os
 import sys
 
-from dotenv import load_dotenv
-from mem0.configs.env_loader import (
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from _env_loader import (
     ConfigError,
     ConfigValidationError,
     build_postgres_url,

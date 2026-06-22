@@ -133,7 +133,16 @@ app.include_router(stats_router)
 app.include_router(config_router)
 app.include_router(backup_router)
 
-# Add pagination support
+@app.get("/health", summary="Health check endpoint for Docker probes")
+def health_check():
+    """Lightweight health check that returns 200 as long as the server is up.
+
+    Does not depend on database or memory provider connectivity — use /api/stats
+    or /memories for deeper readiness checks.
+    """
+    return {"status": "ok", "service": "openmemory-api", "user_id": USER_ID}
+
+
 add_pagination(app)
 
 logging.info("OpenMemory API started successfully (user_id=%s)", USER_ID)

@@ -19,7 +19,7 @@ from errors import (
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
-from mem0.configs.env_loader import (
+from _env_loader import (
     ConfigError,
     ConfigValidationError,
     fatal_config_error,
@@ -554,6 +554,16 @@ def reset_memory(_auth=Depends(require_admin)):
         return {"message": "All memories reset"}
     except Exception:
         raise upstream_error()
+
+
+@app.get("/health", summary="Health check endpoint for Docker probes")
+def health_check():
+    """Lightweight health check that returns 200 as long as the server is up.
+
+    Does not depend on database or memory provider connectivity — use /configure
+    or /memories for deeper readiness checks.
+    """
+    return {"status": "ok", "service": "mem0-server"}
 
 
 @app.get("/", summary="Redirect to the OpenAPI documentation", include_in_schema=False)

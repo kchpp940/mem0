@@ -37,8 +37,12 @@ import sys
 from app.database import SessionLocal
 from app.models import Config as ConfigModel
 
-from mem0 import Memory
-from mem0.configs.env_loader import (
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
+
+from _env_loader import (
     ConfigError,
     ConfigValidationError,
     fatal_config_error,
@@ -46,6 +50,8 @@ from mem0.configs.env_loader import (
     get_env_int,
     load_env,
 )
+
+from mem0 import Memory
 
 load_env()
 

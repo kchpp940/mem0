@@ -4,7 +4,7 @@ import sys
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
-from mem0.configs.env_loader import (
+from _env_loader import (
     ConfigValidationError,
     build_postgres_url,
     fatal_config_error,

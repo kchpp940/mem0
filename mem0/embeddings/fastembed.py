@@ -1,12 +1,13 @@
-from typing import Optional, Literal
+from typing import Literal, Optional
 
-from mem0.embeddings.base import EmbeddingBase
 from mem0.configs.embeddings.base import BaseEmbedderConfig
+from mem0.embeddings.base import EmbeddingBase
+from mem0.utils.optional_deps import make_import_error
 
 try:
     from fastembed import TextEmbedding
 except ImportError:
-    raise ImportError("FastEmbed is not installed.  Please install it using `pip install fastembed`")
+    raise make_import_error("fastembed") from None
 
 class FastEmbedEmbedding(EmbeddingBase):
     def __init__(self, config: Optional[BaseEmbedderConfig] = None):

@@ -7,14 +7,13 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from cassandra.auth import PlainTextAuthProvider
     from cassandra.cluster import Cluster
 except ImportError:
-    raise ImportError(
-        "Apache Cassandra vector store requires cassandra-driver. "
-        "Please install it using 'pip install cassandra-driver'"
-    )
+    raise make_import_error("cassandra") from None
 
 from mem0.vector_stores.base import VectorStoreBase
 

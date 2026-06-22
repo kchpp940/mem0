@@ -4,11 +4,17 @@ from datetime import datetime, timezone
 from functools import reduce
 
 import numpy as np
-import redis
-from redis.commands.search.query import Query
-from redisvl.index import SearchIndex
-from redisvl.query import TextQuery, VectorQuery
-from redisvl.query.filter import Tag
+
+from mem0.utils.optional_deps import make_import_error
+
+try:
+    import redis
+    from redis.commands.search.query import Query
+    from redisvl.index import SearchIndex
+    from redisvl.query import TextQuery, VectorQuery
+    from redisvl.query.filter import Tag
+except ImportError:
+    raise make_import_error("redis_vs") from None
 
 from mem0.memory.utils import extract_json
 from mem0.vector_stores.base import VectorStoreBase

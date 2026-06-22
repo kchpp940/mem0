@@ -5,9 +5,15 @@ from typing import Dict
 
 import numpy as np
 import pytz
-import valkey
 from pydantic import BaseModel
-from valkey.exceptions import ResponseError
+
+from mem0.utils.optional_deps import make_import_error
+
+try:
+    import valkey
+    from valkey.exceptions import ResponseError
+except ImportError:
+    raise make_import_error("valkey_vs") from None
 
 from mem0.memory.utils import extract_json
 from mem0.vector_stores.base import VectorStoreBase

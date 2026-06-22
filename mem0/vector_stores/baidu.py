@@ -4,6 +4,7 @@ from typing import Dict, Optional
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
 from mem0.vector_stores.base import VectorStoreBase
 
 try:
@@ -35,7 +36,7 @@ try:
         VectorTopkSearchRequest,
     )
 except ImportError:
-    raise ImportError("The 'pymochow' library is required. Please install it using 'pip install pymochow'.")
+    raise make_import_error("baidu") from None
 
 logger = logging.getLogger(__name__)
 

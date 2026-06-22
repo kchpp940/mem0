@@ -1,24 +1,13 @@
-import subprocess
-import sys
 from typing import Literal, Optional
 
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
+from mem0.utils.optional_deps import make_import_error
 
 try:
     from ollama import Client
 except ImportError:
-    user_input = input("The 'ollama' library is required. Install it now? [y/N]: ")
-    if user_input.lower() == "y":
-        try:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "ollama"])
-            from ollama import Client
-        except subprocess.CalledProcessError:
-            print("Failed to install 'ollama'. Please install it manually using 'pip install ollama'.")
-            sys.exit(1)
-    else:
-        print("The required 'ollama' library is not installed.")
-        sys.exit(1)
+    raise make_import_error("ollama_emb") from None
 
 
 class OllamaEmbedding(EmbeddingBase):

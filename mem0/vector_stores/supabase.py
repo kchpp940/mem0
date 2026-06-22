@@ -4,10 +4,12 @@ from typing import List, Optional
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     import vecs
 except ImportError:
-    raise ImportError("The 'vecs' library is required. Please install it using 'pip install vecs'.")
+    raise make_import_error("supabase") from None
 
 from mem0.configs.vector_stores.supabase import IndexMeasure, IndexMethod
 from mem0.vector_stores.base import VectorStoreBase

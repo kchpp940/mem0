@@ -6,23 +6,22 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
+from mem0.vector_stores.base import VectorStoreBase
+
 try:
     import pymysql
     from dbutils.pooled_db import PooledDB
     from pymysql.cursors import DictCursor
 except ImportError:
-    raise ImportError(
-        "Azure MySQL vector store requires PyMySQL and DBUtils. "
-        "Please install them using 'pip install pymysql dbutils'"
-    )
+    raise make_import_error("azure_mysql") from None
 
 try:
     from azure.identity import DefaultAzureCredential
-    AZURE_IDENTITY_AVAILABLE = True
 except ImportError:
-    AZURE_IDENTITY_AVAILABLE = False
+    raise make_import_error("azure_mysql") from None
 
-from mem0.vector_stores.base import VectorStoreBase
+AZURE_IDENTITY_AVAILABLE = True
 
 logger = logging.getLogger(__name__)
 

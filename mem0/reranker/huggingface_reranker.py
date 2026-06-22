@@ -1,16 +1,17 @@
-from typing import List, Dict, Any, Union
+from typing import Any, Dict, List, Union
+
 import numpy as np
 
-from mem0.reranker.base import BaseReranker
 from mem0.configs.rerankers.base import BaseRerankerConfig
 from mem0.configs.rerankers.huggingface import HuggingFaceRerankerConfig
+from mem0.reranker.base import BaseReranker
+from mem0.utils.optional_deps import make_import_error
 
 try:
-    from transformers import AutoTokenizer, AutoModelForSequenceClassification
     import torch
-    TRANSFORMERS_AVAILABLE = True
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
 except ImportError:
-    TRANSFORMERS_AVAILABLE = False
+    raise make_import_error("huggingface_reranker") from None
 
 
 class HuggingFaceReranker(BaseReranker):
@@ -23,10 +24,6 @@ class HuggingFaceReranker(BaseReranker):
         Args:
             config: Configuration object with reranker parameters
         """
-        if not TRANSFORMERS_AVAILABLE:
-            raise ImportError("transformers package is required for HuggingFaceReranker. Install with: pip install transformers torch")
-
-        # Convert to HuggingFaceRerankerConfig if needed
         if isinstance(config, dict):
             config = HuggingFaceRerankerConfig(**config)
         elif isinstance(config, BaseRerankerConfig) and not isinstance(config, HuggingFaceRerankerConfig):

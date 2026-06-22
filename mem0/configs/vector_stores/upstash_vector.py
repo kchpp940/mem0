@@ -3,10 +3,12 @@ from typing import Any, ClassVar, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from upstash_vector import Index
 except ImportError:
-    raise ImportError("The 'upstash_vector' library is required. Please install it using 'pip install upstash_vector'.")
+    raise make_import_error("upstash_vector") from None
 
 
 class UpstashVectorConfig(BaseModel):

@@ -5,23 +5,28 @@ import uuid
 from datetime import date, datetime
 from typing import List, Optional
 
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.catalog import (
-    ColumnInfo,
-    ColumnTypeName,
-    DataSourceFormat,
-    PrimaryKeyConstraint,
-    TableConstraint,
-    TableType,
-)
-from databricks.sdk.service.sql import StatementParameterListItem
-from databricks.sdk.service.vectorsearch import (
-    DeltaSyncVectorIndexSpecRequest,
-    DirectAccessVectorIndexSpec,
-    EmbeddingSourceColumn,
-    EmbeddingVectorColumn,
-    VectorIndexType,
-)
+from mem0.utils.optional_deps import make_import_error
+
+try:
+    from databricks.sdk import WorkspaceClient
+    from databricks.sdk.service.catalog import (
+        ColumnInfo,
+        ColumnTypeName,
+        DataSourceFormat,
+        PrimaryKeyConstraint,
+        TableConstraint,
+        TableType,
+    )
+    from databricks.sdk.service.sql import StatementParameterListItem
+    from databricks.sdk.service.vectorsearch import (
+        DeltaSyncVectorIndexSpecRequest,
+        DirectAccessVectorIndexSpec,
+        EmbeddingSourceColumn,
+        EmbeddingVectorColumn,
+        VectorIndexType,
+    )
+except ImportError:
+    raise make_import_error("databricks") from None
 from pydantic import BaseModel
 
 from mem0.memory.utils import extract_json

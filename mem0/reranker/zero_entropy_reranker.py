@@ -1,13 +1,13 @@
 import os
-from typing import List, Dict, Any
+from typing import Any, Dict, List
 
 from mem0.reranker.base import BaseReranker
+from mem0.utils.optional_deps import make_import_error
 
 try:
     from zeroentropy import ZeroEntropy
-    ZERO_ENTROPY_AVAILABLE = True
 except ImportError:
-    ZERO_ENTROPY_AVAILABLE = False
+    raise make_import_error("zero_entropy") from None
 
 
 class ZeroEntropyReranker(BaseReranker):
@@ -20,9 +20,6 @@ class ZeroEntropyReranker(BaseReranker):
         Args:
             config: ZeroEntropyRerankerConfig object with configuration parameters
         """
-        if not ZERO_ENTROPY_AVAILABLE:
-            raise ImportError("zeroentropy package is required for ZeroEntropyReranker. Install with: pip install zeroentropy")
-        
         self.config = config
         self.api_key = config.api_key or os.getenv("ZERO_ENTROPY_API_KEY")
         if not self.api_key:

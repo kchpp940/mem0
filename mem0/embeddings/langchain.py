@@ -2,11 +2,12 @@ from typing import Literal, Optional
 
 from mem0.configs.embeddings.base import BaseEmbedderConfig
 from mem0.embeddings.base import EmbeddingBase
+from mem0.utils.optional_deps import make_import_error
 
 try:
     from langchain.embeddings.base import Embeddings
 except ImportError:
-    raise ImportError("langchain is not installed. Please install it using `pip install langchain`")
+    raise make_import_error("langchain_emb") from None
 
 
 class LangchainEmbedding(EmbeddingBase):

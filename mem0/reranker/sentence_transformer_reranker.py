@@ -1,15 +1,18 @@
-from typing import List, Dict, Any, Union
+from typing import Any, Dict, List, Union
+
 import numpy as np
 
-from mem0.reranker.base import BaseReranker
 from mem0.configs.rerankers.base import BaseRerankerConfig
-from mem0.configs.rerankers.sentence_transformer import SentenceTransformerRerankerConfig
+from mem0.configs.rerankers.sentence_transformer import (
+    SentenceTransformerRerankerConfig,
+)
+from mem0.reranker.base import BaseReranker
+from mem0.utils.optional_deps import make_import_error
 
 try:
     from sentence_transformers import CrossEncoder
-    SENTENCE_TRANSFORMERS_AVAILABLE = True
 except ImportError:
-    SENTENCE_TRANSFORMERS_AVAILABLE = False
+    raise make_import_error("sentence_transformer") from None
 
 
 class SentenceTransformerReranker(BaseReranker):
@@ -22,10 +25,6 @@ class SentenceTransformerReranker(BaseReranker):
         Args:
             config: Configuration object with reranker parameters
         """
-        if not SENTENCE_TRANSFORMERS_AVAILABLE:
-            raise ImportError("sentence-transformers package is required for SentenceTransformerReranker. Install with: pip install sentence-transformers")
-
-        # Convert to SentenceTransformerRerankerConfig if needed
         if isinstance(config, dict):
             config = SentenceTransformerRerankerConfig(**config)
         elif isinstance(config, BaseRerankerConfig) and not isinstance(config, SentenceTransformerRerankerConfig):

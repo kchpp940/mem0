@@ -6,6 +6,7 @@ from typing import List, Optional
 from pydantic import BaseModel
 
 from mem0.memory.utils import extract_json
+from mem0.utils.optional_deps import make_import_error
 from mem0.vector_stores.base import VectorStoreBase
 
 try:
@@ -27,9 +28,7 @@ try:
     )
     from azure.search.documents.models import VectorizedQuery
 except ImportError:
-    raise ImportError(
-        "The 'azure-search-documents' library is required. Please install it using 'pip install azure-search-documents==11.5.2'."
-    )
+    raise make_import_error("azure_ai_search") from None
 
 logger = logging.getLogger(__name__)
 

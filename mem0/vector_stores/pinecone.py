@@ -4,12 +4,12 @@ from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from pinecone import Pinecone, PodSpec, ServerlessSpec, Vector
 except ImportError:
-    raise ImportError(
-        "Pinecone requires extra dependencies. Install with `pip install pinecone pinecone-text`"
-    ) from None
+    raise make_import_error("pinecone") from None
 
 from mem0.vector_stores.base import VectorStoreBase
 

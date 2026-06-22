@@ -7,7 +7,8 @@ from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from pydantic import BaseModel
 
-# Try to import psycopg (psycopg3) first, then fall back to psycopg2
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from psycopg import sql
     from psycopg.types.json import Json
@@ -24,10 +25,7 @@ except ImportError:
         logger = logging.getLogger(__name__)
         logger.info("Using psycopg2 with ThreadedConnectionPool for PostgreSQL connections")
     except ImportError:
-        raise ImportError(
-            "Neither 'psycopg' nor 'psycopg2' library is available. "
-            "Please install one of them using 'pip install psycopg[pool]' or 'pip install psycopg2'"
-        )
+        raise make_import_error("pgvector") from None
 
 from mem0.vector_stores.base import VectorStoreBase
 

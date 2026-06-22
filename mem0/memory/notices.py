@@ -9,7 +9,6 @@ from typing import Any, Dict, Optional, Tuple
 from mem0.memory import telemetry as telemetry_module
 from mem0.memory.setup import _load_config, _write_config
 
-
 FLAG_KEY = "mem0-oss-notices"
 NOTICE_ID = "first_run"
 TEMPORAL_FEATURE_NOTICE_ID = "temporal_stub"

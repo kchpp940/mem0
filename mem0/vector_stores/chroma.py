@@ -3,11 +3,13 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     import chromadb
     from chromadb.config import Settings
 except ImportError:
-    raise ImportError("The 'chromadb' library is required. Please install it using 'pip install chromadb'.")
+    raise make_import_error("chroma") from None
 
 from mem0.vector_stores.base import VectorStoreBase
 

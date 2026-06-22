@@ -1,10 +1,12 @@
 import json
 from typing import Dict, List, Optional, Union
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from ollama import Client
 except ImportError:
-    raise ImportError("The 'ollama' library is required. Please install it using 'pip install ollama'.")
+    raise make_import_error("ollama") from None
 
 from mem0.configs.llms.base import BaseLlmConfig
 from mem0.configs.llms.ollama import OllamaConfig

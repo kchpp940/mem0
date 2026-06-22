@@ -1,22 +1,16 @@
 import logging
-import subprocess
-import sys
 import threading
 from typing import List, Optional, Union
 
 import httpx
 
 import mem0
+from mem0.utils.optional_deps import make_import_error
 
 try:
     import litellm
 except ImportError:
-    try:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "litellm"])
-        import litellm
-    except subprocess.CalledProcessError:
-        print("Failed to install 'litellm'. Please install it manually using 'pip install litellm'.")
-        sys.exit(1)
+    raise make_import_error("litellm") from None
 
 from mem0 import Memory, MemoryClient
 from mem0.configs.prompts import MEMORY_ANSWER_PROMPT

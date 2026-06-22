@@ -4,12 +4,13 @@ from typing import Dict, Optional
 from pydantic import BaseModel
 
 from mem0.configs.vector_stores.milvus import MetricType
+from mem0.utils.optional_deps import make_import_error
 from mem0.vector_stores.base import VectorStoreBase
 
 try:
     import pymilvus  # noqa: F401
 except ImportError:
-    raise ImportError("The 'pymilvus' library is required. Please install it using 'pip install pymilvus'.")
+    raise make_import_error("milvus") from None
 
 from pymilvus import (
     CollectionSchema,

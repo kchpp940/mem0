@@ -2,10 +2,12 @@ import logging
 import time
 from typing import Any, Dict, List, Optional
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from opensearchpy import OpenSearch, RequestsHttpConnection
 except ImportError:
-    raise ImportError("OpenSearch requires extra dependencies. Install with `pip install opensearch-py`") from None
+    raise make_import_error("opensearch") from None
 
 from pydantic import BaseModel
 

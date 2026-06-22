@@ -1,10 +1,12 @@
 import os
 from typing import Dict, List, Optional, Union
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     import anthropic
 except ImportError:
-    raise ImportError("The 'anthropic' library is required. Please install it using 'pip install anthropic'.")
+    raise make_import_error("anthropic") from None
 
 from mem0.configs.llms.anthropic import AnthropicConfig
 from mem0.configs.llms.base import BaseLlmConfig

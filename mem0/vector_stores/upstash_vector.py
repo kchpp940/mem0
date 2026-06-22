@@ -3,12 +3,13 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
 from mem0.vector_stores.base import VectorStoreBase
 
 try:
     from upstash_vector import Index
 except ImportError:
-    raise ImportError("The 'upstash_vector' library is required. Please install it using 'pip install upstash_vector'.")
+    raise make_import_error("upstash_vector") from None
 
 
 logger = logging.getLogger(__name__)

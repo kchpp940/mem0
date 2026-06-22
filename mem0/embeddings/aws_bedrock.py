@@ -2,10 +2,12 @@ import json
 import os
 from typing import Literal, Optional
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     import boto3
 except ImportError:
-    raise ImportError("The 'boto3' library is required. Please install it using 'pip install boto3'.")
+    raise make_import_error("aws_bedrock_emb") from None
 
 import numpy as np
 

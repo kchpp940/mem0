@@ -1,11 +1,13 @@
 import logging
 from typing import Any, Dict, List, Optional
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from elasticsearch import Elasticsearch
     from elasticsearch.helpers import bulk
 except ImportError:
-    raise ImportError("Elasticsearch requires extra dependencies. Install with `pip install elasticsearch`") from None
+    raise make_import_error("elasticsearch_vs") from None
 
 from pydantic import BaseModel
 

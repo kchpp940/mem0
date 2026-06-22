@@ -2,10 +2,12 @@ import json
 import os
 from typing import Dict, List, Optional
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from groq import Groq
 except ImportError:
-    raise ImportError("The 'groq' library is required. Please install it using 'pip install groq'.")
+    raise make_import_error("groq") from None
 
 from mem0.configs.llms.base import BaseLlmConfig
 from mem0.llms.base import LLMBase

@@ -4,13 +4,15 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel
 
+from mem0.utils.optional_deps import make_import_error
+
 try:
     from pymongo import MongoClient
     from pymongo.driver_info import DriverInfo
     from pymongo.errors import PyMongoError
     from pymongo.operations import SearchIndexModel
 except ImportError:
-    raise ImportError("The 'pymongo' library is required. Please install it using 'pip install pymongo'.")
+    raise make_import_error("mongodb") from None
 
 from mem0.vector_stores.base import VectorStoreBase
 

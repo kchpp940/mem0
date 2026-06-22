@@ -1,5 +1,6 @@
-import os
+import logging
 import secrets
+import sys
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -7,17 +8,47 @@ from db import get_db
 from fastapi import Depends, HTTPException, Request
 from fastapi.security import APIKeyHeader, HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
+from mem0.configs.env_loader import (
+    ConfigError,
+    ConfigValidationError,
+    fatal_config_error,
+    get_env,
+    get_env_bool,
+)
 from models import APIKey, RefreshTokenJti, User
 from passlib.context import CryptContext
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-JWT_SECRET = os.environ.get("JWT_SECRET", "")
+JWT_SECRET = get_env("JWT_SECRET", "")
 JWT_ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_DAYS = 30
-ADMIN_API_KEY = os.environ.get("ADMIN_API_KEY", "")
-AUTH_DISABLED = os.environ.get("AUTH_DISABLED", "").lower() in {"1", "true", "yes", "on"}
+ADMIN_API_KEY = get_env("ADMIN_API_KEY", "")
+AUTH_DISABLED = get_env_bool("AUTH_DISABLED", False)
+
+
+def validate_auth_config() -> None:
+    """Validate auth-related configuration and exit with helpful messages on failure."""
+    errors = []
+    if not AUTH_DISABLED and not JWT_SECRET:
+        errors.append(
+            ConfigError(
+                key="JWT_SECRET",
+                message="JWT_SECRET is required when AUTH_DISABLED is not set to true.",
+                suggestion="Either set JWT_SECRET (generate with: openssl rand -base64 48) or set AUTH_DISABLED=true for local development only.",
+            )
+        )
+    if ADMIN_API_KEY and len(ADMIN_API_KEY) < 16:
+        logging.warning(
+            "ADMIN_API_KEY is shorter than 16 characters — consider using a longer key for production."
+        )
+    if errors:
+        try:
+            raise ConfigValidationError(errors)
+        except ConfigValidationError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

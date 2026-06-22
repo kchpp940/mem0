@@ -1,13 +1,13 @@
 import asyncio
 import logging
 import os
+import sys
 import time
 from typing import Any, Dict, List, Optional
 
 import telemetry
-from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, verify_auth
+from auth import ADMIN_API_KEY, AUTH_DISABLED, JWT_SECRET, require_admin, validate_auth_config, verify_auth
 from db import SessionLocal
-from dotenv import load_dotenv
 from errors import (
     UpstreamError,
     install_request_id_logging,
@@ -19,6 +19,15 @@ from errors import (
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
+from mem0.configs.env_loader import (
+    ConfigError,
+    ConfigValidationError,
+    fatal_config_error,
+    get_env,
+    get_env_bool,
+    get_env_int,
+    load_env,
+)
 from models import RequestLog, User
 from pydantic import BaseModel, Field
 from rate_limit import limiter
@@ -38,7 +47,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from sqlalchemy import func, select
 
-load_dotenv()
+load_env()
 
 install_request_id_logging()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - [%(request_id)s] %(message)s")
@@ -85,35 +94,60 @@ def _warn_if_unconfigured() -> None:
     )
 
 
-if not AUTH_DISABLED and not JWT_SECRET:
-    raise RuntimeError(
-        "JWT_SECRET is required. Set it in .env (generate with `openssl rand -base64 48`) "
-        "or set AUTH_DISABLED=true for local development only."
-    )
+validate_auth_config()
 
 if AUTH_DISABLED:
     logging.warning("AUTH_DISABLED is enabled. Protected endpoints are open for local development only.")
-elif ADMIN_API_KEY and len(ADMIN_API_KEY) < MIN_KEY_LENGTH:
-    logging.warning(
-        "ADMIN_API_KEY is shorter than %d characters - consider using a longer key for production.",
-        MIN_KEY_LENGTH,
-    )
 elif not ADMIN_API_KEY:
     _warn_if_unconfigured()
 
 telemetry.log_status()
 
-POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
-POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
-POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
-POSTGRES_USER = os.environ.get("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.environ.get("POSTGRES_PASSWORD", "postgres")
-POSTGRES_COLLECTION_NAME = os.environ.get("POSTGRES_COLLECTION_NAME", "memories")
+POSTGRES_HOST = get_env("POSTGRES_HOST", "postgres")
+POSTGRES_PORT = get_env_int("POSTGRES_PORT", 5432)
+POSTGRES_DB = get_env("POSTGRES_DB", "postgres")
+POSTGRES_USER = get_env("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = get_env("POSTGRES_PASSWORD", "")
+POSTGRES_COLLECTION_NAME = get_env("POSTGRES_COLLECTION_NAME", "memories")
 
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
-HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
-DEFAULT_LLM_MODEL = os.environ.get("MEM0_DEFAULT_LLM_MODEL", "gpt-4.1-nano-2025-04-14")
-DEFAULT_EMBEDDER_MODEL = os.environ.get("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
+OPENAI_API_KEY = get_env("OPENAI_API_KEY", "")
+HISTORY_DB_PATH = get_env("HISTORY_DB_PATH", "/app/history/history.db")
+DEFAULT_LLM_MODEL = get_env("MEM0_DEFAULT_LLM_MODEL", "gpt-4.1-nano-2025-04-14")
+DEFAULT_EMBEDDER_MODEL = get_env("MEM0_DEFAULT_EMBEDDER_MODEL", "text-embedding-3-small")
+LLM_PROVIDER = get_env("MEM0_LLM_PROVIDER", "openai")
+EMBEDDER_PROVIDER = get_env("MEM0_EMBEDDER_PROVIDER", "openai")
+
+_errors = []
+if not POSTGRES_PASSWORD:
+    _errors.append(
+        ConfigError(
+            key="POSTGRES_PASSWORD",
+            message="POSTGRES_PASSWORD is not set. pgvector memory storage will fail.",
+            suggestion="Set POSTGRES_PASSWORD in your .env file. The postgres docker-compose service also requires this to start.",
+        )
+    )
+if LLM_PROVIDER == "openai" and not OPENAI_API_KEY:
+    _errors.append(
+        ConfigError(
+            key="OPENAI_API_KEY",
+            message="LLM provider is 'openai' but OPENAI_API_KEY is not set.",
+            suggestion="Set OPENAI_API_KEY=<your-key> in your .env, or choose a different MEM0_LLM_PROVIDER (e.g. ollama, anthropic, gemini).",
+        )
+    )
+if EMBEDDER_PROVIDER == "openai" and not OPENAI_API_KEY:
+    _errors.append(
+        ConfigError(
+            key="OPENAI_API_KEY",
+            message="Embedder provider is 'openai' but OPENAI_API_KEY is not set.",
+            suggestion="Set OPENAI_API_KEY=<your-key> in your .env, or choose a different MEM0_EMBEDDER_PROVIDER.",
+        )
+    )
+if _errors:
+    try:
+        raise ConfigValidationError(_errors)
+    except ConfigValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
 
 DEFAULT_CONFIG = {
     "version": "v1.1",
@@ -121,7 +155,7 @@ DEFAULT_CONFIG = {
         "provider": "pgvector",
         "config": {
             "host": POSTGRES_HOST,
-            "port": int(POSTGRES_PORT),
+            "port": POSTGRES_PORT,
             "dbname": POSTGRES_DB,
             "user": POSTGRES_USER,
             "password": POSTGRES_PASSWORD,
@@ -129,10 +163,13 @@ DEFAULT_CONFIG = {
         },
     },
     "llm": {
-        "provider": "openai",
+        "provider": LLM_PROVIDER,
         "config": {"api_key": OPENAI_API_KEY, "temperature": 0.2, "model": DEFAULT_LLM_MODEL},
     },
-    "embedder": {"provider": "openai", "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL}},
+    "embedder": {
+        "provider": EMBEDDER_PROVIDER,
+        "config": {"api_key": OPENAI_API_KEY, "model": DEFAULT_EMBEDDER_MODEL},
+    },
     "history_db_path": HISTORY_DB_PATH,
 }
 
@@ -155,7 +192,7 @@ app = FastAPI(
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_exception_handler(UpstreamError, upstream_error_handler)
-DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://localhost:3000")
+DASHBOARD_URL = get_env("DASHBOARD_URL", "http://localhost:3000")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[DASHBOARD_URL],

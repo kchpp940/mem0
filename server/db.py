@@ -1,19 +1,51 @@
-import os
+import logging
+import sys
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
+from mem0.configs.env_loader import (
+    ConfigValidationError,
+    build_postgres_url,
+    fatal_config_error,
+    get_env,
+    load_env,
+    validate_postgres_connection,
+)
+
+load_env()
+
 
 def _build_database_url() -> str:
-    host = os.environ.get("POSTGRES_HOST", "postgres")
-    port = os.environ.get("POSTGRES_PORT", "5432")
-    user = os.environ.get("POSTGRES_USER", "postgres")
-    password = os.environ.get("POSTGRES_PASSWORD", "postgres")
-    db = os.environ.get("APP_DB_NAME", "mem0_app")
-    return f"postgresql+psycopg://{user}:{password}@{host}:{port}/{db}"
+    errors = validate_postgres_connection()
+    if errors:
+        fatal_config_error(errors)
+
+    db = get_env("MEM0_APP_DB_NAME", "mem0_app") or get_env("APP_DB_NAME", "mem0_app")
+    try:
+        return build_postgres_url(dbname=db)
+    except ConfigValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(2)
 
 
-engine = create_engine(_build_database_url(), pool_pre_ping=True)
+try:
+    engine = create_engine(_build_database_url(), pool_pre_ping=True)
+except ConfigValidationError as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(2)
+except Exception as exc:
+    logging.error(
+        "\n%s\n"
+        "  Failed to connect to the PostgreSQL database.\n"
+        "  Check that POSTGRES_HOST, POSTGRES_PORT, POSTGRES_USER, POSTGRES_PASSWORD, and MEM0_APP_DB_NAME are correct.\n"
+        "  Underlying error: %s\n"
+        "%s",
+        "=" * 72,
+        exc,
+        "=" * 72,
+    )
+    sys.exit(2)
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 

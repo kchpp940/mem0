@@ -156,41 +156,41 @@ class TestNestedAccess:
 
 class TestResolveIds:
     def test_cli_flag_overrides_default(self):
-        from mem0_cli.core.options import resolve_scope
+        from mem0_cli.app import _resolve_ids
 
         config = Mem0Config()
         config.defaults.user_id = "default-user"
-        ids = resolve_scope(
+        ids = _resolve_ids(
             config,
             user_id="cli-user",
             agent_id=None,
-        ).as_dict()
+        )
         assert ids["user_id"] == "cli-user"
 
     def test_default_used_when_flag_is_none(self):
-        from mem0_cli.core.options import resolve_scope
+        from mem0_cli.app import _resolve_ids
 
         config = Mem0Config()
         config.defaults.user_id = "default-user"
         config.defaults.agent_id = "default-agent"
-        ids = resolve_scope(config, user_id=None, agent_id=None).as_dict()
+        ids = _resolve_ids(config, user_id=None, agent_id=None)
         assert ids["user_id"] == "default-user"
         assert ids["agent_id"] == "default-agent"
 
     def test_none_when_neither_set(self):
-        from mem0_cli.core.options import resolve_scope
+        from mem0_cli.app import _resolve_ids
 
         config = Mem0Config()
-        ids = resolve_scope(config, user_id=None, agent_id=None).as_dict()
+        ids = _resolve_ids(config, user_id=None, agent_id=None)
         assert ids["user_id"] is None
         assert ids["agent_id"] is None
         assert ids["app_id"] is None
         assert ids["run_id"] is None
 
     def test_empty_string_treated_as_unset(self):
-        from mem0_cli.core.options import resolve_scope
+        from mem0_cli.app import _resolve_ids
 
         config = Mem0Config()
         config.defaults.user_id = ""
-        ids = resolve_scope(config, user_id=None).as_dict()
+        ids = _resolve_ids(config, user_id=None)
         assert ids["user_id"] is None

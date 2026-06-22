@@ -4,14 +4,19 @@ set -e
 
 echo "🚀 Starting OpenMemory installation..."
 
-# Set environment variables
+# Set environment variables — supports both unified MEM0_* names and legacy names
 OPENAI_API_KEY="${OPENAI_API_KEY:-}"
-USER="${USER:-$(whoami)}"
+MEM0_USER_ID="${MEM0_USER_ID:-${USER:-$(whoami)}}"
+USER="${MEM0_USER_ID}"
 NEXT_PUBLIC_API_URL="${NEXT_PUBLIC_API_URL:-http://localhost:8765}"
+NEXT_PUBLIC_USER_ID="${MEM0_USER_ID}"
 
 if [ -z "$OPENAI_API_KEY" ]; then
-  echo "❌ OPENAI_API_KEY not set. Please run with: curl -sL https://raw.githubusercontent.com/mem0ai/mem0/main/openmemory/run.sh | OPENAI_API_KEY=your_api_key bash"
-  echo "❌ OPENAI_API_KEY not set. You can also set it as global environment variable: export OPENAI_API_KEY=your_api_key"
+  echo "❌ OPENAI_API_KEY not set."
+  echo "   Either:"
+  echo "     1. Copy the repo root .env.example to .env and fill in OPENAI_API_KEY"
+  echo "     2. Run with: OPENAI_API_KEY=your_api_key bash run.sh"
+  echo "     3. Set globally: export OPENAI_API_KEY=your_api_key"
   exit 1
 fi
 
@@ -55,17 +60,17 @@ export NEXT_PUBLIC_USER_ID="$USER"
 export FRONTEND_PORT
 
 # Parse vector store selection (env var or flag). Default: qdrant
-VECTOR_STORE="${VECTOR_STORE:-qdrant}"
+VECTOR_STORE_PROVIDER="${VECTOR_STORE_PROVIDER:-${VECTOR_STORE:-qdrant}}"
 EMBEDDING_DIMS="${EMBEDDING_DIMS:-1536}"
 
 for arg in "$@"; do
   case $arg in
     --vector-store=*)
-      VECTOR_STORE="${arg#*=}"
+      VECTOR_STORE_PROVIDER="${arg#*=}"
       shift
       ;;
     --vector-store)
-      VECTOR_STORE="$2"
+      VECTOR_STORE_PROVIDER="$2"
       shift 2
       ;;
     *)
@@ -73,8 +78,9 @@ for arg in "$@"; do
   esac
 done
 
-export VECTOR_STORE
-echo "🧰 Using vector store: $VECTOR_STORE"
+export VECTOR_STORE_PROVIDER
+export VECTOR_STORE="${VECTOR_STORE_PROVIDER}"
+echo "🧰 Using vector store: $VECTOR_STORE_PROVIDER"
 
 # Function to create compose file by merging vector store config with openmemory-mcp service
 create_compose_file() {
@@ -108,7 +114,9 @@ create_compose_file() {
     image: mem0/openmemory-mcp:latest
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - USER=${USER}
+      - MEM0_USER_ID=${MEM0_USER_ID}
+      - USER=${MEM0_USER_ID}
+      - VECTOR_STORE_PROVIDER=${vector_store}
 EOF
 
   # Add vector store specific environment variables
@@ -126,6 +134,11 @@ EOF
       ;;
     pgvector)
       cat >> docker-compose.yml <<EOF
+      - POSTGRES_HOST=mem0_store
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=mem0
+      - POSTGRES_USER=mem0
+      - POSTGRES_PASSWORD=mem0
       - PG_HOST=mem0_store
       - PG_PORT=5432
       - PG_DB=mem0

@@ -29,13 +29,25 @@ Example configuration that will be automatically adjusted:
 
 import hashlib
 import json
+import logging
 import os
 import socket
+import sys
 
 from app.database import SessionLocal
 from app.models import Config as ConfigModel
 
 from mem0 import Memory
+from mem0.configs.env_loader import (
+    ConfigError,
+    ConfigValidationError,
+    fatal_config_error,
+    get_env,
+    get_env_int,
+    load_env,
+)
+
+load_env()
 
 _memory_client = None
 _config_hash = None
@@ -224,115 +236,197 @@ def _create_embedder_config(provider, model, api_key, base_url, ollama_base_url,
     return config
 
 
+def _resolve_env(new_name: str, old_name: str, default: str = "") -> str:
+    """Resolve an env var, preferring the new unified name and falling back to the legacy name."""
+    val = get_env(new_name, "")
+    if val:
+        return val
+    val = get_env(old_name, "")
+    if val:
+        return val
+    return default
+
+
+def _resolve_env_int(new_name: str, old_name: str, default: int) -> int:
+    val = get_env_int(new_name, None)
+    if val is not None:
+        return val
+    raw = os.environ.get(old_name)
+    if raw:
+        try:
+            return int(raw)
+        except ValueError:
+            pass
+    return default
+
+
+def validate_startup_config() -> None:
+    """Validate critical configuration at startup time and exit with a helpful message on failure."""
+    errors: list[ConfigError] = []
+
+    llm_provider = _resolve_env("MEM0_LLM_PROVIDER", "LLM_PROVIDER", "openai").lower()
+    if llm_provider == "openai" and not _resolve_env("OPENAI_API_KEY", "OPENAI_API_KEY", ""):
+        errors.append(
+            ConfigError(
+                key="OPENAI_API_KEY",
+                message="LLM provider is 'openai' but OPENAI_API_KEY is not set.",
+                suggestion="Set OPENAI_API_KEY=<your-key> in your .env file, or choose a different MEM0_LLM_PROVIDER (e.g. ollama, anthropic, gemini).",
+            )
+        )
+
+    vector_store_provider = _resolve_env("VECTOR_STORE_PROVIDER", "VECTOR_STORE", "qdrant").lower()
+    has_vector_store = False
+    if vector_store_provider == "qdrant":
+        has_vector_store = bool(_resolve_env("QDRANT_HOST", "QDRANT_HOST", ""))
+    elif vector_store_provider == "pgvector":
+        has_vector_store = bool(_resolve_env("POSTGRES_HOST", "PG_HOST", "")) or bool(
+            _resolve_env("POSTGRES_PASSWORD", "PG_PASSWORD", "")
+        )
+    elif vector_store_provider == "chroma":
+        has_vector_store = bool(_resolve_env("CHROMA_HOST", "CHROMA_HOST", ""))
+    elif vector_store_provider == "redis":
+        has_vector_store = bool(_resolve_env("REDIS_URL", "REDIS_URL", ""))
+    elif vector_store_provider == "weaviate":
+        has_vector_store = bool(_resolve_env("WEAVIATE_HOST", "WEAVIATE_HOST", ""))
+    elif vector_store_provider == "milvus":
+        has_vector_store = bool(_resolve_env("MILVUS_HOST", "MILVUS_HOST", ""))
+    elif vector_store_provider == "elasticsearch":
+        has_vector_store = bool(_resolve_env("ELASTICSEARCH_HOST", "ELASTICSEARCH_HOST", ""))
+    elif vector_store_provider == "faiss":
+        has_vector_store = True
+
+    if not has_vector_store and vector_store_provider != "faiss":
+        errors.append(
+            ConfigError(
+                key=f"VECTOR_STORE_PROVIDER={vector_store_provider}",
+                message=(
+                    f"VECTOR_STORE_PROVIDER is '{vector_store_provider}' but no connection "
+                    f"environment variables were found for it."
+                ),
+                suggestion=(
+                    f"For {vector_store_provider}, set the corresponding env vars "
+                    f"(e.g. QDRANT_HOST/QDRANT_PORT, POSTGRES_*, CHROMA_HOST/CHROMA_PORT, "
+                    f"REDIS_URL, etc.). See the root .env.example for the full list."
+                ),
+            )
+        )
+
+    if errors:
+        try:
+            raise ConfigValidationError(errors)
+        except ConfigValidationError as exc:
+            print(str(exc), file=sys.stderr)
+            sys.exit(2)
+
+
 def get_default_memory_config():
-    """Get default memory client configuration with sensible defaults."""
-    # Detect vector store based on environment variables
-    vector_store_config = {
-        "collection_name": "openmemory",
-        "host": "mem0_store",
-    }
-    
-    # Check for different vector store configurations based on environment variables
-    if os.environ.get('CHROMA_HOST') and os.environ.get('CHROMA_PORT'):
-        vector_store_provider = "chroma"
-        vector_store_config.update({
-            "host": os.environ.get('CHROMA_HOST'),
-            "port": int(os.environ.get('CHROMA_PORT'))
-        })
-    elif os.environ.get('QDRANT_HOST') and os.environ.get('QDRANT_PORT'):
-        vector_store_provider = "qdrant"
-        vector_store_config.update({
-            "host": os.environ.get('QDRANT_HOST'),
-            "port": int(os.environ.get('QDRANT_PORT'))
-        })
-    elif os.environ.get('WEAVIATE_CLUSTER_URL') or (os.environ.get('WEAVIATE_HOST') and os.environ.get('WEAVIATE_PORT')):
-        vector_store_provider = "weaviate"
-        # Prefer an explicit cluster URL if provided; otherwise build from host/port
-        cluster_url = os.environ.get('WEAVIATE_CLUSTER_URL')
+    """Get default memory client configuration with sensible defaults.
+
+    Supports both the unified MEM0_* / VECTOR_STORE_PROVIDER naming and the
+    legacy per-vendor env var names for backward compatibility.
+    """
+    validate_startup_config()
+
+    vector_store_provider = _resolve_env("VECTOR_STORE_PROVIDER", "VECTOR_STORE", "qdrant").lower()
+    collection_name = _resolve_env("POSTGRES_COLLECTION_NAME", "POSTGRES_COLLECTION_NAME", "openmemory")
+
+    vector_store_config = {"collection_name": collection_name}
+
+    if vector_store_provider == "chroma":
+        vector_store_config.update(
+            {
+                "host": _resolve_env("CHROMA_HOST", "CHROMA_HOST", "mem0_store"),
+                "port": _resolve_env_int("CHROMA_PORT", "CHROMA_PORT", 8000),
+            }
+        )
+    elif vector_store_provider == "qdrant":
+        vector_store_config.update(
+            {
+                "host": _resolve_env("QDRANT_HOST", "QDRANT_HOST", "mem0_store"),
+                "port": _resolve_env_int("QDRANT_PORT", "QDRANT_PORT", 6333),
+            }
+        )
+    elif vector_store_provider == "weaviate":
+        cluster_url = _resolve_env("WEAVIATE_CLUSTER_URL", "WEAVIATE_CLUSTER_URL", "")
         if not cluster_url:
-            weaviate_host = os.environ.get('WEAVIATE_HOST')
-            weaviate_port = int(os.environ.get('WEAVIATE_PORT'))
-            cluster_url = f"http://{weaviate_host}:{weaviate_port}"
+            host = _resolve_env("WEAVIATE_HOST", "WEAVIATE_HOST", "mem0_store")
+            port = _resolve_env_int("WEAVIATE_PORT", "WEAVIATE_PORT", 8080)
+            cluster_url = f"http://{host}:{port}"
+        vector_store_config = {"collection_name": collection_name, "cluster_url": cluster_url}
+    elif vector_store_provider == "redis":
         vector_store_config = {
-            "collection_name": "openmemory",
-            "cluster_url": cluster_url
+            "collection_name": collection_name,
+            "redis_url": _resolve_env("REDIS_URL", "REDIS_URL", "redis://localhost:6379"),
         }
-    elif os.environ.get('REDIS_URL'):
-        vector_store_provider = "redis"
+    elif vector_store_provider == "pgvector":
+        vector_store_config.update(
+            {
+                "host": _resolve_env("POSTGRES_HOST", "PG_HOST", "mem0_store"),
+                "port": _resolve_env_int("POSTGRES_PORT", "PG_PORT", 5432),
+                "dbname": _resolve_env("POSTGRES_DB", "PG_DB", "mem0"),
+                "user": _resolve_env("POSTGRES_USER", "PG_USER", "mem0"),
+                "password": _resolve_env("POSTGRES_PASSWORD", "PG_PASSWORD", "mem0"),
+            }
+        )
+    elif vector_store_provider == "milvus":
+        host = _resolve_env("MILVUS_HOST", "MILVUS_HOST", "mem0_store")
+        port = _resolve_env_int("MILVUS_PORT", "MILVUS_PORT", 19530)
         vector_store_config = {
-            "collection_name": "openmemory",
-            "redis_url": os.environ.get('REDIS_URL')
-        }
-    elif os.environ.get('PG_HOST') and os.environ.get('PG_PORT'):
-        vector_store_provider = "pgvector"
-        vector_store_config.update({
-            "host": os.environ.get('PG_HOST'),
-            "port": int(os.environ.get('PG_PORT')),
-            "dbname": os.environ.get('PG_DB', 'mem0'),
-            "user": os.environ.get('PG_USER', 'mem0'),
-            "password": os.environ.get('PG_PASSWORD', 'mem0')
-        })
-    elif os.environ.get('MILVUS_HOST') and os.environ.get('MILVUS_PORT'):
-        vector_store_provider = "milvus"
-        # Construct the full URL as expected by MilvusDBConfig
-        milvus_host = os.environ.get('MILVUS_HOST')
-        milvus_port = int(os.environ.get('MILVUS_PORT'))
-        milvus_url = f"http://{milvus_host}:{milvus_port}"
-        
-        vector_store_config = {
-            "collection_name": "openmemory",
-            "url": milvus_url,
-            "token": os.environ.get('MILVUS_TOKEN', ''),  # Always include, empty string for local setup
-            "db_name": os.environ.get('MILVUS_DB_NAME', ''),
+            "collection_name": collection_name,
+            "url": f"http://{host}:{port}",
+            "token": _resolve_env("MILVUS_TOKEN", "MILVUS_TOKEN", ""),
+            "db_name": _resolve_env("MILVUS_DB_NAME", "MILVUS_DB_NAME", ""),
             "embedding_model_dims": 1536,
-            "metric_type": "COSINE"  # Using COSINE for better semantic similarity
+            "metric_type": "COSINE",
         }
-    elif os.environ.get('ELASTICSEARCH_HOST') and os.environ.get('ELASTICSEARCH_PORT'):
-        vector_store_provider = "elasticsearch"
-        # Construct the full URL with scheme since Elasticsearch client expects it
-        elasticsearch_host = os.environ.get('ELASTICSEARCH_HOST')
-        elasticsearch_port = int(os.environ.get('ELASTICSEARCH_PORT'))
-        # Use http:// scheme since we're not using SSL
-        full_host = f"http://{elasticsearch_host}"
-        
-        vector_store_config.update({
-            "host": full_host,
-            "port": elasticsearch_port,
-            "user": os.environ.get('ELASTICSEARCH_USER', 'elastic'),
-            "password": os.environ.get('ELASTICSEARCH_PASSWORD', 'changeme'),
-            "verify_certs": False,
-            "use_ssl": False,
-            "embedding_model_dims": 1536
-        })
-    elif os.environ.get('OPENSEARCH_HOST') and os.environ.get('OPENSEARCH_PORT'):
-        vector_store_provider = "opensearch"
-        vector_store_config.update({
-            "host": os.environ.get('OPENSEARCH_HOST'),
-            "port": int(os.environ.get('OPENSEARCH_PORT'))
-        })
-    elif os.environ.get('FAISS_PATH'):
-        vector_store_provider = "faiss"
+    elif vector_store_provider == "elasticsearch":
+        host = _resolve_env("ELASTICSEARCH_HOST", "ELASTICSEARCH_HOST", "mem0_store")
+        if not host.startswith("http"):
+            host = f"http://{host}"
+        vector_store_config.update(
+            {
+                "host": host,
+                "port": _resolve_env_int("ELASTICSEARCH_PORT", "ELASTICSEARCH_PORT", 9200),
+                "user": _resolve_env("ELASTICSEARCH_USER", "ELASTICSEARCH_USER", "elastic"),
+                "password": _resolve_env("ELASTICSEARCH_PASSWORD", "ELASTICSEARCH_PASSWORD", "changeme"),
+                "verify_certs": False,
+                "use_ssl": False,
+                "embedding_model_dims": 1536,
+            }
+        )
+    elif vector_store_provider == "opensearch":
+        vector_store_config.update(
+            {
+                "host": _resolve_env("OPENSEARCH_HOST", "OPENSEARCH_HOST", "mem0_store"),
+                "port": _resolve_env_int("OPENSEARCH_PORT", "OPENSEARCH_PORT", 9200),
+            }
+        )
+    elif vector_store_provider == "faiss":
         vector_store_config = {
-            "collection_name": "openmemory",
-            "path": os.environ.get('FAISS_PATH'),
+            "collection_name": collection_name,
+            "path": _resolve_env("FAISS_PATH", "FAISS_PATH", "/tmp/faiss"),
             "embedding_model_dims": 1536,
-            "distance_strategy": "cosine"
+            "distance_strategy": "cosine",
         }
     else:
-        # Default fallback to Qdrant
+        logging.warning(
+            "Unknown VECTOR_STORE_PROVIDER='%s', falling back to qdrant defaults.",
+            vector_store_provider,
+        )
         vector_store_provider = "qdrant"
-        vector_store_config.update({
-            "port": 6333,
-        })
-    
-    print(f"Auto-detected vector store: {vector_store_provider} with config: {vector_store_config}")
+        vector_store_config.update({"host": "mem0_store", "port": 6333})
 
-    # Detect LLM provider from environment variables
-    llm_provider = os.environ.get('LLM_PROVIDER', 'openai').lower()
-    llm_model = os.environ.get('LLM_MODEL')
-    llm_api_key = os.environ.get('LLM_API_KEY')
-    llm_base_url = os.environ.get('LLM_BASE_URL')
-    ollama_base_url = os.environ.get('OLLAMA_BASE_URL')
+    logging.info(
+        "Auto-detected vector store: %s (host=%s)",
+        vector_store_provider,
+        vector_store_config.get("host") or vector_store_config.get("cluster_url") or vector_store_config.get("path"),
+    )
+
+    llm_provider = _resolve_env("MEM0_LLM_PROVIDER", "LLM_PROVIDER", "openai").lower()
+    llm_model = _resolve_env("MEM0_DEFAULT_LLM_MODEL", "LLM_MODEL", "")
+    llm_api_key = _resolve_env("LLM_API_KEY", "LLM_API_KEY", "")
+    llm_base_url = _resolve_env("LLM_BASE_URL", "LLM_BASE_URL", "")
+    ollama_base_url = _resolve_env("OLLAMA_BASE_URL", "OLLAMA_BASE_URL", "")
 
     llm_config = _create_llm_config(
         provider=llm_provider,
@@ -341,13 +435,13 @@ def get_default_memory_config():
         base_url=llm_base_url,
         ollama_base_url=ollama_base_url,
     )
-    print(f"Auto-detected LLM provider: {llm_provider}")
+    logging.info("Auto-detected LLM provider: %s (model=%s)", llm_provider, llm_config.get("model"))
 
-    # Detect embedder provider from environment variables
-    embedder_provider = os.environ.get('EMBEDDER_PROVIDER', llm_provider if llm_provider == 'ollama' else 'openai').lower()
-    embedder_model = os.environ.get('EMBEDDER_MODEL')
-    embedder_api_key = os.environ.get('EMBEDDER_API_KEY')
-    embedder_base_url = os.environ.get('EMBEDDER_BASE_URL')
+    default_embedder = llm_provider if llm_provider == "ollama" else "openai"
+    embedder_provider = _resolve_env("MEM0_EMBEDDER_PROVIDER", "EMBEDDER_PROVIDER", default_embedder).lower()
+    embedder_model = _resolve_env("MEM0_DEFAULT_EMBEDDER_MODEL", "EMBEDDER_MODEL", "")
+    embedder_api_key = _resolve_env("EMBEDDER_API_KEY", "EMBEDDER_API_KEY", "")
+    embedder_base_url = _resolve_env("EMBEDDER_BASE_URL", "EMBEDDER_BASE_URL", "")
 
     embedder_config = _create_embedder_config(
         provider=embedder_provider,
@@ -357,22 +451,17 @@ def get_default_memory_config():
         ollama_base_url=ollama_base_url,
         llm_base_url=llm_base_url,
     )
-    print(f"Auto-detected embedder provider: {embedder_provider}")
+    logging.info(
+        "Auto-detected embedder provider: %s (model=%s)",
+        embedder_provider,
+        embedder_config.get("model"),
+    )
 
     return {
-        "vector_store": {
-            "provider": vector_store_provider,
-            "config": vector_store_config
-        },
-        "llm": {
-            "provider": llm_provider,
-            "config": llm_config
-        },
-        "embedder": {
-            "provider": embedder_provider,
-            "config": embedder_config
-        },
-        "version": "v1.1"
+        "vector_store": {"provider": vector_store_provider, "config": vector_store_config},
+        "llm": {"provider": llm_provider, "config": llm_config},
+        "embedder": {"provider": embedder_provider, "config": embedder_config},
+        "version": "v1.1",
     }
 
 

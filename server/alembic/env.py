@@ -4,6 +4,9 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 
 from db import Base, _build_database_url
+from mem0.configs.env_loader import load_env
+
+load_env()
 
 # Import models so Base.metadata picks up all tables
 import models  # noqa: F401

@@ -196,6 +196,7 @@ def _render_cli_error(exc: CLIError) -> None:
 
     if is_agent_mode():
         import json as _json
+        import sys as _sys
 
         envelope = {
             "status": "error",
@@ -209,7 +210,7 @@ def _render_cli_error(exc: CLIError) -> None:
         notice = take_notice()
         if notice:
             envelope["mem0_notice"] = notice
-        stdout_console.print(_json.dumps(envelope, default=str))
+        print(_json.dumps(envelope, default=str), file=_sys.stdout)
         return
 
     target = err_console

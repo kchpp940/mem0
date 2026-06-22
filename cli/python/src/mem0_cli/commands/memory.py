@@ -277,7 +277,10 @@ def cmd_delete(
 
     def action(_ctx: CommandContext):
         payload = build_delete_payload(memory_id=memory_id, dry_run=dry_run)
-        result = _ctx.backend.delete(**payload)
+        if dry_run:
+            result = {"id": memory_id, "dry_run": True, "would_delete": True}
+        else:
+            result = _ctx.backend.delete(**payload)
         renderers.render_delete_result(_ctx.render_ctx, result, memory_id=memory_id, dry_run=dry_run)
 
     execute(ctx, action, spinner="Deleting memory...")
@@ -324,7 +327,12 @@ def cmd_delete_all(
             "Delete ALL matching memories (project-wide)?" if project_wide else "Delete ALL your memories?",
             force=force,
         )
-        result = _ctx.backend.delete(**payload)
-        renderers.render_delete_all_result(_ctx.render_ctx, result, project_wide=project_wide)
+        if dry_run:
+            result = {"dry_run": True, "would_delete": True, "scope": payload}
+        else:
+            result = _ctx.backend.delete(**payload)
+        renderers.render_delete_all_result(
+            _ctx.render_ctx, result, project_wide=project_wide, dry_run=dry_run
+        )
 
     execute(ctx, action, spinner="Deleting all memories...")

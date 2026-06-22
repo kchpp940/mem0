@@ -406,8 +406,10 @@ def render_delete_all_result(
 
 def render_status(ctx: RenderContext, result: dict) -> None:
     if ctx.output_mode in ("json", "agent"):
+        connected = bool(result.get("connected", False))
         data = {
-            "connected": result.get("connected", False),
+            "status": "connected" if connected else "disconnected",
+            "connected": connected,
             "backend": result.get("backend", "?"),
             "base_url": result.get("base_url", ""),
         }
@@ -448,10 +450,15 @@ def render_status(ctx: RenderContext, result: dict) -> None:
 
 def render_config_show(ctx: RenderContext, config_data: dict) -> None:
     if ctx.output_mode in ("json", "agent"):
+        data = {
+            "status": "ok",
+            "command": "config show",
+            **config_data,
+        }
         if ctx.output_mode == "agent":
-            _agent_envelope(ctx, config_data)
+            _agent_envelope(ctx, data)
         else:
-            _emit_json(config_data)
+            _emit_json(data)
         return
 
     console.print()

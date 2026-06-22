@@ -59,6 +59,6 @@ def cmd_event_status(
 
     def action(_ctx: CommandContext):
         result = _ctx.backend.get_event(event_id)
-        renderers.render_event_status(_ctx.render_ctx, event_id, result)
+        renderers.render_event_status(_ctx.render_ctx, result)
 
     execute(ctx, action, spinner="Fetching event status...")

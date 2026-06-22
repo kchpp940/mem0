@@ -1,14 +1,10 @@
-"""Background event inspection commands (layered architecture)."""
+"""Background event inspection commands — driven by registry descriptors."""
 
 from __future__ import annotations
 
-from mem0_cli.core import renderers
+from mem0_cli.core.descriptors import EVENT_LIST, EVENT_STATUS
 from mem0_cli.core.options import require_positive
-from mem0_cli.core.wrapper import (
-    CommandContext,
-    build_command_context,
-    execute,
-)
+from mem0_cli.core.registry import run_command
 
 
 def cmd_event_list(
@@ -21,19 +17,13 @@ def cmd_event_list(
 ) -> None:
     require_positive(page, field="--page")
     require_positive(page_size, field="--page-size")
-
-    ctx = build_command_context(
-        command_name="event list",
+    run_command(
+        EVENT_LIST,
         backend=backend,
         config=config,
         output=output,
+        payload_kwargs={"page": page, "page_size": page_size},
     )
-
-    def action(_ctx: CommandContext):
-        results = _ctx.backend.list_events(page=page, page_size=page_size)
-        renderers.render_event_list(_ctx.render_ctx, results)
-
-    execute(ctx, action, spinner="Listing events...")
 
 
 def cmd_event_status(
@@ -43,15 +33,10 @@ def cmd_event_status(
     config=None,
     output: str = "text",
 ) -> None:
-    ctx = build_command_context(
-        command_name="event status",
+    run_command(
+        EVENT_STATUS,
         backend=backend,
         config=config,
         output=output,
+        payload_kwargs={"event_id": event_id},
     )
-
-    def action(_ctx: CommandContext):
-        result = _ctx.backend.get_event(event_id)
-        renderers.render_event_status(_ctx.render_ctx, result)
-
-    execute(ctx, action, spinner="Fetching event status...")

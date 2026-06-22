@@ -1,44 +1,17 @@
-"""Memory CRUD commands using the new layered architecture.
+"""Memory CRUD commands — driven by :mod:`mem0_cli.core.registry` descriptors.
 
-Each command function here follows the same three-step pattern:
-
-1. Build a :class:`CommandContext` from the CLI options.
-2. Define an *action* that uses the layered helpers:
-   - ``requests.build_*_payload`` for request construction
-   - ``ctx.backend.*`` to call the backend
-   - ``renderers.render_*`` to display the result
-3. Pass the context + action to ``wrapper.execute()``.
-
-Option parsing/validation is performed inside the request builders
-(``core/requests.py``), not in the command function itself.  The
-command function only passes through raw Typer option values.
+Each command function is a thin Typer-facing shim that collects CLI options
+and delegates to :func:`~mem0_cli.core.registry.run_command` with the
+appropriate descriptor and payload kwargs.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from mem0_cli.core import renderers
-from mem0_cli.core.options import (
-    require_between,
-    require_positive,
-)
-from mem0_cli.core.requests import (
-    build_add_payload,
-    build_delete_all_payload,
-    build_delete_payload,
-    build_list_payload,
-    build_search_payload,
-    build_update_payload,
-)
-from mem0_cli.core.wrapper import (
-    CommandContext,
-    build_command_context,
-    confirm_destructive,
-    execute,
-)
-
-# ── add ───────────────────────────────────────────────────────────────────
+from mem0_cli.core.descriptors import ADD, DELETE, DELETE_ALL, GET, LIST, SEARCH, UPDATE
+from mem0_cli.core.options import require_between, require_positive
+from mem0_cli.core.registry import run_command
 
 
 def cmd_add(
@@ -59,8 +32,8 @@ def cmd_add(
     categories: str | None = None,
     output: str = "text",
 ) -> None:
-    ctx = build_command_context(
-        command_name="add",
+    run_command(
+        ADD,
         backend=backend,
         config=config,
         output=output,
@@ -68,10 +41,7 @@ def cmd_add(
         agent_id=agent_id,
         app_id=app_id,
         run_id=run_id,
-    )
-
-    def action(_ctx: CommandContext):
-        payload = build_add_payload(
+        payload_kwargs=dict(
             text=text,
             messages=messages,
             file=file,
@@ -80,15 +50,8 @@ def cmd_add(
             no_infer=no_infer,
             expires=expires,
             categories=categories,
-            scope=_ctx.ids,
-        )
-        result = _ctx.backend.add(**payload)
-        renderers.render_add_result(_ctx.render_ctx, result)
-
-    execute(ctx, action, spinner="Adding memory...")
-
-
-# ── search ────────────────────────────────────────────────────────────────
+        ),
+    )
 
 
 def cmd_search(
@@ -110,9 +73,8 @@ def cmd_search(
 ) -> None:
     require_positive(top_k, field="--top-k")
     require_between(threshold, field="--threshold", minimum=0.0, maximum=1.0)
-
-    ctx = build_command_context(
-        command_name="search",
+    run_command(
+        SEARCH,
         backend=backend,
         config=config,
         output=output,
@@ -120,10 +82,7 @@ def cmd_search(
         agent_id=agent_id,
         app_id=app_id,
         run_id=run_id,
-    )
-
-    def action(_ctx: CommandContext):
-        payload = build_search_payload(
+        payload_kwargs=dict(
             query=query,
             top_k=top_k,
             threshold=threshold,
@@ -131,15 +90,8 @@ def cmd_search(
             keyword=keyword,
             filter_json=filter_json,
             fields=fields,
-            scope=_ctx.ids,
-        )
-        results = _ctx.backend.search(**payload)
-        renderers.render_search_results(_ctx.render_ctx, results)
-
-    execute(ctx, action, spinner="Searching memories...")
-
-
-# ── get ───────────────────────────────────────────────────────────────────
+        ),
+    )
 
 
 def cmd_get(
@@ -149,21 +101,13 @@ def cmd_get(
     config=None,
     output: str = "text",
 ) -> None:
-    ctx = build_command_context(
-        command_name="get",
+    run_command(
+        GET,
         backend=backend,
         config=config,
         output=output,
+        payload_kwargs={"memory_id": memory_id},
     )
-
-    def action(_ctx: CommandContext):
-        result = _ctx.backend.get(memory_id)
-        renderers.render_single_memory(_ctx.render_ctx, result)
-
-    execute(ctx, action, spinner="Fetching memory...")
-
-
-# ── list ────────────────────────────────────────────────────────────────
 
 
 def cmd_list(
@@ -183,9 +127,8 @@ def cmd_list(
 ) -> None:
     require_positive(page, field="--page")
     require_positive(page_size, field="--page-size")
-
-    ctx = build_command_context(
-        command_name="list",
+    run_command(
+        LIST,
         backend=backend,
         config=config,
         output=output,
@@ -193,24 +136,14 @@ def cmd_list(
         agent_id=agent_id,
         app_id=app_id,
         run_id=run_id,
-    )
-
-    def action(_ctx: CommandContext):
-        payload = build_list_payload(
+        payload_kwargs=dict(
             page=page,
             page_size=page_size,
             category=category,
             after=after,
             before=before,
-            scope=_ctx.ids,
-        )
-        results = _ctx.backend.list_memories(**payload)
-        renderers.render_list_memories(_ctx.render_ctx, results)
-
-    execute(ctx, action, spinner="Listing memories...")
-
-
-# ── update ────────────────────────────────────────────────────────────────
+        ),
+    )
 
 
 def cmd_update(
@@ -222,26 +155,14 @@ def cmd_update(
     metadata: str | None = None,
     output: str = "text",
 ) -> None:
-    ctx = build_command_context(
-        command_name="update",
+    run_command(
+        UPDATE,
         backend=backend,
         config=config,
         output=output,
+        payload_kwargs=dict(memory_id=memory_id, text=text, metadata=metadata),
+        renderer_extras=dict(memory_id=memory_id),
     )
-
-    def action(_ctx: CommandContext):
-        payload = build_update_payload(
-            memory_id=memory_id,
-            text=text,
-            metadata=metadata,
-        )
-        result = _ctx.backend.update(**payload)
-        renderers.render_update_result(_ctx.render_ctx, result, memory_id=memory_id)
-
-    execute(ctx, action, spinner="Updating memory...")
-
-
-# ── delete ──────────────────────────────────────────────────────────────
 
 
 def cmd_delete(
@@ -253,25 +174,16 @@ def cmd_delete(
     force: bool = False,
     dry_run: bool = False,
 ) -> None:
-    ctx = build_command_context(
-        command_name="delete",
+    run_command(
+        DELETE,
         backend=backend,
         config=config,
         output=output,
+        dry_run=dry_run,
+        force=force,
+        payload_kwargs=dict(memory_id=memory_id, dry_run=dry_run),
+        renderer_extras=dict(memory_id=memory_id),
     )
-
-    def action(_ctx: CommandContext):
-        payload = build_delete_payload(memory_id=memory_id, dry_run=dry_run)
-        if dry_run:
-            result = {"id": memory_id, "dry_run": True, "would_delete": True}
-        else:
-            result = _ctx.backend.delete(**payload)
-        renderers.render_delete_result(_ctx.render_ctx, result, memory_id=memory_id, dry_run=dry_run)
-
-    execute(ctx, action, spinner="Deleting memory...")
-
-
-# ── delete-all ────────────────────────────────────────────────────────────
 
 
 def cmd_delete_all(
@@ -288,36 +200,18 @@ def cmd_delete_all(
     dry_run: bool = False,
     output: str = "text",
 ) -> None:
-    ctx = build_command_context(
-        command_name="delete_all",
+    project_wide = all_project or all_
+    run_command(
+        DELETE_ALL,
         backend=backend,
         config=config,
         output=output,
+        dry_run=dry_run,
+        force=force,
         user_id=user_id,
         agent_id=agent_id,
         app_id=app_id,
         run_id=run_id,
+        payload_kwargs=dict(all_project=all_project, all_=all_, dry_run=dry_run),
+        renderer_extras=dict(project_wide=project_wide, dry_run=dry_run),
     )
-
-    def action(_ctx: CommandContext):
-        project_wide = all_project or all_
-        payload = build_delete_all_payload(
-            scope=_ctx.ids,
-            all_project=all_project,
-            all_=all_,
-            dry_run=dry_run,
-        )
-        confirm_destructive(
-            _ctx,
-            "Delete ALL matching memories (project-wide)?" if project_wide else "Delete ALL your memories?",
-            force=force,
-        )
-        if dry_run:
-            result = {"dry_run": True, "would_delete": True, "scope": payload}
-        else:
-            result = _ctx.backend.delete(**payload)
-        renderers.render_delete_all_result(
-            _ctx.render_ctx, result, project_wide=project_wide, dry_run=dry_run
-        )
-
-    execute(ctx, action, spinner="Deleting all memories...")
